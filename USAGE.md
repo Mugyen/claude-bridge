@@ -20,7 +20,7 @@ nohup node bridge-server.mjs&
 
 Open 2+ Claude Code sessions. They auto-register on your first message, lots of hooks have been installed on start, stop, in-between tool use, just refer this communication as bridge, ask both sessions to register on bridge, check who all sessions are alive, and then you can simply ask one session to ask another session and they would reply appropriately, make sure you have the names of the sessions with you. Start asking questions between them.
 
-#### ‼️ NOTE: if one session is sitting idle and another is asking it question, it cannot reply, this feature is not available in claude-code harness, we have deferred in implementing this. So when session A is asking something to session B, make sure it is not idle and rest should be fine, if it is idle, just tell session B to "reply", one word, should be enough!  
+#### ‼️ NOTE: if one session is sitting idle and another is asking it question, it cannot reply, this feature is not available in claude-code harness, we have deferred in implementing this. So when session A is asking something to session B, make sure session B is not idle and rest should be fine, if session B is idle whilst session A is trying to ask something, just tell session B to "reply", one word, should be enough! or even "." should be enough, there is stop hook on the session. 
 
 ## What install.sh does
 
