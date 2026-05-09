@@ -7,8 +7,8 @@ You are connected to **cc-bridge**, a message broker that lets you communicate w
 ## Setup (do this once at session start)
 
 1. Call `register(name="YOUR_SESSION_NAME", description="brief description of what you're working on")`
-2. Call `list_sessions()` to see who else is connected
-3. Call `read_scratchpad()` to check if any session has shared context
+2. **Tell the user your registered name** — e.g. "I've registered on the bridge as 'api-builder'." The user needs this name to direct other sessions to talk to you.
+3. Call `list_sessions()` to see who else is connected
 
 ## When you see a 🔔 BRIDGE QUESTION in your tool output
 
