@@ -216,19 +216,42 @@ async function executeTool(sseId, name, args) {
       if (existing && existing !== sseId && sseClients.has(existing)) {
         return { error: `Name "${sName}" is taken by another active session.` };
       }
+      // Reconnect cleanup: if this claude_session_id was previously registered on a
+      // different SSE connection (reconnect scenario), close the old connection and
+      // retire the old name. This prevents ghost sessions from lingering.
+      if (claude_session_id) {
+        const oldName = claudeIdToName.get(claude_session_id);
+        if (oldName && oldName !== sName) {
+          const oldSSE = nameToSSE.get(oldName);
+          if (oldSSE && oldSSE !== sseId) {
+            // Close the stale SSE connection
+            const oldRes = sseClients.get(oldSSE);
+            if (oldRes && !oldRes.destroyed) oldRes.end();
+            sseClients.delete(oldSSE);
+            sessions.delete(oldSSE);
+            nameToSSE.delete(oldName);
+            // Migrate pending asks from old name to new name
+            for (const m of messages.values()) {
+              if (m.to === oldName && m.answer === null) {
+                m.to = sName;
+              }
+            }
+            console.log(`${ts()} ↪ reconnect: "${oldName}" → "${sName}" (old SSE closed, pending asks migrated)`);
+          }
+        }
+      }
+
       // Rename cleanup: if this sseId previously held a different name, retire it
       // so future ask(to="<old-name>") fails fast instead of dangling forever.
-      // Also unblock any in-flight asks targeting the old name with an explanatory error.
       const prev = sessions.get(sseId);
       if (prev && prev.name !== sName && nameToSSE.get(prev.name) === sseId) {
         nameToSSE.delete(prev.name);
         for (const m of messages.values()) {
           if (m.to === prev.name && m.answer === null) {
-            m.answer = `[bridge] "${prev.name}" was renamed to "${sName}" before answering. Re-ask under the new name if you still need this.`;
-            m.answeredAt = Date.now();
+            m.to = sName;
           }
         }
-        console.log(`${ts()} ↪ rename: "${prev.name}" → "${sName}" (old name retired, dangling asks failed)`);
+        console.log(`${ts()} ↪ rename: "${prev.name}" → "${sName}" (old name retired, pending asks migrated)`);
       }
       sessions.set(sseId, { name: sName, description, connectedAt: Date.now() });
       nameToSSE.set(sName, sseId);
@@ -236,7 +259,6 @@ async function executeTool(sseId, name, args) {
       // Persist claude_session_id → name so the hook can resolve canonical name
       if (claude_session_id) {
         claudeIdToName.set(claude_session_id, sName);
-        // Also rewrite the on-disk name file to keep everything in sync
         try {
           const namePath = `/tmp/cc-bridge-${claude_session_id}.name`;
           fs.writeFileSync(namePath, sName);
