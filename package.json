@@ -1,0 +1,26 @@
+{
+  "name": "cc-bridge",
+  "version": "2.0.0",
+  "description": "Real-time Q&A between Claude Code sessions",
+  "main": "bridge-server.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node bridge-server.mjs",
+    "install-bridge": "./install.sh",
+    "uninstall-bridge": "./install.sh --uninstall",
+    "check": "./install.sh --check"
+  },
+  "keywords": [
+    "claude-code",
+    "mcp",
+    "bridge",
+    "multi-session",
+    "inter-session",
+    "sse"
+  ],
+  "author": "Vedant Vijay <vedant@mugyen.com>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
