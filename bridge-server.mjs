@@ -118,12 +118,16 @@ function getThread(a, b) {
   const ids = threads.get(tkey(a, b)) || [];
   return ids.map((id) => {
     const m = messages.get(id);
-    return { id: m.id, from: m.from, to: m.to, question: m.question, answer: m.answer ?? "(pending)", ts: m.ts };
+    return { id: m.id, from: m.from, to: m.to, question: m.question, answer: m.answer, answered: m.answer !== null, ts: m.ts };
   });
 }
 
 function recentAnswered(a, b, n = 5) {
-  return getThread(a, b).filter((m) => m.answer !== "(pending)").slice(-n);
+  return getThread(a, b).filter((m) => m.answered).slice(-n);
+}
+
+function getPendingFor(name) {
+  return [...messages.values()].filter((m) => m.to === name && m.answer === null);
 }
 
 // ─── MCP Tool Definitions ───────────────────────────────────────────────────
@@ -163,15 +167,20 @@ const TOOLS = [
   {
     name: "reply",
     description:
-      "Reply to a pending question. Include: the answer, WHY, user preferences that influenced it, alternatives rejected, and gotchas.",
+      "Reply to a pending question. If message_id is omitted and you have exactly one pending question, it auto-targets that one.",
     inputSchema: {
       type: "object",
       properties: {
-        message_id: { type: "string" },
+        message_id: { type: "string", description: "Target message ID. Optional if you have exactly one pending question." },
         answer: { type: "string", description: "Detailed, self-contained answer." },
       },
-      required: ["message_id", "answer"],
+      required: ["answer"],
     },
+  },
+  {
+    name: "check_inbox",
+    description: "Check for unanswered questions addressed to you. Call this instead of polling get_thread with every session name.",
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "get_thread",
@@ -313,13 +322,37 @@ async function executeTool(sseId, name, args) {
     }
 
     case "reply": {
-      const msg = messages.get(args.message_id);
-      if (!msg) return { error: `No message "${args.message_id}"` };
+      let msg;
+      if (args.message_id) {
+        msg = messages.get(args.message_id);
+        if (!msg) return { error: `No message "${args.message_id}"` };
+      } else {
+        if (!myName) return { error: "Call register() first." };
+        const pending = getPendingFor(myName);
+        if (pending.length === 0) return { error: "No pending questions to reply to." };
+        if (pending.length > 1) return { error: `${pending.length} pending questions — specify message_id. Use check_inbox() to see them.`, pending: pending.map((m) => ({ id: m.id, from: m.from, question: m.question.slice(0, 100) })) };
+        msg = pending[0];
+      }
       if (msg.answer !== null) return { error: "Already answered.", existing: msg.answer };
       msg.answer = args.answer;
       msg.answeredAt = Date.now();
-      console.log(`${ts()} ← reply to ${args.message_id} (${args.answer.length} chars)`);
-      return { ok: true, message_id: args.message_id };
+      console.log(`${ts()} ← reply to ${msg.id} (${args.answer.length} chars)`);
+      return { ok: true, message_id: msg.id };
+    }
+
+    case "check_inbox": {
+      if (!myName) return { error: "Call register() first." };
+      const pending = getPendingFor(myName);
+      return {
+        session: myName,
+        pending_count: pending.length,
+        questions: pending.map((m) => ({
+          id: m.id,
+          from: m.from,
+          question: m.question,
+          asked_at: new Date(m.ts).toISOString(),
+        })),
+      };
     }
 
     case "get_thread": {
@@ -408,7 +441,7 @@ const server = http.createServer(async (req, res) => {
 
     switch (rpc.method) {
       case "initialize":
-        result = { protocolVersion: "2024-11-05", serverInfo: { name: "cc-bridge", version: "2.0.0" }, capabilities: { tools: {} } };
+        result = { protocolVersion: "2024-11-05", serverInfo: { name: "cc-bridge", version: "2.1.0" }, capabilities: { tools: {} } };
         break;
       case "tools/list":
         result = { tools: TOOLS };
