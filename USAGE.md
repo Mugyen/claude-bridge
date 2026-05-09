@@ -23,21 +23,37 @@ That's it. The install script configures hooks, registers the MCP server, and ad
 
 ### What install.sh does behind the scenes
 
+**Claude Code CLI:**
 1. Checks prerequisites (node >= 18, jq, curl, claude)
 2. Makes hook scripts executable
 3. Adds 5 hooks to `~/.claude/settings.json` -- merges with your existing hooks, doesn't overwrite
 4. Registers the MCP server: `claude mcp add --transport sse --scope user bridge`
 5. Appends [BRIDGE.md](BRIDGE.md) protocol docs to `~/.claude/CLAUDE.md` so agents know how to use the bridge
 
-The script is idempotent -- running it twice won't duplicate anything.
+**Claude Desktop App (macOS only):**
+6. Adds `cc-bridge` MCP server to `~/Library/Application Support/Claude/claude_desktop_config.json` pointing to the stdio adapter (`bridge-stdio.mjs`)
+
+The script is idempotent -- running it twice won't duplicate anything. It handles both CLI and Desktop in one shot.
 
 ---
 
 ## Part 2: Claude Desktop App Setup
 
-The Claude Desktop app (macOS) can also join the bridge -- Chat, Cowork, and Code tabs all get access to bridge tools. Desktop sessions connect through a stdio adapter since the app only supports stdio MCP transport (not SSE).
+The Claude Desktop app (macOS) can also join the bridge -- Chat, Cowork, and Code tabs all get access to bridge tools. Desktop sessions connect through a stdio adapter (`bridge-stdio.mjs`) since the app only supports stdio MCP transport (not SSE).
 
-### What you do (one-time, ~1 minute)
+### If you ran install.sh (recommended)
+
+`install.sh` already configured the Desktop app for you. Just:
+
+1. **Quit and relaunch Claude Desktop** -- the app reads its config on launch
+2. **Start the bridge server** if not already running: `nohup node bridge-server.mjs &`
+3. Open any Chat, Cowork, or Code conversation and tell it:
+
+> "Register on the bridge as 'desktop' and list who's online"
+
+That's it. The agent now has all 8 bridge tools available.
+
+### Manual setup (if you didn't use install.sh)
 
 **Step 1:** Make sure the bridge server is running (from Part 1 setup).
 
@@ -62,9 +78,9 @@ Add the `mcpServers` block (merge with existing content if the file already has 
 
 Replace `/absolute/path/to/` with the actual path where you cloned the repo.
 
-**Step 3:** Quit and relaunch Claude Desktop. The app reads the config on launch.
+**Step 3:** Quit and relaunch Claude Desktop.
 
-**Step 4:** Done. Open any Chat, Cowork, or Code conversation and tell it:
+**Step 4:** Open any Chat, Cowork, or Code conversation and tell it:
 
 > "Register on the bridge as 'desktop' and list who's online"
 
@@ -285,15 +301,13 @@ Replace `/path/to/cc-bridge` with the actual repo path.
 
 ## Uninstalling
 
-### Automated (CLI)
+### Automated (CLI + Desktop)
 
 ```bash
 ./install.sh --uninstall
 ```
 
-### Desktop app
-
-Remove the `cc-bridge` entry from `~/Library/Application Support/Claude/claude_desktop_config.json` and relaunch the app.
+Removes CLI hooks, MCP registration, CLAUDE.md protocol docs, Desktop app config, and temp files -- all in one command. Relaunch the Desktop app after.
 
 ### Or tell your agent
 

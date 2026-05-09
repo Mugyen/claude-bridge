@@ -1,7 +1,7 @@
 {
   "name": "cc-bridge",
-  "version": "2.0.0",
-  "description": "Real-time Q&A between Claude Code sessions",
+  "version": "2.1.0",
+  "description": "Real-time Q&A between Claude sessions — CLI, Desktop app, and Cowork",
   "main": "bridge-server.mjs",
   "type": "module",
   "scripts": {
@@ -16,7 +16,9 @@
     "bridge",
     "multi-session",
     "inter-session",
-    "sse"
+    "sse",
+    "stdio",
+    "claude-desktop"
   ],
   "author": "Vedant Vijay <vedant@mugyen.com>",
   "license": "MIT",
