@@ -12,13 +12,8 @@ PORT="${CC_BRIDGE_PORT:-7400}"
 
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
-STOP_HOOK_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null)
 
 [ -z "$SESSION_ID" ] && exit 0
-
-# Avoid infinite loops: if we already blocked once and Claude is trying to stop again,
-# let it stop. (Claude likely just replied to the question.)
-[ "$STOP_HOOK_ACTIVE" = "true" ] && exit 0
 
 # Resolve canonical name (same logic as PostToolUse hook)
 WHOAMI=$(curl -sf --max-time 1 "http://localhost:${PORT}/whoami?session_id=${SESSION_ID}" 2>/dev/null)
