@@ -3,24 +3,17 @@
 **Real-time Q&A between Claude Code sessions -- no copy-paste, no context switching, no human message routing.**
 
 ```
-Terminal 1 (api-builder)                          Terminal 2 (frontend)
-────────────────────────                          ────────────────────
-Building auth middleware...                       Need JWT config from api-builder...
+You (to Session A):  "Ask the frontend session what auth flow they're using"
+You (to Session B):  "Build the login page"
 
-                                                  > ask(to="api-builder",
-                                                  >   question="What middleware validates
-                                                  >   JWT tokens and where is the signing
-                                                  >   secret configured?")
+                     ── meanwhile, behind the scenes ──
 
-  BRIDGE QUESTION from "frontend":                (blocked, waiting...)
-  "What middleware validates JWT tokens..."
+Session A:  ask(to="frontend", question="What auth flow are you implementing?
+            I need to match the API middleware to your token format.")
 
-  > reply(message_id="a1b2c3d4",
-  >   answer="Auth middleware is in
-  >   /src/middleware/auth.ts, JWT_SECRET
-  >   from .env, 24h access / 7d refresh...")
-                                                  Got answer! Continuing with auth
-                                                  integration using the exact config...
+Session B:  [sees bridge question, replies with JWT config, file paths, reasoning]
+
+Session A:  [unblocks, continues with the exact config — you never touched it]
 ```
 
 Two sessions. One question. Zero human involvement.
@@ -29,14 +22,13 @@ Two sessions. One question. Zero human involvement.
 
 ## ✨ What this is
 
-- **MCP server** connecting Claude Code sessions via blocking ask/reply
-- **Auto-registration** via hooks -- sessions join the bridge automatically on start
-- **Three-layer question delivery** -- PostToolUse + Stop hook + manual poke covers ~95% of cases
-- **Thread history with deduplication** -- no repeated questions, full conversation context
-- **Scratchpad broadcasting** -- async context sharing for decisions and constraints
-- **Self-healing reconnection** -- hooks detect dropped registrations and re-register
-- **SSE keepalive** -- 25s pings prevent idle disconnects
-- **Zero dependencies** -- pure Node.js stdlib, no npm install needed
+- :bridge_at_night: **MCP server** that lets Claude Code sessions talk to each other via blocking ask/reply
+- :robot: **Fully automatic** -- sessions register themselves, discover peers, and answer each other's questions
+- :hook: **Hook-driven** -- 5 lifecycle hooks handle registration, question delivery, and cleanup without human intervention
+- :thread: **Thread history with deduplication** -- agents build on prior answers, never re-ask the same question
+- :mega: **Scratchpad broadcasting** -- agents share decisions and constraints proactively
+- :adhesive_bandage: **Self-healing** -- dropped connections trigger automatic re-registration
+- :package: **Zero dependencies** -- pure Node.js stdlib, no npm install needed
 
 ## ❌ What this isn't
 
@@ -46,37 +38,34 @@ Two sessions. One question. Zero human involvement.
 - :no_entry_sign: Not a message queue or pub/sub system
 - :no_entry_sign: Not a replacement for shared files/git for large artifacts
 - :no_entry_sign: Not Windows-compatible (uses /tmp, bash hooks)
-- :no_entry_sign: Not a Claude Code plugin/extension -- it's hooks + standalone MCP server
 
 ## :muscle: Why this exists
 
-You're running 2-5 Claude Code sessions on the same codebase. They make conflicting decisions. They duplicate work. One blocks on a question only another can answer. You become the human message router -- copy-pasting between terminals, losing your own train of thought, context-switching until you forget what *you* were doing.
+You're running 2-5 Claude Code agents on the same codebase. They make conflicting decisions. They duplicate work. One blocks on a question only another can answer. You become the human message router -- copy-pasting between terminals, losing your own train of thought.
 
 | Alternative | Limitation |
 |---|---|
-| Copy-paste between terminals | Manual, error-prone, you become the bottleneck |
-| Shared CLAUDE.md file | Async only, no blocking Q&A, no interruption when updated |
+| Copy-paste between terminals | You become the bottleneck, context gets lost in translation |
+| Shared CLAUDE.md file | Async only, no blocking Q&A, agents don't see updates mid-turn |
 | Git commits as messages | Too slow, requires commit-push-pull per question |
 | Worktrees with shared notes | No interruption mechanism, idle sessions never see updates |
 | Custom scripts + file watchers | No blocking semantics, no thread history, no dedup |
 
-I wanted sessions to talk to each other without me in the loop. So I built it.
+I wanted my agents to talk to each other without me in the loop. So I built it.
 
 ## :busts_in_silhouette: Who this is for
 
 ### ✅ Use this if you:
-- Run 2+ Claude Code sessions on the same machine simultaneously
-- Want sessions to coordinate decisions without your intervention
-- Work on multi-component projects (API + frontend + infra + tests)
-- Want blocking Q&A -- asker waits for a real answer, not a stale file
-- Prefer zero-dependency tools that just work
+- Run 2+ Claude Code sessions simultaneously on the same machine
+- Want your agents to coordinate without you relaying messages
+- Work on multi-component projects where one agent's decisions affect another
+- Want blocking Q&A -- the asking agent waits for a real answer, not a stale file
 
 ### ❌ Don't use this if you:
 - Only ever run one Claude Code session at a time
 - Need cross-machine or team-wide collaboration
 - Want persistent message history across server restarts
 - Need Windows support
-- Want a production message broker (this is a dev tool)
 
 ## :wrench: Tech stack
 
@@ -94,9 +83,9 @@ I wanted sessions to talk to each other without me in the loop. So I built it.
 | Requirement | Why | How to verify |
 |---|---|---|
 | Node.js >= 18 | Uses `node:` imports, `crypto.randomUUID` | `node -e "console.log(process.version)"` |
-| jq | Hook scripts parse JSON from Claude Code's stdin | `jq --version` |
-| curl | Hook scripts call bridge REST endpoints | `curl --version` |
-| Claude Code CLI | Hooks API is the integration layer; `claude mcp add` registers the server | `claude --version` |
+| jq | Hook scripts parse JSON | `jq --version` |
+| curl | Hook scripts call bridge endpoints | `curl --version` |
+| Claude Code CLI | Hooks + MCP registration | `claude --version` |
 | macOS or Linux | Uses /tmp for IPC, bash for hooks | `uname` |
 
 ## :brain: How it works under the hood
@@ -108,18 +97,18 @@ Session A (Claude Code)        cc-bridge (:7400)           Session B (Claude Cod
 ───────────────────────        ─────────────────           ───────────────────────
 
 SessionStart hook ──────────→  (bridge running)  ←──────── SessionStart hook
-  register(name, sid)             MCP over SSE       register(name, sid)
+  auto-registers                  MCP over SSE       auto-registers
 
-User asks something...         7 MCP tools:            User asks something...
-Claude works, calls tools      register, ask,          Claude works, calls tools
+You: "build the API"           7 MCP tools:            You: "build the frontend"
+Agent works, calls tools       register, ask,          Agent works, calls tools
                                reply, list_sessions,
                                get_thread, broadcast,
                                read_scratchpad
 
 ask(to="B", question) ──────→ queue question ──────────→ PostToolUse hook fires
-  (blocks, waiting)            messages Map              curl /pending → sees Q
-                               ┌──────────┐              injects into context
-                               │ question │              via additionalContext
+  (blocks, waiting)            messages Map              sees question, injects
+                               ┌──────────┐              into agent's context
+                               │ question │
                                │ (no ans) │
                                └──────────┘
                                                          B reads Q, calls reply()
@@ -130,38 +119,26 @@ ask(to="B", question) ──────→ queue question ───────
   ←──── answer returned ──────
   (continues work)
 
-If B is idle:                  Stop hook fires ─────────→ blocks idle, re-injects Q
-                               {"decision":"block",       B wakes up, answers
-                                "reason": "..."}
+If B is going idle:            Stop hook ───────────────→ blocks idle, re-injects Q
+                               {"decision":"block"}       B wakes up, answers
 ```
 
 ### In one paragraph
 
-cc-bridge runs a single Node.js HTTP server speaking two protocols. MCP over SSE provides tools (ask, reply, register, broadcast) that Claude Code sessions call directly. Plain HTTP REST (`/pending`, `/whoami`, `/health`) serves bash hook scripts that can't speak MCP. When session A calls `ask()`, the server queues the question and blocks A's tool call for up to 5 minutes. B's PostToolUse hook polls `/pending` on every tool use, discovers the question, and injects it into B's context via `additionalContext` JSON. If B finishes a turn before answering, the Stop hook catches the transition and blocks it. B calls `reply()`, which unblocks A instantly.
+cc-bridge runs a single Node.js HTTP server speaking two protocols. MCP over SSE provides tools (ask, reply, register, broadcast) that agents call directly. Plain HTTP REST serves bash hook scripts that handle auto-registration and question delivery. When agent A calls `ask()`, the server queues the question and blocks A's tool call for up to 5 minutes. B's hooks discover the question and inject it into B's context. B calls `reply()`, which unblocks A instantly.
 
 ### Why this architecture works
 
-- **Single server, two protocols** -- bash hooks can't speak MCP (no SSE client), so they use REST. Both read/write the same in-memory Maps.
-- **Blocking `ask()` with server-side long-poll** -- avoids client-side polling loops. Asker's tool call simply doesn't return until the answer arrives.
-- **Stop hook catches the idle gap** -- PostToolUse only fires during active tool use. The Stop hook fires right before Claude goes idle, covering the ~90% case.
-- **In-memory state with 30-day GC** -- no persistence layer to manage, no database dependency. Hourly sweep prunes stale data.
-- **25s SSE keepalive pings** -- Claude Code's MCP client drops idle connections after ~5 minutes. Server-side comment pings keep TCP warm.
-
-### Things you can configure
-
-```bash
-# Port (default 7400)
-export CC_BRIDGE_PORT=8888
-node bridge-server.mjs --port 8888
-
-# Override auto-generated session name
-export CC_BRIDGE_SESSION=api-builder
-```
+- **Single server, two protocols** -- bash hooks can't speak MCP, so they use REST. Both read/write the same in-memory state.
+- **Blocking `ask()` with server-side long-poll** -- the asking agent's tool call simply doesn't return until the answer arrives.
+- **Stop hook catches the idle gap** -- fires right before an agent goes idle, covering ~95% of delivery cases.
+- **In-memory state with 30-day GC** -- no persistence layer to manage, no database dependency.
+- **25s SSE keepalive pings** -- prevents Claude Code's MCP client from dropping idle connections.
 
 ## :book: More
 
-- **[USAGE.md](USAGE.md)** -- installation, configuration, tool reference, troubleshooting
-- **[BRIDGE.md](BRIDGE.md)** -- protocol docs (what Claude reads to know how to use the bridge)
+- **[USAGE.md](USAGE.md)** -- setup (what you do vs what to tell your agent), troubleshooting
+- **[BRIDGE.md](BRIDGE.md)** -- protocol docs (what the agent reads to know how to use the bridge)
 - **[LICENSE](LICENSE)** -- MIT
 
 ## :construction: Status
