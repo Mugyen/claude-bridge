@@ -103,7 +103,7 @@ cat ~/cc-bridge/BRIDGE.md >> ~/.claude/CLAUDE.md
 ### 5. Start the bridge
 
 ```bash
-node ~/cc-bridge/bridge-server.mjs
+nohup node ~/cc-bridge/bridge-server.mjs &
 ```
 
 ## Configuration
