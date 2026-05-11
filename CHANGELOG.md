@@ -11,6 +11,9 @@ _Add entries here as you work on the next version. Move them under a dated
 heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
+### Removed
+- **npm package (`@vijay2411/claude-bridge`) and `bin/cli.mjs`** — the scoped npm package was wired up but never published. Removed entirely so the repo doesn't carry npm publishing infrastructure we don't intend to maintain. `package.json` is now marked `private: true`. Single install path is the curl bootstrap.
+
 ### Fixed
 - **Hook MCP-cache fallthrough on mid-session installs.** When `claude-bridge` is
   installed during an already-open Claude Code session, the SessionStart hook
@@ -39,13 +42,9 @@ heading when you tag the release and bump `package.json` + the banner in
 - Bumped to v2.4.0.
 
 ### Added
-- **One-line installers**:
-  - `curl -fsSL https://vijay2411.github.io/claude-bridge/install.sh | bash` — bootstrap script hosted on the Pages site clones the repo to `~/.local/share/claude-bridge` and runs the in-repo `install.sh`.
-  - `npx @vijay2411/claude-bridge install` — published as a scoped npm package. The `bin/cli.mjs` wrapper copies package files to the same `~/.local/share/claude-bridge` location before running `install.sh`, so absolute paths written to `~/.claude/settings.json` survive npm cache cleanup. Other subcommands: `start`, `stop`, `restart`, `check`, `uninstall`, `serve`, `help`.
-  - Both install paths land in the same directory and produce identical state.
-- **`bin/cli.mjs`** — Node CLI dispatcher for the npm package.
-- **`site/install.sh`** — bootstrap script served via GitHub Pages.
-- Install CTA on the site now shows both `curl` and `npx` commands side by side.
+- **One-line installer** — `curl -fsSL https://vijay2411.github.io/claude-bridge/install.sh | bash`. Bootstrap script hosted on the Pages site clones the repo to `~/.local/share/claude-bridge` and runs the in-repo `install.sh`. Lives at `site/install.sh`.
+- **Demo image at top of README** (`docs/demo.jpg`) showing two real Claude sessions chatting through the bridge — a Desktop session on the left, a CLI session on the right, with the bridge agent taking a victory lap. The "what this does" beats any prose pitch.
+- **Install CTA on the site** copies the curl command to clipboard.
 - **GitHub Pages deploy** — site shipped at <https://vijay2411.github.io/claude-bridge/>. `.github/workflows/deploy-pages.yml` deploys `site/` on every push to `main` that touches `site/**`. Canonical, og:url, twitter:image, sitemap, robots all point at the Pages URL.
 - **Showcase site at `site/`** — single-page static landing built with the `anti-slop-frontend` skill workflow. Hero animation is a hand-sketched SVG node graph: 5 labeled Claude agents (frontend / backend / research / db / tests) connected with pencil-wobble lines, with message packets traveling along the wires and a live transcript mirroring the conversation. Editorial dark palette (warm-black + bone + acid-yellow + terracotta + dusty teal), JetBrains Mono display + Instrument Serif italic accents, no build step. Local preview: `cd site && python3 -m http.server 5173`.
 - **SEO pass on `site/`** — full `<head>` metadata, Open Graph + Twitter Card with 1200x630 `og-image.png`, JSON-LD `SoftwareApplication` block, favicon set (`favicon.ico`, `favicon.svg`, `apple-touch-icon.png`), web app `manifest.json`, `robots.txt`, `sitemap.xml`, semantic HTML audit, skip-link, focus rings, SVG `<title>`/`<desc>`. Lighthouse: SEO/A11y/Best-Practices 100, Performance 91.

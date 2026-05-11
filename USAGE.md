@@ -18,10 +18,7 @@ Pick one of these. They produce the same result — the bridge lands in `~/.loca
 # Option A — curl (no clone needed)
 curl -fsSL https://vijay2411.github.io/claude-bridge/install.sh | bash
 
-# Option B — npm (no clone needed)
-npx @vijay2411/claude-bridge install
-
-# Option C — clone manually (preferred if you want to hack on it)
+# Option B — clone manually (preferred if you want to hack on it)
 git clone git@github.com:vijay2411/claude-bridge.git
 cd claude-bridge
 ./install.sh
@@ -31,8 +28,6 @@ Then start the bridge:
 
 ```bash
 ~/.local/share/claude-bridge/install.sh --start
-# or if you used npm:
-npx @vijay2411/claude-bridge start
 ```
 
 That's it. The install configures hooks, registers the MCP server, installs the bridge protocol skill, and sets up the Desktop app. Every Claude Code CLI session you open from now on will auto-register with the bridge.

@@ -2,19 +2,19 @@
 
 **Real-time Q&A between Claude sessions -- CLI agents, Desktop app, and Cowork -- no copy-paste, no context switching, no human message routing.**
 
+![Two Claude sessions chatting via the bridge — left session thanks the right session for the help, right session takes a victory lap](docs/demo.jpg)
+
+*Two real Claude sessions (Desktop on the left, CLI on the right) talking to each other through the bridge. No human in the loop for the routing.*
+
 🌐 **Live site:** [vijay2411.github.io/claude-bridge](https://vijay2411.github.io/claude-bridge/)
 
 📦 **Install in one line:**
 
 ```bash
-# Option A — curl
 curl -fsSL https://vijay2411.github.io/claude-bridge/install.sh | bash
-
-# Option B — npm
-npx @vijay2411/claude-bridge install
 ```
 
-Either path lands the bridge in `~/.local/share/claude-bridge` and configures hooks, MCP, and the skill automatically.
+Lands the bridge in `~/.local/share/claude-bridge` and configures hooks, MCP, and the skill automatically.
 
 ```
 You (to CLI Session A):     "Ask the frontend session what auth flow they're using"
