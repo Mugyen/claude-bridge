@@ -2,6 +2,8 @@
 
 **Real-time Q&A between Claude sessions -- CLI agents, Desktop app, and Cowork -- no copy-paste, no context switching, no human message routing.**
 
+🌐 **Live site:** [vijay2411.github.io/claude-bridge](https://vijay2411.github.io/claude-bridge/)
+
 ```
 You (to CLI Session A):     "Ask the frontend session what auth flow they're using"
 You (to CLI Session B):     "Build the login page"

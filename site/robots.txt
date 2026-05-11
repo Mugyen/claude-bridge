@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://github.com/vijay2411/claude-bridge/sitemap.xml
+Sitemap: https://vijay2411.github.io/claude-bridge/sitemap.xml
