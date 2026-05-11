@@ -133,4 +133,4 @@ cc-bridge runs a single Node.js HTTP server speaking MCP over SSE. Claude Code C
 
 ## :construction: Status
 
-Works. Built and battle-tested across 2-5 concurrent sessions daily (CLI + Desktop app). macOS primary, Linux should work (untested). In-memory only -- server restart loses state. PRs welcome.
+Works. Used daily across 2-5 concurrent sessions (CLI + Desktop app). macOS primary, Linux should work (untested). In-memory only -- server restart loses state. PRs welcome.

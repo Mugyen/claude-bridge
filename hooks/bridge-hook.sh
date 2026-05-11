@@ -14,6 +14,12 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 [ -z "$SESSION_ID" ] && exit 0
 
+# Skip if bridge MCP is not registered (session predates install or MCP removed)
+MCP_FILE="/tmp/cc-bridge-${SESSION_ID}.mcp"
+if [ -f "$MCP_FILE" ] && [ "$(cat "$MCP_FILE")" = "no" ]; then
+  exit 0
+fi
+
 # Helper: emit a PostToolUse JSON output that injects $1 as additionalContext
 emit_context() {
   local msg="$1"

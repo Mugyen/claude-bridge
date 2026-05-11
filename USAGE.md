@@ -16,10 +16,12 @@ For Desktop app support, you only need Node.js >= 18 and the Claude Desktop app.
 git clone git@github.com:vijay2411/claude-code-sessions-bridge.git
 cd claude-code-sessions-bridge
 ./install.sh
-nohup node bridge-server.mjs &
+./install.sh --start
 ```
 
-That's it. The install script configures hooks, registers the MCP server, and adds protocol docs to your CLAUDE.md. Every Claude Code CLI session you open from now on will auto-register with the bridge.
+That's it. The install script configures hooks, registers the MCP server, installs the bridge protocol skill, and optionally sets up the Desktop app. Every Claude Code CLI session you open from now on will auto-register with the bridge.
+
+**Already-open Claude sessions need to be restarted** to pick up the new MCP server. Only sessions started after `install.sh` runs will have bridge tools available.
 
 ### What install.sh does behind the scenes
 
@@ -28,12 +30,24 @@ That's it. The install script configures hooks, registers the MCP server, and ad
 2. Makes hook scripts executable
 3. Adds 5 hooks to `~/.claude/settings.json` -- merges with your existing hooks, doesn't overwrite
 4. Registers the MCP server: `claude mcp add --transport sse --scope user bridge`
-5. Appends [BRIDGE.md](BRIDGE.md) protocol docs to `~/.claude/CLAUDE.md` so agents know how to use the bridge
+5. Installs the bridge protocol skill to `~/.claude/skills/cc-bridge/SKILL.md`
+6. Removes legacy CLAUDE.md bridge docs if present (from older versions)
 
 **Claude Desktop App (macOS only):**
-6. Adds `cc-bridge` MCP server to `~/Library/Application Support/Claude/claude_desktop_config.json` pointing to the stdio adapter (`bridge-stdio.mjs`)
+7. Adds `cc-bridge` MCP server to `~/Library/Application Support/Claude/claude_desktop_config.json` pointing to the stdio adapter (`bridge-stdio.mjs`)
 
 The script is idempotent -- running it twice won't duplicate anything. It handles both CLI and Desktop in one shot.
+
+### Process management
+
+```bash
+./install.sh --start      # Start the bridge server (PID saved to /tmp/cc-bridge.pid)
+./install.sh --stop       # Graceful stop (SIGTERM — closes SSE connections cleanly)
+./install.sh --restart    # Stop then start
+./install.sh --check      # Show status of everything
+```
+
+Logs go to `/tmp/cc-bridge-server.log`.
 
 ---
 
@@ -46,7 +60,7 @@ The Claude Desktop app (macOS) can also join the bridge -- Chat, Cowork, and Cod
 `install.sh` already configured the Desktop app for you. Just:
 
 1. **Quit and relaunch Claude Desktop** -- the app reads its config on launch
-2. **Start the bridge server** if not already running: `nohup node bridge-server.mjs &`
+2. **Start the bridge server** if not already running: `./install.sh --start`
 3. Open any Chat, Cowork, or Code conversation and tell it:
 
 > "Register on the bridge as 'desktop' and list who's online"
@@ -170,7 +184,7 @@ This applies to **Desktop sessions too** -- since they have no hooks at all, you
 
 Tell your agent:
 
-> "Clone https://github.com/vijay2411/claude-code-sessions-bridge to ~/cc-bridge, make the hook scripts executable, add the 5 hooks (SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd) from the hooks/ directory to my ~/.claude/settings.json, run `claude mcp add --transport sse --scope user bridge http://localhost:7400/sse`, append BRIDGE.md to my ~/.claude/CLAUDE.md, and start the server with `nohup node ~/cc-bridge/bridge-server.mjs &`"
+> "Clone https://github.com/vijay2411/claude-code-sessions-bridge, make the hook scripts executable, add the 5 hooks (SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd) from the hooks/ directory to my ~/.claude/settings.json, run `claude mcp add --transport sse --scope user bridge http://localhost:7400/sse`, copy skill/SKILL.md to ~/.claude/skills/cc-bridge/SKILL.md, and start the server with `./install.sh --start`"
 
 Or do it yourself -- see the [hook configuration JSON](#hook-configuration-reference) below.
 
@@ -178,7 +192,7 @@ Or do it yourself -- see the [hook configuration JSON](#hook-configuration-refer
 
 Tell your Desktop agent:
 
-> "Add an MCP server called 'cc-bridge' to my Claude Desktop config at ~/Library/Application Support/Claude/claude_desktop_config.json. The command is 'node' with args ['/path/to/cc-bridge/bridge-stdio.mjs']. Then restart the app."
+> "Add an MCP server called 'cc-bridge' to my Claude Desktop config at ~/Library/Application Support/Claude/claude_desktop_config.json. The command is 'node' with args ['/path/to/claude-code-sessions-bridge/bridge-stdio.mjs']. Then restart the app."
 
 ---
 
@@ -200,7 +214,7 @@ export CC_BRIDGE_SESSION=api-builder
 ### Registration flow
 
 **CLI sessions:**
-1. **SessionStart hook** fires, generates a name, prompts the agent to call `register()`
+1. **SessionStart hook** fires, checks MCP is registered, generates a name, prompts the agent to call `register()`
 2. **UserPromptSubmit hook** fires on your first message -- if not registered, forces it before anything else
 3. **One-time confirmation** -- agent sees "You're registered as X. Other sessions: Y, Z." once
 
@@ -233,18 +247,18 @@ If the bridge restarts or SSE drops, CLI hooks detect "not registered" on the ne
 
 ## MCP tools reference
 
-These are called by the agent, not by you. Listed here for debugging. Available to both CLI and Desktop sessions.
+These are called by the agent, not by you. Listed here for debugging and to document the exact argument names.
 
-| Tool | What it does |
-|---|---|
-| `register` | Join the bridge with a name and description |
-| `list_sessions` | See who's online |
-| `ask` | Ask another session a question (blocks until reply, 5min timeout) |
-| `reply` | Answer a pending question (auto-targets if only one pending) |
-| `check_inbox` | See all unanswered questions addressed to you |
-| `get_thread` | Get Q&A history with another session |
-| `broadcast` | Write to your scratchpad (visible to all) |
-| `read_scratchpad` | Read one or all scratchpads |
+| Tool | Required args | Optional args | What it does |
+|---|---|---|---|
+| `register` | `name` (string) | `description` (string), `claude_session_id` (string) | Join the bridge with a name and description |
+| `list_sessions` | — | — | See who's online |
+| `ask` | `to` (string), `question` (string) | — | Ask another session a question (blocks until reply, 5min timeout) |
+| `reply` | `answer` (string) | `message_id` (string) | Answer a pending question (auto-targets if only one pending) |
+| `check_inbox` | — | — | See all unanswered questions addressed to you |
+| `get_thread` | `with_session` (string) | — | Get Q&A history with another session |
+| `broadcast` | `content` (string) | `append` (boolean) | Write to your scratchpad (visible to all) |
+| `read_scratchpad` | — | `session` (string) | Read one or all scratchpads |
 
 ## REST endpoints reference
 
@@ -258,6 +272,21 @@ These are used internally by hook scripts. Listed here for debugging.
 | `GET /sse` | SSE transport for MCP |
 | `POST /message` | JSON-RPC for MCP tool calls |
 
+## What install.sh modifies
+
+The installer touches these files and locations. All changes are fully reversible via `./install.sh --uninstall`.
+
+| What | Path | Change |
+|---|---|---|
+| Claude Code hooks | `~/.claude/settings.json` | Adds 5 hook entries (SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd) pointing to `hooks/*.sh` |
+| MCP server registration | Claude Code user config | Registers `bridge` MCP server (SSE transport, `http://localhost:7400/sse`) |
+| Bridge protocol skill | `~/.claude/skills/cc-bridge/SKILL.md` | Copies protocol docs as a Claude Code skill |
+| Desktop app config | `~/Library/Application Support/Claude/claude_desktop_config.json` | Adds `cc-bridge` MCP server entry pointing to `bridge-stdio.mjs` (macOS only) |
+| Temp files (runtime) | `/tmp/cc-bridge-*` | Session name files, confirmation stamps, MCP check cache, PID file |
+| Server log (runtime) | `/tmp/cc-bridge-server.log` | Append-only log from bridge-server.mjs |
+
+**Legacy cleanup:** Older versions appended protocol docs directly to `~/.claude/CLAUDE.md`. The installer automatically detects and removes this if present.
+
 ## Troubleshooting
 
 | What you see | What to tell your agent |
@@ -268,8 +297,9 @@ These are used internally by hook scripts. Listed here for debugging.
 | Question stuck, no reply (Desktop) | Tell the Desktop agent "check your inbox and reply" |
 | "Name taken" error | "Register with a different name on the bridge" |
 | Bridge restarted, sessions lost | CLI: auto re-registers. Desktop: tell it to register again |
-| Sessions died after bridge restart | Expected — all CLI sessions have a persistent SSE connection to the bridge. Killing the server drops those connections, which may crash Claude Code sessions. Use `kill <pid>` (sends SIGTERM) instead of `kill -9` so the bridge closes connections gracefully. You may need to resume affected sessions afterward |
+| Sessions died after bridge restart | Expected — all CLI sessions have a persistent SSE connection. Use `./install.sh --stop` (SIGTERM) instead of `kill -9` so the bridge closes connections gracefully. You may need to resume affected sessions |
 | Desktop can't see bridge tools | Quit and relaunch the Desktop app (reads config on launch) |
+| Hooks fire but agent can't call bridge tools | Session was open before install — restart the session to load MCP tools |
 | Something seems wrong | Run `./install.sh --check` in the repo directory |
 
 ## Hook configuration reference
@@ -308,8 +338,16 @@ Replace `/path/to/cc-bridge` with the actual repo path.
 ./install.sh --uninstall
 ```
 
-Removes CLI hooks, MCP registration, CLAUDE.md protocol docs, Desktop app config, and temp files -- all in one command. Relaunch the Desktop app after.
+Removes:
+- All 5 bridge hooks from `~/.claude/settings.json`
+- MCP server registration (`claude mcp remove bridge`)
+- Bridge protocol skill (`~/.claude/skills/cc-bridge/`)
+- Legacy CLAUDE.md protocol docs (if present from older versions)
+- Desktop app config entry from `claude_desktop_config.json`
+- All temp files (`/tmp/cc-bridge-*`)
+
+Relaunch the Desktop app after uninstalling. Stop the bridge server separately: `./install.sh --stop`.
 
 ### Or tell your agent
 
-> "Remove all bridge hooks from my settings.json, run `claude mcp remove bridge`, remove the Bridge Communication Protocol section from my CLAUDE.md, remove cc-bridge from my Claude Desktop config, and clean up /tmp/cc-bridge-* files"
+> "Remove all bridge hooks from my settings.json, run `claude mcp remove bridge`, delete ~/.claude/skills/cc-bridge/, remove cc-bridge from my Claude Desktop config, and clean up /tmp/cc-bridge-* files"

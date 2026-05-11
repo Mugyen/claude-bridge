@@ -3,8 +3,9 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
-CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+SKILL_DIR="$HOME/.claude/skills/cc-bridge"
 DESKTOP_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+PID_FILE="/tmp/cc-bridge.pid"
 PORT="${CC_BRIDGE_PORT:-7400}"
 
 RED='\033[0;31m'
@@ -22,12 +23,18 @@ ACTION="install"
 case "${1:-}" in
   --uninstall) ACTION="uninstall" ;;
   --check)     ACTION="check" ;;
+  --start)     ACTION="start" ;;
+  --stop)      ACTION="stop" ;;
+  --restart)   ACTION="restart" ;;
   --help|-h)
-    echo "Usage: ./install.sh [--uninstall | --check | --help]"
+    echo "Usage: ./install.sh [--uninstall | --check | --start | --stop | --restart | --help]"
     echo ""
-    echo "  (no args)    Install cc-bridge hooks, MCP server, and protocol docs"
+    echo "  (no args)    Install cc-bridge hooks, MCP server, skill, and Desktop config"
     echo "  --uninstall  Remove all cc-bridge configuration"
     echo "  --check      Verify installation without changing anything"
+    echo "  --start      Start the bridge server (writes PID to $PID_FILE)"
+    echo "  --stop       Stop the bridge server (graceful SIGTERM)"
+    echo "  --restart    Stop then start the bridge server"
     exit 0
     ;;
 esac
@@ -103,19 +110,16 @@ install_hooks() {
     script=$(echo "$HOOK_MAP" | jq -r --arg e "$event" '.[$e]')
     local cmd="$REPO_DIR/hooks/$script"
 
-    # Check if bridge hook already exists for this event
     local existing
     existing=$(jq -r --arg e "$event" '
       .hooks[$e] // [] | map(select(.hooks[]?.command | test("bridge"))) | length
     ' "$tmp" 2>/dev/null || echo "0")
 
     if [ "$existing" != "0" ]; then
-      # Update existing bridge hook path
       jq --arg e "$event" --arg cmd "$cmd" '
         .hooks[$e] = [.hooks[$e][] | if (.hooks[]?.command | test("bridge")) then .hooks[0].command = $cmd else . end]
       ' "$tmp" > "${tmp}.new" && mv "${tmp}.new" "$tmp"
     else
-      # Add new hook entry
       jq --arg e "$event" --arg cmd "$cmd" '
         .hooks //= {} |
         .hooks[$e] //= [] |
@@ -191,51 +195,55 @@ check_mcp() {
   fi
 }
 
-# ── CLAUDE.md protocol docs ────────────────────────────────────────────────
+# ── Skill (replaces old CLAUDE.md append) ──────────────────────────────────
 
-install_claude_md() {
-  mkdir -p "$(dirname "$CLAUDE_MD")"
+install_skill() {
+  mkdir -p "$SKILL_DIR"
+  cp "$REPO_DIR/skill/SKILL.md" "$SKILL_DIR/SKILL.md"
+  ok "Bridge protocol skill installed to $SKILL_DIR"
+}
 
-  if [ -f "$CLAUDE_MD" ] && grep -q "Bridge Communication Protocol" "$CLAUDE_MD" 2>/dev/null; then
-    ok "BRIDGE.md already in CLAUDE.md"
+remove_skill() {
+  if [ -d "$SKILL_DIR" ]; then
+    rm -rf "$SKILL_DIR"
+    ok "Bridge protocol skill removed"
   else
-    echo "" >> "$CLAUDE_MD"
-    cat "$REPO_DIR/BRIDGE.md" >> "$CLAUDE_MD"
-    ok "BRIDGE.md appended to $CLAUDE_MD"
+    warn "No bridge skill found"
   fi
 }
 
-remove_claude_md() {
+check_skill() {
+  if [ -f "$SKILL_DIR/SKILL.md" ]; then
+    ok "Bridge protocol skill installed"
+  else
+    fail "Bridge protocol skill not found"
+    return 1
+  fi
+}
+
+# ── Legacy CLAUDE.md cleanup ──────────────────────────────────────────────
+
+remove_claude_md_legacy() {
+  local CLAUDE_MD="$HOME/.claude/CLAUDE.md"
   if [ ! -f "$CLAUDE_MD" ]; then
-    warn "No CLAUDE.md found"
     return
   fi
 
-  # Remove everything from "# Bridge Communication Protocol" to the next top-level heading or EOF
-  local tmp
-  tmp=$(mktemp)
-  awk '
-    /^# Bridge Communication Protocol/ { skip=1; next }
-    skip && /^# / { skip=0 }
-    !skip { print }
-  ' "$CLAUDE_MD" > "$tmp" && mv "$tmp" "$CLAUDE_MD"
-
-  ok "Bridge protocol docs removed from $CLAUDE_MD"
-}
-
-check_claude_md() {
-  if [ -f "$CLAUDE_MD" ] && grep -q "Bridge Communication Protocol" "$CLAUDE_MD" 2>/dev/null; then
-    ok "Protocol docs in CLAUDE.md"
-  else
-    fail "Protocol docs not in CLAUDE.md"
-    return 1
+  if grep -q "Bridge Communication Protocol" "$CLAUDE_MD" 2>/dev/null; then
+    local tmp
+    tmp=$(mktemp)
+    awk '
+      /^# Bridge Communication Protocol/ { skip=1; next }
+      skip && /^# / { skip=0 }
+      !skip { print }
+    ' "$CLAUDE_MD" > "$tmp" && mv "$tmp" "$CLAUDE_MD"
+    ok "Legacy bridge docs removed from $CLAUDE_MD"
   fi
 }
 
 # ── Claude Desktop app ──────────────────────────────────────────────────────
 
 install_desktop() {
-  # Only on macOS
   if [ "$(uname)" != "Darwin" ]; then
     warn "Claude Desktop app config skipped (not macOS)"
     return
@@ -253,9 +261,7 @@ install_desktop() {
     echo '{}' > "$DESKTOP_CONFIG"
   fi
 
-  # Check if cc-bridge is already configured
   if jq -e '.mcpServers["cc-bridge"]' "$DESKTOP_CONFIG" &>/dev/null; then
-    # Update the path in case repo moved
     local tmp
     tmp=$(mktemp)
     jq --arg path "$REPO_DIR/bridge-stdio.mjs" '
@@ -316,15 +322,69 @@ check_desktop() {
   fi
 }
 
-# ── Bridge server status ───────────────────────────────────────────────────
+# ── Bridge server process management ──────────────────────────────────────
+
+start_bridge() {
+  if [ -f "$PID_FILE" ]; then
+    local old_pid
+    old_pid=$(cat "$PID_FILE")
+    if kill -0 "$old_pid" 2>/dev/null; then
+      warn "Bridge already running (PID $old_pid, port $PORT)"
+      return
+    else
+      rm -f "$PID_FILE"
+    fi
+  fi
+
+  nohup node "$REPO_DIR/bridge-server.mjs" >> /tmp/cc-bridge-server.log 2>&1 &
+  sleep 1
+
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    ok "Bridge started (PID $pid, port $PORT, log: /tmp/cc-bridge-server.log)"
+  else
+    fail "Bridge failed to start — check /tmp/cc-bridge-server.log"
+  fi
+}
+
+stop_bridge() {
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid"
+      sleep 1
+      ok "Bridge stopped (PID $pid)"
+    else
+      rm -f "$PID_FILE"
+      warn "Bridge was not running (stale PID file cleaned)"
+    fi
+  else
+    local pids
+    pids=$(lsof -ti:"$PORT" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+      echo "$pids" | xargs kill 2>/dev/null
+      sleep 1
+      ok "Bridge stopped (found by port $PORT)"
+    else
+      warn "Bridge is not running"
+    fi
+  fi
+}
 
 check_bridge() {
   if curl -sf --max-time 1 "http://localhost:${PORT}/health" &>/dev/null; then
-    local sessions
+    local sessions pid_info
     sessions=$(curl -sf --max-time 1 "http://localhost:${PORT}/health" | jq '.sessions | length')
-    ok "Bridge running on port $PORT ($sessions active sessions)"
+    if [ -f "$PID_FILE" ]; then
+      pid_info=" (PID $(cat "$PID_FILE"))"
+    else
+      pid_info=""
+    fi
+    ok "Bridge running on port $PORT${pid_info} ($sessions active sessions)"
   else
-    warn "Bridge not running (start with: node $REPO_DIR/bridge-server.mjs)"
+    warn "Bridge not running (start with: ./install.sh --start)"
   fi
 }
 
@@ -349,14 +409,17 @@ case "$ACTION" in
     echo "Claude Code CLI:"
     install_hooks
     install_mcp
-    install_claude_md
+    install_skill
+    remove_claude_md_legacy
     echo ""
     echo "Claude Desktop App:"
     install_desktop
     echo ""
     echo "Done! Start the bridge:"
     echo ""
-    echo "  node $REPO_DIR/bridge-server.mjs"
+    echo "  ./install.sh --start"
+    echo ""
+    echo "Already-open Claude sessions need to be restarted to pick up the new MCP server."
     echo ""
     echo "CLI sessions auto-register. Desktop app needs a relaunch,"
     echo "then tell it: \"Register on the bridge as 'desktop'\""
@@ -368,14 +431,20 @@ case "$ACTION" in
     echo "cc-bridge uninstaller"
     echo "====================="
     echo ""
+    echo "Claude Code CLI:"
     remove_hooks
     remove_mcp
-    remove_claude_md
-    remove_desktop
-    rm -f /tmp/cc-bridge-*
-    ok "Temp files cleaned"
+    remove_skill
+    remove_claude_md_legacy
     echo ""
-    echo "Done. Stop any running bridge server manually (kill the process)."
+    echo "Claude Desktop App:"
+    remove_desktop
+    echo ""
+    echo "Temp files:"
+    rm -f /tmp/cc-bridge-*
+    ok "Temp files cleaned (/tmp/cc-bridge-*)"
+    echo ""
+    echo "Done. Stop any running bridge server: ./install.sh --stop"
     echo "Relaunch Claude Desktop app if it was configured."
     echo ""
     ;;
@@ -391,7 +460,7 @@ case "$ACTION" in
     echo "Claude Code CLI:"
     check_hooks || true
     check_mcp || true
-    check_claude_md || true
+    check_skill || true
     echo ""
     echo "Claude Desktop App:"
     check_desktop
@@ -399,5 +468,18 @@ case "$ACTION" in
     echo "Server:"
     check_bridge
     echo ""
+    ;;
+
+  start)
+    start_bridge
+    ;;
+
+  stop)
+    stop_bridge
+    ;;
+
+  restart)
+    stop_bridge
+    start_bridge
     ;;
 esac

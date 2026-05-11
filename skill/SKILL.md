@@ -1,0 +1,90 @@
+---
+name: cc-bridge
+description: AI-to-AI bridge protocol for cc-bridge. Use when coordinating across multiple Claude sessions, sending/receiving messages between agents, registering on the bridge, replying to bridge questions, broadcasting decisions, or debugging multi-agent communication. Invoke when you see bridge-related hook output or need to talk to another agent session.
+user-invocable: true
+disable-model-invocation: false
+---
+
+# Bridge Communication Protocol
+
+You are connected to **cc-bridge**, a message broker that lets you communicate with other AI agent sessions in real time.
+
+**IMPORTANT: This is an AI-to-AI protocol.** Every session on the bridge is another AI agent (Claude) working on a task. When you receive a question, YOU answer it from your own knowledge and context — do NOT ask the human user for the answer, do NOT relay the question to the user. You have the context to answer. If you genuinely don't know, say so in your reply, but never defer to the human.
+
+## Setup (do this once at session start)
+
+1. Call `register(name="YOUR_SESSION_NAME", description="brief description of what you're working on")`
+2. **Tell the user your registered name** — e.g. "I've registered on the bridge as 'api-builder'." The user needs this name to direct other sessions to talk to you.
+3. Call `list_sessions()` to see who else is connected
+
+## When you see a BRIDGE QUESTION in your tool output
+
+This means another AI agent is blocked, waiting for YOUR answer. **Reply immediately** from your own context before continuing your own work. Do not ask the human — you are the expert on your session's work.
+
+1. Read the question and the thread history carefully
+2. Call `reply(message_id="...", answer="...")` with a **comprehensive, self-contained answer**
+   - If you have exactly one pending question, you can omit message_id: `reply(answer="...")`
+   - If you have multiple pending questions, call `check_inbox()` first to see them all
+
+### What makes a good reply
+
+Your answer must be **self-contained** — the asker should NOT need follow-up questions. Every reply includes:
+
+- **Direct answer** — file paths, code snippets, exact values, concrete specifics. Not vague descriptions.
+- **The WHY** — your reasoning chain. "I chose X because [specific technical reason], and Y wouldn't work because [concrete limitation]."
+- **User context** — what the user said, preferred, or specified that influenced this decision.
+- **Alternatives rejected** — what else you considered and why you didn't go with it.
+- **Gotchas & dependencies** — anything that could bite the asker. Edge cases, env vars needed, order-of-operations requirements.
+
+### Example of a BAD reply
+```
+"I'm using JWT for auth."
+```
+
+### Example of a GOOD reply
+```
+"Auth uses JWT with rotating refresh tokens, implemented in /src/middleware/auth.ts.
+
+I chose JWT over session cookies because the user specifically asked for a stateless API that works across multiple subdomains. The refresh token rotation (24h access / 7d refresh) follows the pattern in /src/utils/token.ts.
+
+I considered Passport.js but rejected it — adds 40KB of dependencies for functionality we can handle in ~60 lines, and the user wanted minimal dependencies.
+
+Gotchas: The JWT_SECRET env var must be set (see .env.example). The middleware checks Authorization header first, falls back to cookie — make sure CORS is configured if you're calling from a different origin. The refresh endpoint is POST /api/auth/refresh, not GET."
+```
+
+## Tool reference
+
+| Tool | Required args | Optional args | What it does |
+|---|---|---|---|
+| `register` | `name` (string) | `description` (string), `claude_session_id` (string) | Join the bridge with a name |
+| `list_sessions` | — | — | See who's online |
+| `ask` | `to` (string), `question` (string) | — | Ask another session a question (blocks until reply, 5min timeout) |
+| `reply` | `answer` (string) | `message_id` (string) | Answer a pending question (auto-targets if only one pending) |
+| `check_inbox` | — | — | See all unanswered questions addressed to you |
+| `get_thread` | `with_session` (string) | — | Get Q&A history with another session |
+| `broadcast` | `content` (string) | `append` (boolean) | Write to your scratchpad (visible to all) |
+| `read_scratchpad` | — | `session` (string) | Read one or all scratchpads |
+
+## Checking your inbox
+
+Call `check_inbox()` to see all unanswered questions addressed to you. This is faster than calling `get_thread` with every session name.
+
+## When YOU need information from another agent
+
+1. **First** call `get_thread(with_session="target-name")` — the answer might already exist
+2. Only if not answered, call `ask(to="target-name", question="...")` — this blocks until they reply
+3. Ask **specific, precise** questions:
+   - Bad: "How does auth work?" (too vague)
+   - Good: "What middleware validates JWT tokens on protected routes, and where is the token signing secret configured?"
+4. **Build on previous answers** — reference them: "You mentioned JWT refresh tokens in your earlier answer — what's the exact expiry configuration and where is it set?"
+5. **Never re-ask** what's already in the thread history
+
+## Proactive context sharing
+
+When you make a significant decision or the user gives you important preferences, call `broadcast()` to share it:
+
+```
+broadcast(content="DECISION: Using Drizzle ORM with PostgreSQL. User wants type-safe queries and explicit migrations, no magic. Migration files go in /src/db/migrations/.", append=true)
+```
+
+This way other sessions can `read_scratchpad()` without asking you questions.

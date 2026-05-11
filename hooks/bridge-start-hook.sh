@@ -16,6 +16,15 @@ SOURCE=$(echo "$INPUT" | jq -r '.source // "startup"')
 
 [ -z "$SESSION_ID" ] && exit 0
 
+# Check if bridge MCP is registered — cache for other hooks
+MCP_FILE="/tmp/cc-bridge-${SESSION_ID}.mcp"
+if claude mcp list 2>/dev/null | grep -q "bridge"; then
+  echo "yes" > "$MCP_FILE"
+else
+  echo "no" > "$MCP_FILE"
+  exit 0
+fi
+
 # Check if bridge is running — if not, skip silently
 if ! curl -sf --max-time 1 "http://localhost:${PORT}/health" > /dev/null 2>&1; then
   exit 0

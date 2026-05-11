@@ -15,8 +15,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 const PORT = parseInt(
   process.argv.find((_, i, a) => a[i - 1] === "--port") ??
@@ -540,6 +538,17 @@ const server = http.createServer(async (req, res) => {
 process.on("uncaughtException", (err) => { console.error("[bridge] uncaught exception (kept running):", err); });
 process.on("unhandledRejection", (err) => { console.error("[bridge] unhandled rejection (kept running):", err); });
 
+// ─── PID file ──────────────────────────────────────────────────────────────
+const PID_FILE = "/tmp/cc-bridge.pid";
+
+function writePid() {
+  fs.writeFileSync(PID_FILE, String(process.pid));
+}
+
+function removePid() {
+  try { fs.unlinkSync(PID_FILE); } catch {}
+}
+
 // Graceful shutdown: close SSE connections cleanly so MCP clients don't crash
 function shutdown(signal) {
   console.log(`\n[bridge] ${signal} received, closing ${sseClients.size} SSE connections...`);
@@ -550,6 +559,7 @@ function shutdown(signal) {
     }
   }
   sseClients.clear();
+  removePid();
   server.close(() => {
     console.log("[bridge] server closed.");
     process.exit(0);
@@ -560,8 +570,10 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 server.listen(PORT, () => {
+  writePid();
   console.log(`\n${"═".repeat(42)}`);
   console.log(`  cc-bridge v2.1`);
+  console.log(`  PID:     ${process.pid}`);
   console.log(`  SSE:     http://localhost:${PORT}/sse`);
   console.log(`  Health:  http://localhost:${PORT}/health`);
   console.log(`${"═".repeat(42)}\n`);

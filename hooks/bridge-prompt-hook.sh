@@ -2,6 +2,7 @@
 # bridge-prompt-hook.sh — UserPromptSubmit hook for cc-bridge
 #
 # Behavior matrix:
+#   - MCP not registered → silent (skip)
 #   - Not registered yet → inject "register first" instruction
 #   - Just became registered (no stamp file yet) → emit one-time confirmation,
 #     listing this session's name + other active peers, then write a stamp file
@@ -14,6 +15,12 @@ PORT="${CC_BRIDGE_PORT:-7400}"
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 [ -z "$SESSION_ID" ] && exit 0
+
+# Skip if bridge MCP is not registered (session predates install or MCP removed)
+MCP_FILE="/tmp/cc-bridge-${SESSION_ID}.mcp"
+if [ -f "$MCP_FILE" ] && [ "$(cat "$MCP_FILE")" = "no" ]; then
+  exit 0
+fi
 
 HEALTH=$(curl -sf --max-time 1 "http://localhost:${PORT}/health" 2>/dev/null)
 [ -z "$HEALTH" ] && exit 0
