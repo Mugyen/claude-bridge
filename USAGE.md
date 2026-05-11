@@ -268,6 +268,7 @@ These are used internally by hook scripts. Listed here for debugging.
 | Question stuck, no reply (Desktop) | Tell the Desktop agent "check your inbox and reply" |
 | "Name taken" error | "Register with a different name on the bridge" |
 | Bridge restarted, sessions lost | CLI: auto re-registers. Desktop: tell it to register again |
+| Sessions died after bridge restart | Expected — all CLI sessions have a persistent SSE connection to the bridge. Killing the server drops those connections, which may crash Claude Code sessions. Use `kill <pid>` (sends SIGTERM) instead of `kill -9` so the bridge closes connections gracefully. You may need to resume affected sessions afterward |
 | Desktop can't see bridge tools | Quit and relaunch the Desktop app (reads config on launch) |
 | Something seems wrong | Run `./install.sh --check` in the repo directory |
 

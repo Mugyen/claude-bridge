@@ -540,6 +540,25 @@ const server = http.createServer(async (req, res) => {
 process.on("uncaughtException", (err) => { console.error("[bridge] uncaught exception (kept running):", err); });
 process.on("unhandledRejection", (err) => { console.error("[bridge] unhandled rejection (kept running):", err); });
 
+// Graceful shutdown: close SSE connections cleanly so MCP clients don't crash
+function shutdown(signal) {
+  console.log(`\n[bridge] ${signal} received, closing ${sseClients.size} SSE connections...`);
+  for (const [id, res] of sseClients) {
+    if (!res.destroyed) {
+      try { res.write("event: close\ndata: bridge shutting down\n\n"); } catch {}
+      try { res.end(); } catch {}
+    }
+  }
+  sseClients.clear();
+  server.close(() => {
+    console.log("[bridge] server closed.");
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(0), 2000);
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
 server.listen(PORT, () => {
   console.log(`\n${"═".repeat(42)}`);
   console.log(`  cc-bridge v2.1`);
