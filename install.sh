@@ -7,6 +7,11 @@ SKILL_DIR="$HOME/.claude/skills/cc-bridge"
 DESKTOP_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
 PID_FILE="/tmp/cc-bridge.pid"
 PORT="${CC_BRIDGE_PORT:-7400}"
+VERSION_FILE="$HOME/.claude/.cc-bridge-version"
+MANIFEST_FILE="$HOME/.claude/.cc-bridge-manifest"
+
+# Read version from package.json
+VERSION=$(jq -r '.version // "unknown"' "$REPO_DIR/package.json" 2>/dev/null || echo "unknown")
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -38,6 +43,61 @@ case "${1:-}" in
     exit 0
     ;;
 esac
+
+# ── Version + manifest tracking ────────────────────────────────────────────
+#
+# The manifest records every artifact this install touched, with its absolute
+# path. The uninstaller reads it back so future versions can clean up files
+# that an older install.sh wouldn't know about. Format: one path per line,
+# prefixed with a directive: FILE, DIR, or HOOK_PATH (for grep-based cleanup).
+
+manifest_init() {
+  mkdir -p "$(dirname "$MANIFEST_FILE")"
+  {
+    echo "# cc-bridge install manifest — generated $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# version: $VERSION"
+    echo "# repo: $REPO_DIR"
+  } > "$MANIFEST_FILE"
+}
+
+manifest_add() {
+  local kind="$1" path="$2"
+  echo "${kind}=${path}" >> "$MANIFEST_FILE"
+}
+
+manifest_uninstall() {
+  if [ ! -f "$MANIFEST_FILE" ]; then
+    return 1
+  fi
+
+  local prior_version
+  prior_version=$(grep -E '^# version:' "$MANIFEST_FILE" | awk '{print $3}')
+  echo "  Found manifest from version $prior_version"
+
+  while IFS='=' read -r kind value; do
+    [ -z "$kind" ] && continue
+    case "$kind" in
+      FILE)
+        if [ -f "$value" ]; then
+          rm -f "$value" && ok "Removed file: $value"
+        fi
+        ;;
+      DIR)
+        if [ -d "$value" ]; then
+          rm -rf "$value" && ok "Removed dir: $value"
+        fi
+        ;;
+    esac
+  done < "$MANIFEST_FILE"
+
+  rm -f "$MANIFEST_FILE" "$VERSION_FILE"
+  return 0
+}
+
+write_version() {
+  mkdir -p "$(dirname "$VERSION_FILE")"
+  echo "$VERSION" > "$VERSION_FILE"
+}
 
 # ── Prerequisites ───────────────────────────────────────────────────────────
 
@@ -200,6 +260,7 @@ check_mcp() {
 install_skill() {
   mkdir -p "$SKILL_DIR"
   cp "$REPO_DIR/skill/SKILL.md" "$SKILL_DIR/SKILL.md"
+  manifest_add DIR "$SKILL_DIR"
   ok "Bridge protocol skill installed to $SKILL_DIR"
 }
 
@@ -393,7 +454,7 @@ check_bridge() {
 case "$ACTION" in
   install)
     echo ""
-    echo "cc-bridge installer"
+    echo "cc-bridge installer (v$VERSION)"
     echo "==================="
     echo ""
     echo "Checking prerequisites..."
@@ -405,6 +466,8 @@ case "$ACTION" in
     echo ""
     echo "Installing..."
     chmod +x "$REPO_DIR"/hooks/*.sh
+    manifest_init
+    write_version
     echo ""
     echo "Claude Code CLI:"
     install_hooks
@@ -428,21 +491,36 @@ case "$ACTION" in
 
   uninstall)
     echo ""
-    echo "cc-bridge uninstaller"
+    echo "cc-bridge uninstaller (running v$VERSION)"
     echo "====================="
     echo ""
-    echo "Claude Code CLI:"
+
+    # Detect prior installed version
+    if [ -f "$VERSION_FILE" ]; then
+      PRIOR=$(cat "$VERSION_FILE")
+      echo "Detected prior install: v$PRIOR"
+    else
+      echo "No version marker found — running full cleanup of all known artifacts"
+    fi
+    echo ""
+
+    echo "Manifest-tracked artifacts:"
+    if ! manifest_uninstall; then
+      warn "No manifest found (this is an old install or fresh checkout)"
+    fi
+    echo ""
+
+    # Always run the full known-cleanup steps too — covers anything the
+    # manifest missed and handles installs that predate manifest tracking.
+    echo "Standard cleanup (hooks, MCP, legacy docs, Desktop, temp):"
     remove_hooks
     remove_mcp
     remove_skill
     remove_claude_md_legacy
-    echo ""
-    echo "Claude Desktop App:"
     remove_desktop
-    echo ""
-    echo "Temp files:"
     rm -f /tmp/cc-bridge-*
     ok "Temp files cleaned (/tmp/cc-bridge-*)"
+    rm -f "$VERSION_FILE"
     echo ""
     echo "Done. Stop any running bridge server: ./install.sh --stop"
     echo "Relaunch Claude Desktop app if it was configured."
@@ -451,8 +529,19 @@ case "$ACTION" in
 
   check)
     echo ""
-    echo "cc-bridge status"
+    echo "cc-bridge status (repo v$VERSION)"
     echo "================"
+    echo ""
+    if [ -f "$VERSION_FILE" ]; then
+      INSTALLED=$(cat "$VERSION_FILE")
+      if [ "$INSTALLED" = "$VERSION" ]; then
+        ok "Installed version: v$INSTALLED (matches repo)"
+      else
+        warn "Installed version: v$INSTALLED (repo is v$VERSION — re-run install to upgrade)"
+      fi
+    else
+      warn "No version marker — install may predate manifest tracking, or never installed"
+    fi
     echo ""
     echo "Prerequisites:"
     check_prereqs || true

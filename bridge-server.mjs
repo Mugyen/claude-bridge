@@ -572,7 +572,7 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 server.listen(PORT, () => {
   writePid();
   console.log(`\n${"═".repeat(42)}`);
-  console.log(`  cc-bridge v2.1`);
+  console.log(`  cc-bridge v2.2`);
   console.log(`  PID:     ${process.pid}`);
   console.log(`  SSE:     http://localhost:${PORT}/sse`);
   console.log(`  Health:  http://localhost:${PORT}/health`);
