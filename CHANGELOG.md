@@ -11,6 +11,15 @@ _Add entries here as you work on the next version. Move them under a dated
 heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
+### Added
+- Project-level `CLAUDE.md` at the repo root that `@`-references `DEVELOPER.md`,
+  so Claude Code sessions running inside this repo auto-load the maintainer
+  guide. New "First-time setup if you're a developer of this repo" section
+  in `DEVELOPER.md` explains the convention.
+- Explicit "Documentation update checklist" table near the top of
+  `DEVELOPER.md` — hard rule that every code change updates at least one
+  MD file, with a per-file mapping of when each one applies.
+
 ## [2.2.0] - 2026-05-11
 
 ### Added

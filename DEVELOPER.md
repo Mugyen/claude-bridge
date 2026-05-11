@@ -4,6 +4,36 @@ Working notes for whoever maintains cc-bridge next — including future-me. This
 
 ---
 
+## First-time setup if you're a developer of this repo
+
+After cloning, **load this file into your Claude Code working context for every session inside this repo** so all the rules below are enforced automatically. There are two ways:
+
+1. **Recommended — project-level CLAUDE.md (already exists).** This repo ships a `CLAUDE.md` at the root that `@`-references `DEVELOPER.md`. Claude Code auto-loads `CLAUDE.md` whenever it runs in this directory, so just `cd` here and you're done.
+2. **If you keep your own notes in a fork's CLAUDE.md**, either append the contents of this file or add the line `@DEVELOPER.md` to it. Do NOT inject anything from this file into the global `~/.claude/CLAUDE.md` — same rule as the user-facing protocol docs (see "Skills over CLAUDE.md injection" in the owner's vision below).
+
+Why this matters: half of this document is "do not redo these mistakes." If Claude can't see it, Claude redoes them.
+
+---
+
+## Documentation update checklist (every feature, every fix)
+
+**Hard rule: every code change updates at least one MD file.** If you can't think of which one, the change is either undocumented user-facing behaviour (update USAGE.md), an unrecorded release entry (update CHANGELOG.md), or a learning the next developer will need (update DEVELOPER.md).
+
+For each feature/fix, run through this list before committing:
+
+| File | When to update it |
+|---|---|
+| `CHANGELOG.md` | **Always.** One line under `[Unreleased]` describing what changed, in `Added` / `Changed` / `Fixed` / `Removed` / `Deprecated`. |
+| `USAGE.md` | If user-facing behaviour changed: a new flag, a new tool, a new troubleshooting case, a new install step. |
+| `README.md` | Rarely. Only if the elevator pitch or "What this is/isn't" changes. Don't bloat it. |
+| `BRIDGE.md` + `skill/SKILL.md` | If the agent-facing protocol changed (new tool name, new required arg, changed reply semantics). Keep them in sync. |
+| `DEVELOPER.md` | If you learned something the next maintainer needs to know — a new gotcha, a deprecated pattern, an updated architectural decision. Update the "Hard-learned lessons" list. |
+| `tests/test-*.{mjs,sh}` | **Always** for new features. Treat tests as documentation that doesn't lie. |
+
+Tactical reminders are already embedded in the "When you add a new tool / hook / install flag" sections below — those are the per-task checklists. This table is the master rule.
+
+---
+
 ## What this project is, in one paragraph
 
 cc-bridge is a localhost-only message broker that lets multiple Claude sessions (Claude Code CLI + Claude Desktop app) talk to each other in real time. It runs one Node.js server (`bridge-server.mjs`) on port 7400 with two transports: MCP-over-SSE for CLI sessions, and MCP-over-stdio (via `bridge-stdio.mjs` adapter) for the Desktop app. Five shell hooks plug into Claude Code's lifecycle to auto-register sessions, inject pending questions, and clean up on exit. State is in-memory with a 30-day TTL.
