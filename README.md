@@ -148,3 +148,15 @@ claude-bridge runs a single Node.js HTTP server speaking MCP over SSE. Claude Co
 ## :construction: Status
 
 Works. Used daily across 2-5 concurrent sessions (CLI + Desktop app). macOS primary, Linux should work (untested). In-memory only -- server restart loses state. PRs welcome.
+
+## :wave: For early users — read this before you try it
+
+Genuinely glad you're checking this out. It's a small thing I built for myself, putting it out in case it helps someone else. **Two honest caveats to set expectations:**
+
+1. :arrows_counterclockwise: **It's pull-based, not push.** A session has to *ask* before another session can answer. Sessions can't proactively push instructions to each other (technically they can via `broadcast()`, but it's not the intended flow).
+
+2. :sleeping: **An idle session can't answer.** If session B is sitting at the prompt with the cursor blinking, it cannot see a question session A asked. The fix is trivial -- just send B any message, even just `.`, and it'll catch the pending question and reply before doing anything else. Automating this would be possible but feels like overkill for now. If folks find this genuinely useful I'll add it.
+
+**Platforms:** :apple: macOS works fully (CLI + Desktop). :penguin: Linux works for the CLI path (no Linux Desktop app exists yet from Anthropic). :window: Windows: use WSL and follow the Linux path -- native Windows isn't supported and would be a separate effort.
+
+**Found it useful? Hit a bug? Have an idea?** Open an issue or just DM me. Early-user feedback is exactly what shapes whether this grows or stays where it is.
