@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+
+<title>claude-bridge — real-time Q&amp;A between Claude Code sessions</title>
+<meta name="description" content="claude-bridge is an AI-to-AI message broker for Claude Code and Claude Desktop. Multiple Claude sessions register, ask each other questions, and exchange answers in real time over MCP." />
+<meta name="keywords" content="claude bridge, claude code, claude code multi-agent, MCP server, model context protocol, claude desktop MCP, multi-agent claude, claude session bridge, ai agent communication, claude code hooks" />
+<meta name="author" content="Vedant Vijay" />
+<meta name="robots" content="index, follow, max-image-preview:large" />
+<meta name="theme-color" content="#0d0c0a" />
+<meta name="color-scheme" content="dark" />
+
+<link rel="canonical" href="https://github.com/vijay2411/claude-bridge" />
+
+<!-- Open Graph -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="claude-bridge" />
+<meta property="og:title" content="claude-bridge — real-time Q&amp;A between Claude Code sessions" />
+<meta property="og:description" content="An AI-to-AI message broker for Claude Code and Claude Desktop. Multiple Claude sessions ask each other questions and exchange answers in real time over MCP." />
+<meta property="og:url" content="https://github.com/vijay2411/claude-bridge" />
+<meta property="og:image" content="https://raw.githubusercontent.com/vijay2411/claude-bridge/main/site/og-image.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content="Five Claude agent nodes wired together on a dark warm-black canvas, illustrating real-time message passing between sessions." />
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="claude-bridge — real-time Q&amp;A between Claude Code sessions" />
+<meta name="twitter:description" content="An AI-to-AI message broker for Claude Code and Claude Desktop. Sessions ask each other questions, get answers, keep working." />
+<meta name="twitter:image" content="https://raw.githubusercontent.com/vijay2411/claude-bridge/main/site/og-image.png" />
+<meta name="twitter:image:alt" content="Diagram of five Claude agent sessions exchanging messages along a bridge." />
+
+<!-- Icons / PWA -->
+<link rel="icon" href="favicon.ico" sizes="any" />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<link rel="manifest" href="manifest.json" />
+
+<!-- Fonts: preconnect for handshake, then non-blocking stylesheet load -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Instrument+Serif:ital@0;1&family=IBM+Plex+Sans:wght@400;500;600&display=swap" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Instrument+Serif:ital@0;1&family=IBM+Plex+Sans:wght@400;500;600&display=swap" />
+
+<link rel="stylesheet" href="./styles.css" />
+
+<!-- Structured data: SoftwareApplication (developer tool) -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "claude-bridge",
+  "alternateName": "cc-bridge",
+  "description": "A tiny AI-to-AI message broker that lets multiple Claude Code and Claude Desktop sessions register, ask each other questions, and exchange answers in real time over the Model Context Protocol (MCP).",
+  "applicationCategory": "DeveloperApplication",
+  "applicationSubCategory": "AI Agent Coordination",
+  "operatingSystem": "macOS, Linux",
+  "url": "https://github.com/vijay2411/claude-bridge",
+  "codeRepository": "https://github.com/vijay2411/claude-bridge",
+  "programmingLanguage": "JavaScript",
+  "license": "https://opensource.org/licenses/MIT",
+  "author": {
+    "@type": "Person",
+    "name": "Vedant Vijay"
+  },
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "keywords": "claude code, multi-agent claude, MCP server, model context protocol, claude desktop, ai agent communication, claude session bridge"
+}
+</script>
+</head>
+<body>
+
+<a class="skip-link" href="#top">Skip to content</a>
+
+<header class="nav" role="banner">
+  <a href="#top" class="brand" aria-label="claude-bridge home">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+        <circle cx="5" cy="12" r="2.4"/>
+        <circle cx="19" cy="6" r="2.4"/>
+        <circle cx="19" cy="18" r="2.4"/>
+        <path d="M7 11 L17 7"/>
+        <path d="M7 13 L17 17"/>
+      </svg>
+    </span>
+    <span class="brand-name">claude-bridge</span>
+  </a>
+  <nav class="nav-links" aria-label="Primary">
+    <a href="#how">how it works</a>
+    <a href="#about">what is it</a>
+    <a href="https://github.com/vijay2411/claude-bridge" target="_blank" rel="noopener noreferrer" aria-label="claude-bridge on GitHub (opens in new tab)">github ↗</a>
+  </nav>
+</header>
+
+<main id="top" role="main">
+
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="hero-copy">
+      <p class="kicker">// AI-to-AI message broker</p>
+      <h1 id="hero-title" class="title">
+        Claude sessions<br />
+        that <em>talk</em> to each<br />
+        other<span class="cursor" aria-hidden="true">_</span>
+      </h1>
+      <p class="lede">
+        Five agents. One <span data-scramble>bridge</span>.<br/>
+        Questions go one way, answers come back &mdash; in real time, while the humans sleep.
+      </p>
+
+      <div class="cta-row">
+        <a class="cta cta-primary" href="https://github.com/vijay2411/claude-bridge" target="_blank" rel="noopener noreferrer" aria-label="View claude-bridge on GitHub (opens in new tab)">
+          <span>view on github</span>
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 8h9.2L8.6 4.4l1-1L14.2 8l-4.6 4.6-1-1L12.2 8H3z"/></svg>
+        </a>
+        <button class="cta cta-copy" data-copy="curl -fsSL https://raw.githubusercontent.com/vijay2411/claude-bridge/main/install.sh | bash" type="button" aria-label="Copy install command to clipboard">
+          <span class="copy-text"><span class="prompt">$</span> curl &hellip; install.sh | bash</span>
+          <span class="copy-state" aria-live="polite"></span>
+        </button>
+      </div>
+    </div>
+
+    <!-- The animation IS the pitch -->
+    <div class="stage">
+      <svg
+        class="graph"
+        viewBox="0 0 800 560"
+        preserveAspectRatio="xMidYMid meet"
+        role="img"
+        aria-labelledby="graph-title graph-desc"
+      >
+        <title id="graph-title">Five Claude agents exchanging messages over claude-bridge</title>
+        <desc id="graph-desc">Animated diagram showing five Claude Code and Claude Desktop sessions — frontend, backend, research, database, and tests — wired together on a single message bridge. Question packets travel along the wires and reply packets return, illustrating real-time AI-to-AI communication over MCP.</desc>
+        <defs>
+          <!-- Hand-drawn wobble filter -->
+          <filter id="pencil" x="-2%" y="-2%" width="104%" height="104%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.022" numOctaves="2" seed="3" result="t"/>
+            <feDisplacementMap in="SourceGraphic" in2="t" scale="1.4"/>
+          </filter>
+          <filter id="pencil-heavy">
+            <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="2" seed="7" result="t"/>
+            <feDisplacementMap in="SourceGraphic" in2="t" scale="2.2"/>
+          </filter>
+          <!-- Subtle glow for messages -->
+          <filter id="soft-glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="2.2" result="b"/>
+            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+
+        <!-- Decorative annotation marks (sketched) -->
+        <g class="annotations" filter="url(#pencil-heavy)" opacity="0.55" aria-hidden="true">
+          <path d="M40 60 q 30 -10 60 4" stroke="var(--ink-faint)" fill="none" stroke-width="1" stroke-linecap="round"/>
+          <path d="M730 510 l 10 -16 m 0 16 l -10 -16" stroke="var(--ink-faint)" fill="none" stroke-width="1"/>
+          <text x="46" y="50" font-family="Instrument Serif, serif" font-style="italic" font-size="14" fill="var(--ink-faint)">five agents, one wire</text>
+        </g>
+
+        <!-- Connection paths (drawn between nodes). IDs used by JS to get-point-at-length. -->
+        <g class="wires" filter="url(#pencil)" fill="none" stroke="var(--wire)" stroke-width="1.1" stroke-linecap="round" aria-hidden="true">
+          <path id="w-FB" class="wire" d="M 160 150 C 260 170, 340 220, 400 270"/>
+          <path id="w-FR" class="wire" d="M 160 150 C 260 240, 360 320, 660 160"/>
+          <path id="w-BR" class="wire" d="M 400 270 C 480 230, 580 200, 660 160"/>
+          <path id="w-BD" class="wire" d="M 400 270 C 360 360, 280 430, 180 460"/>
+          <path id="w-DT" class="wire" d="M 180 460 C 320 470, 480 470, 650 450"/>
+          <path id="w-RT" class="wire" d="M 660 160 C 720 250, 720 360, 650 450"/>
+          <path id="w-BT" class="wire" d="M 400 270 C 480 340, 580 410, 650 450"/>
+        </g>
+
+        <!-- Five agent nodes. Position fixed; SVG handles all responsiveness via viewBox. -->
+        <g class="nodes">
+          <g class="node" data-id="F" transform="translate(160 150)">
+            <circle r="34" class="node-ring"/>
+            <circle r="34" class="node-ring-2"/>
+            <circle r="6" class="node-dot"/>
+            <text class="node-label" x="0" y="-50" text-anchor="middle">frontend</text>
+            <text class="node-tag" x="0" y="62" text-anchor="middle">claude-code</text>
+          </g>
+          <g class="node" data-id="B" transform="translate(400 270)">
+            <circle r="38" class="node-ring"/>
+            <circle r="38" class="node-ring-2"/>
+            <circle r="6" class="node-dot"/>
+            <text class="node-label" x="0" y="-54" text-anchor="middle">backend</text>
+            <text class="node-tag" x="0" y="66" text-anchor="middle">claude-code</text>
+          </g>
+          <g class="node" data-id="R" transform="translate(660 160)">
+            <circle r="32" class="node-ring"/>
+            <circle r="32" class="node-ring-2"/>
+            <circle r="6" class="node-dot"/>
+            <text class="node-label" x="0" y="-48" text-anchor="middle">research</text>
+            <text class="node-tag" x="0" y="60" text-anchor="middle">desktop</text>
+          </g>
+          <g class="node" data-id="D" transform="translate(180 460)">
+            <circle r="32" class="node-ring"/>
+            <circle r="32" class="node-ring-2"/>
+            <circle r="6" class="node-dot"/>
+            <text class="node-label" x="0" y="-48" text-anchor="middle">db</text>
+            <text class="node-tag" x="0" y="60" text-anchor="middle">claude-code</text>
+          </g>
+          <g class="node" data-id="T" transform="translate(650 450)">
+            <circle r="32" class="node-ring"/>
+            <circle r="32" class="node-ring-2"/>
+            <circle r="6" class="node-dot"/>
+            <text class="node-label" x="0" y="-48" text-anchor="middle">tests</text>
+            <text class="node-tag" x="0" y="60" text-anchor="middle">claude-code</text>
+          </g>
+        </g>
+
+        <!-- Layer where message packets will be injected by JS -->
+        <g class="packets" filter="url(#soft-glow)"></g>
+      </svg>
+
+      <!-- Live transcript ticker, mirrors the animation -->
+      <div class="transcript" aria-live="polite" aria-label="Live message transcript">
+        <ol class="transcript-list" id="transcript"></ol>
+      </div>
+    </div>
+  </section>
+
+  <section class="about" id="about" aria-labelledby="about-title">
+    <h2 id="about-title" class="visually-hidden">What is claude-bridge?</h2>
+    <p class="about-copy">
+      <strong>claude-bridge</strong> is a local MCP server for multi-agent <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener noreferrer">Claude Code</a> and Claude Desktop workflows. Each Claude session registers on the bridge, then sessions can <code>ask</code> each other questions, <code>reply</code> with context, and share a scratchpad — turning isolated AI agents into a coordinated team that exchanges information over the Model Context Protocol.
+    </p>
+  </section>
+
+  <section class="how" id="how" aria-labelledby="how-title">
+    <h2 id="how-title" class="visually-hidden">How claude-bridge works</h2>
+    <ol class="how-grid">
+      <li class="how-step">
+        <span class="step-n">01</span>
+        <h3>register</h3>
+        <p>Each Claude session announces itself on a local broker. One line, lifecycle hook.</p>
+      </li>
+      <li class="how-step">
+        <span class="step-n">02</span>
+        <h3>ask</h3>
+        <p>One agent calls <code>ask(to, question)</code>. Its turn blocks until an answer comes back.</p>
+      </li>
+      <li class="how-step">
+        <span class="step-n">03</span>
+        <h3>reply</h3>
+        <p>The target agent sees a notification, replies with context. Both keep working.</p>
+      </li>
+      <li class="how-step">
+        <span class="step-n">04</span>
+        <h3>scratchpad</h3>
+        <p>Shared notes any agent can read or append. No more re-asking what's already known.</p>
+      </li>
+    </ol>
+    <p class="footnote">
+      Zero deps. ~600 lines of Node. Localhost only.<br/>
+      MCP-over-SSE for the CLI, MCP-over-stdio for Claude Desktop.
+    </p>
+  </section>
+
+  <footer class="foot" role="contentinfo">
+    <span>claude-bridge &middot; MIT</span>
+    <span>built for agents, not humans</span>
+  </footer>
+</main>
+
+<script src="./bridge.js" defer></script>
+</body>
+</html>
