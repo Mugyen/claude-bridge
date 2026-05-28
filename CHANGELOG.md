@@ -11,6 +11,9 @@ _Add entries here as you work on the next version. Move them under a dated
 heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
+### Added
+- **Design spec for cross-network federation** — `docs/specs/cross-network-federation.md`. Hub-and-spoke bridge linking so sessions on different machines can talk while each stays autonomous locally if the link drops. Designed and shelved as future work (not implemented); referenced from DEVELOPER.md "Planned features."
+
 ### Fixed
 - **Bridge restart could kill the calling session, and a process-leak left 17-day-old orphans** (v2.6.1 — incident fixes):
   - `./install.sh --stop` / `--restart` now print a loud warning that they disconnect **every** Claude session whose MCP client is on the bridge — including the one running the command (when its tool transport drops, the harness kills it; graceful shutdown makes the disconnect tidy but can't prevent it). Run lifecycle commands from a **separate terminal**, never from a session bound to the bridge. A plain `--start` is safe.

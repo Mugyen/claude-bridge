@@ -309,6 +309,10 @@ npm test
 
 ---
 
+## Planned features (designed, not built)
+
+- [ ] **Cross-network federation (hub-and-spoke bridge linking).** Let sessions on different machines/networks talk, while each machine keeps working locally if the link drops. Full design recorded in [`docs/specs/cross-network-federation.md`](docs/specs/cross-network-federation.md) — read it before starting. Key shape: sessions ALWAYS stay on their local bridge (hooks unchanged); `--share`/`--join` link bridges at the bridge layer over a Cloudflare quick tunnel + token; the link injects remote messages into the destination's local `messages` store so all existing delivery (hooks, idle-listener, `check_inbox`, `ask`, `notify`) is reused untouched. Phased (Phase 1 = link + relay + merged roster). Its two foundational pieces — a **token-auth layer** (header + token file + `/health` gate) and a **link/SSE liveness tweak** (TCP keepalive + prune-on-write-error) — can land independently first and are useful on their own. This supersedes the **Auth** TODO below.
+
 ## Frequent TODOs (work that's perpetually almost-worth-doing)
 
 - [ ] **Bridge logs**: rotate `/tmp/claude-bridge-server.log` — currently grows unbounded.
