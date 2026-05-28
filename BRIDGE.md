@@ -57,7 +57,7 @@ A session that's active on the bridge should keep listening even while it sits i
 
 **Closing / re-enabling:** on "stop the bridge listener", `TaskStop` the monitor and run `echo off > /tmp/claude-bridge-<your_session_id>.monitor` to disable auto-run for this session. To turn it back on, `rm -f` that file and arm again.
 
-Configurable via `CC_BRIDGE_MONITOR_INTERVAL` (seconds, default 25). Claude Code CLI only — Desktop has no Monitor tool, so Desktop sessions still check inbox manually.
+Configurable via `CC_BRIDGE_MONITOR_INTERVAL` (seconds, default 25). Claude Code CLI only — Desktop has no hooks (nothing nudges it) and no Monitor tool (nothing to run the poller), so Desktop sessions still check inbox manually.
 
 ## Checking your inbox
 
