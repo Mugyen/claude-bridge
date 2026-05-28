@@ -649,10 +649,23 @@ function shutdown(signal) {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
+// A startup bind failure (port already in use) is FATAL — exit instead of
+// letting the catch-all uncaughtException handler swallow it. Without this, an
+// EADDRINUSE leaves a headless process that never binds and never exits (kept
+// alive by the keepalive/gc intervals) — the 17-day-orphan leak. See DEVELOPER.md.
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`${ts()} ✗ port ${PORT} already in use — another bridge is running. Exiting.`);
+    process.exit(1);
+  }
+  console.error(`${ts()} ✗ server error: ${err.message}`);
+  process.exit(1);
+});
+
 server.listen(PORT, () => {
   writePid();
   console.log(`\n${"═".repeat(42)}`);
-  console.log(`  claude-bridge v2.6`);
+  console.log(`  claude-bridge v2.6.1`);
   console.log(`  PID:     ${process.pid}`);
   console.log(`  SSE:     http://localhost:${PORT}/sse`);
   console.log(`  Health:  http://localhost:${PORT}/health`);

@@ -429,14 +429,23 @@ start_bridge() {
   fi
 
   nohup node "$REPO_DIR/bridge-server.mjs" >> /tmp/claude-bridge-server.log 2>&1 &
-  sleep 1
+  local child=$!
 
-  if [ -f "$PID_FILE" ]; then
-    local pid
-    pid=$(cat "$PID_FILE")
-    ok "Bridge started (PID $pid, port $PORT, log: /tmp/claude-bridge-server.log)"
+  # Verify the server actually came up — don't trust the PID file alone. The
+  # server writes the PID file only AFTER a successful bind, so a bind failure
+  # (EADDRINUSE) would otherwise look like a silent "no PID file" while leaving a
+  # child process behind. Poll /health, and reap the child if it never serves.
+  local up=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -sf --max-time 1 "http://localhost:$PORT/health" >/dev/null 2>&1; then up=1; break; fi
+    sleep 0.3
+  done
+
+  if [ -n "$up" ] && [ -f "$PID_FILE" ]; then
+    ok "Bridge started (PID $(cat "$PID_FILE"), port $PORT, log: /tmp/claude-bridge-server.log)"
   else
-    fail "Bridge failed to start — check /tmp/claude-bridge-server.log"
+    kill "$child" 2>/dev/null
+    fail "Bridge failed to start on port $PORT — check /tmp/claude-bridge-server.log"
   fi
 }
 
@@ -595,10 +604,16 @@ case "$ACTION" in
     ;;
 
   stop)
+    warn "Stopping the bridge disconnects every Claude session whose MCP client is on it —"
+    warn "including the session running this command. Run this from a SEPARATE terminal, not"
+    warn "from a Claude session bound to this bridge. (See DEVELOPER.md lesson #23.)"
     stop_bridge
     ;;
 
   restart)
+    warn "Restarting the bridge disconnects every Claude session whose MCP client is on it —"
+    warn "including the session running this command, which the harness may then kill. Run this"
+    warn "from a SEPARATE terminal, not from a Claude session bound to this bridge. (lesson #23)"
     stop_bridge
     start_bridge
     ;;

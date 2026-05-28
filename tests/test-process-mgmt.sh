@@ -46,6 +46,19 @@ else
   fail "--start did not detect already-running (got: $OUT)"
 fi
 
+# EADDRINUSE regression (P1): a second server launched directly on the busy port
+# must EXIT, not become a headless orphan that never binds and never dies.
+node "$REPO_DIR/bridge-server.mjs" >> /tmp/claude-bridge-eaddr-test.log 2>&1 &
+dup_pid=$!
+sleep 2
+dup_state=$(ps -o state= -p "$dup_pid" 2>/dev/null | tr -d ' ')
+case "$dup_state" in
+  ""|Z*) pass "second server on a busy port exits instead of orphaning (EADDRINUSE handled)" ;;
+  *)     fail "second server still alive on busy port (state=$dup_state) — orphan leak"; kill "$dup_pid" 2>/dev/null ;;
+esac
+wait "$dup_pid" 2>/dev/null
+rm -f /tmp/claude-bridge-eaddr-test.log
+
 # Stop
 OUT=$("$REPO_DIR/install.sh" --stop 2>&1)
 sleep 1

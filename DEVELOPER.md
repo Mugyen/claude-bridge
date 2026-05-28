@@ -158,6 +158,13 @@ The Monitor command embedded in `bridge-hook.sh` greps `'Question from|NEW QUEST
 ### 22. `notify` to an offline name is a dead-letter when names are auto-generated
 `notify` queues for an offline target and delivers when a session by that name next polls (30-day TTL). But auto-generated names are random per session-start (`<dir>-<4hex>`), so a notice addressed to a *stale* name will essentially never deliver — no future session reclaims it. `notify` is reliable for currently-online sessions and for stable names (`CC_BRIDGE_SESSION`); addressing a name that has since rotated is user error, not a bug. Don't "fix" this by trying to reroute — the sender chose the name. Documented as a limitation in USAGE.md.
 
+### 23. NEVER `--stop`/`--restart` the bridge from a session connected to it — and the server must die on a bind failure
+Two related failures, both diagnosed from a real incident (a live session was SIGKILLed, exit 137, mid-`--restart`):
+
+**(a) The self-restart hazard.** `--stop`/`--restart` tears down every SSE connection — including the MCP transport of the session running the command. When that session loses its tool provider, the Claude Code harness kills it (the in-flight Bash child takes the SIGKILL). Graceful shutdown (`event: close`) does NOT save it: it makes the disconnect *tidy*, but you cannot keep a tool provider alive while it restarts itself. There is no server-side fix. The mitigation is procedural: **run lifecycle commands from a separate terminal**, never from a Claude session bound to the bridge. `install.sh` now prints a loud warning on `--stop`/`--restart`. A plain `--start` is safe (it never stops anything). It was NOT an OOM and NOT install.sh killing the parent — `stop_bridge` only ever `kill`s the bridge PID.
+
+**(b) The orphan-process leak.** `bridge-server.mjs` had no `server.on("error")` handler, so a startup `EADDRINUSE` was swallowed by the catch-all `uncaughtException` (lesson #7) — the process never bound a port and never exited, kept alive forever by the keepalive + gc `setInterval`s. Result: headless zombie servers (we found three ~17 days old). Fixed: `server.on("error")` now `process.exit(1)` on bind failure. And `start_bridge` no longer trusts the PID file alone (it's written only *after* a successful bind) — it polls `/health` and reaps the child if the server never serves. Regression-tested in `test-process-mgmt.sh` (a second server on a busy port must exit, not orphan).
+
 ---
 
 ## Versioning + manifest approach
