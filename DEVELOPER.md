@@ -84,7 +84,7 @@ Claude Desktop ──stdio──┘   (port 7400)        │
 
 ### MCP tool list
 
-`register`, `list_sessions`, `ask`, `reply`, `check_inbox`, `get_thread`, `broadcast`, `read_scratchpad` — 8 tools, defined in `bridge-server.mjs` TOOLS array (lines ~135–230).
+`register`, `list_sessions`, `ask`, `reply`, `notify`, `check_inbox`, `get_thread`, `broadcast`, `read_scratchpad` — 9 tools, defined in `bridge-server.mjs` TOOLS array.
 
 ---
 
@@ -145,6 +145,18 @@ The Monitor poll loop runs in the shell — the model is invoked **only when the
 `/tmp/claude-bridge-${SESSION_ID}.monitor` holds `on` (agent has armed the Monitor), `off` (user disabled), or is absent (eligible). The hook nudges whenever it's absent and re-nudges on every ask/reply until it's set. **The first version had the hook write `on` itself, the moment it nudged — that was a bug.** The nudge is only advisory `additionalContext`; the agent may not act on it (especially as an *asker*, where the nudge arrives bundled with the reply it was waiting on). Writing `on` pre-emptively meant a skipped nudge was lost forever: the session showed `on` but had no monitor running, and never got re-nudged. Fix: the AGENT runs `echo on > $MONITOR_FILE` only once the Monitor is actually live; the hook keeps reminding until then. "Stop the bridge listener" → agent writes `off`; re-enable → `rm`s the file. It's a `/tmp` runtime file, not an install artifact, so it's NOT in the manifest — but `bridge-end-hook.sh` must `rm` it on SessionEnd (it's in the glob). If you add more per-session `/tmp` files, add them there too.
 
 Trade-off accepted: while un-armed, the reminder repeats on each ask/reply (engagement-rate-limited, never on idle ticks). A session that genuinely can't run Monitor (no such tool) would be reminded each time it engages — bound it with a retry cap if that ever bites, but don't go back to the silent optimistic write.
+
+### 19. Message "pending" is `answer === null` — a one-way NOTICE must carry NO `answer`
+The whole pending/delivery system keys on `answer === null`: it's what blocks `ask`, what `/pending` re-injects, what `getPendingFor`/`reply`/`check_inbox` treat as "awaiting a reply." The `notify` tool's one-way NOTICE (`kind: "notice"`) therefore stores **no `answer` field at all** and uses a separate `delivered` boolean instead. If you ever give a notice an `answer: null`, it will instantly start behaving like an unanswered question — re-injected forever, "reply NOW" prompt, targetable by `reply()`. Don't. The filters also carry an explicit `m.kind !== "notice"` guard as belt-and-suspenders; keep it. Notices are delivered exactly once (marked `delivered` on first read via `/pending` OR `check_inbox`), appear in `get_thread`, and migrate on rename/reconnect alongside pending asks.
+
+### 20. The idle-listener grep and the `/pending` output are coupled — change them together
+The Monitor command embedded in `bridge-hook.sh` greps `'Question from|NEW QUESTION|NOTICE from|id:'` and dedupes on `id: <id>`. So any new message type surfaced by `/pending` must (a) include an `id: <id>` line (for dedupe) and (b) have its banner keyword added to that grep, or an idle session won't wake on it. That's why adding `notify` required editing both the server's `/pending` block AND the hook's grep. Already-armed monitors from before a grep change only pick up the new keyword after re-arming.
+
+### 21. The idle-listener MUST peek `/pending?peek=1` — a consume-once message it polls would be eaten before the agent reads it
+`/pending` marks one-way notices `delivered` as a side-effect of the GET (questions are NOT consumed — they persist until answered, so this never bit them). The idle-listener polls `/pending` every 25s; if it consumed, the monitor's own poll would mark the notice delivered, then wake the agent with only the grepped banner (the content line doesn't match the grep) — and the woken agent's `check_inbox` would find nothing. **Real bug we hit:** a notice arrived, the listener woke the receiver, and its inbox came back empty because the listener's poll had already eaten it. Fix: the monitor uses `/pending?session=X&peek=1`, which renders without marking delivered. Consumption (mark-delivered) happens only on the real-delivery paths — the PostToolUse hook injection and `check_inbox` — where the content actually reaches the agent. **If you add another consume-once message type, the monitor must peek it too.**
+
+### 22. `notify` to an offline name is a dead-letter when names are auto-generated
+`notify` queues for an offline target and delivers when a session by that name next polls (30-day TTL). But auto-generated names are random per session-start (`<dir>-<4hex>`), so a notice addressed to a *stale* name will essentially never deliver — no future session reclaims it. `notify` is reliable for currently-online sessions and for stable names (`CC_BRIDGE_SESSION`); addressing a name that has since rotated is user error, not a bug. Don't "fix" this by trying to reroute — the sender chose the name. Documented as a limitation in USAGE.md.
 
 ---
 

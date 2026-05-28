@@ -30,7 +30,7 @@ const sessions = new Map(); // sseId → info
 /** @type {Map<string, string>} name → sseId */
 const nameToSSE = new Map();
 
-/** @type {Map<string, {id:string, from:string, to:string, question:string, answer:string|null, ts:number, answeredAt:number|null}>} */
+/** @type {Map<string, {id:string, from:string, to:string, kind?:"question"|"notice", question?:string, answer?:string|null, content?:string, delivered?:boolean, ts:number, answeredAt?:number|null}>} */
 const messages = new Map();
 
 /** @type {Map<string, string[]>} threadKey → [msgId, ...] */
@@ -116,7 +116,10 @@ function getThread(a, b) {
   const ids = threads.get(tkey(a, b)) || [];
   return ids.map((id) => {
     const m = messages.get(id);
-    return { id: m.id, from: m.from, to: m.to, question: m.question, answer: m.answer, answered: m.answer !== null, ts: m.ts };
+    if (m.kind === "notice") {
+      return { id: m.id, from: m.from, to: m.to, kind: "notice", content: m.content, delivered: !!m.delivered, ts: m.ts };
+    }
+    return { id: m.id, from: m.from, to: m.to, kind: "question", question: m.question, answer: m.answer, answered: m.answer !== null, ts: m.ts };
   });
 }
 
@@ -125,7 +128,9 @@ function recentAnswered(a, b, n = 5) {
 }
 
 function getPendingFor(name) {
-  return [...messages.values()].filter((m) => m.to === name && m.answer === null);
+  // Questions awaiting a reply. Notices are one-way (no answer), so they're
+  // explicitly excluded — they must never show up as something to reply to.
+  return [...messages.values()].filter((m) => m.to === name && m.kind !== "notice" && m.answer === null);
 }
 
 // ─── MCP Tool Definitions ───────────────────────────────────────────────────
@@ -176,8 +181,21 @@ const TOOLS = [
     },
   },
   {
+    name: "notify",
+    description:
+      "Send a one-way NOTICE to another session — a fire-and-forget FYI that does NOT block and does NOT expect a reply. Use for status updates, heads-ups, and decisions the other agent should know but needn't answer (e.g. \"merged the auth PR, main is green\"). For a question you need answered, use ask instead; for shared state others pull on demand, use broadcast.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Target session name" },
+        content: { type: "string", description: "The message to deliver. Self-contained — the receiver won't ask follow-ups." },
+      },
+      required: ["to", "content"],
+    },
+  },
+  {
     name: "check_inbox",
-    description: "Check for unanswered questions addressed to you. Call this instead of polling get_thread with every session name.",
+    description: "Check for unanswered questions and undelivered one-way NOTICEs addressed to you. Call this instead of polling get_thread with every session name.",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -237,13 +255,13 @@ async function executeTool(sseId, name, args) {
             sseClients.delete(oldSSE);
             sessions.delete(oldSSE);
             nameToSSE.delete(oldName);
-            // Migrate pending asks from old name to new name
+            // Migrate pending asks AND undelivered notices from old name to new name
             for (const m of messages.values()) {
-              if (m.to === oldName && m.answer === null) {
+              if (m.to === oldName && (m.answer === null || (m.kind === "notice" && !m.delivered))) {
                 m.to = sName;
               }
             }
-            console.log(`${ts()} ↪ reconnect: "${oldName}" → "${sName}" (old SSE closed, pending asks migrated)`);
+            console.log(`${ts()} ↪ reconnect: "${oldName}" → "${sName}" (old SSE closed, pending asks + notices migrated)`);
           }
         }
       }
@@ -254,11 +272,11 @@ async function executeTool(sseId, name, args) {
       if (prev && prev.name !== sName && nameToSSE.get(prev.name) === sseId) {
         nameToSSE.delete(prev.name);
         for (const m of messages.values()) {
-          if (m.to === prev.name && m.answer === null) {
+          if (m.to === prev.name && (m.answer === null || (m.kind === "notice" && !m.delivered))) {
             m.to = sName;
           }
         }
-        console.log(`${ts()} ↪ rename: "${prev.name}" → "${sName}" (old name retired, pending asks migrated)`);
+        console.log(`${ts()} ↪ rename: "${prev.name}" → "${sName}" (old name retired, pending asks + notices migrated)`);
       }
       sessions.set(sseId, { name: sName, description, connectedAt: Date.now() });
       nameToSSE.set(sName, sseId);
@@ -338,9 +356,35 @@ async function executeTool(sseId, name, args) {
       return { ok: true, message_id: msg.id };
     }
 
+    case "notify": {
+      if (!myName) return { error: "Call register() first." };
+      const { to, content } = args;
+      if (typeof to !== "string" || typeof content !== "string") {
+        return { error: "notify requires { to: string, content: string }" };
+      }
+      const id = crypto.randomUUID().slice(0, 8);
+      const msg = { id, from: myName, to, kind: "notice", content, delivered: false, ts: Date.now() };
+      messages.set(id, msg);
+      const key = tkey(myName, to);
+      if (!threads.has(key)) threads.set(key, []);
+      threads.get(key).push(id);
+      const targetSSE = nameToSSE.get(to);
+      const online = !!(targetSSE && sseClients.has(targetSSE));
+      console.log(`${ts()} 📨 ${myName} → ${to} (notice): "${content.slice(0, 80)}"`);
+      const result = { ok: true, message_id: id, to, target_online: online };
+      if (!online) {
+        result.note = `"${to}" is not currently connected — the NOTICE is queued and delivers when a session named "${to}" next polls (within the 30-day TTL). Active: ${activeSessions().map((s) => s.name).join(", ") || "(none)"}`;
+      }
+      return result;
+    }
+
     case "check_inbox": {
       if (!myName) return { error: "Call register() first." };
       const pending = getPendingFor(myName);
+      // Undelivered one-way notices — return them and mark delivered (this is the
+      // delivery path for hookless clients like the Desktop app).
+      const notices = [...messages.values()].filter((m) => m.kind === "notice" && m.to === myName && !m.delivered);
+      for (const n of notices) { n.delivered = true; n.deliveredAt = Date.now(); }
       return {
         session: myName,
         pending_count: pending.length,
@@ -349,6 +393,12 @@ async function executeTool(sseId, name, args) {
           from: m.from,
           question: m.question,
           asked_at: new Date(m.ts).toISOString(),
+        })),
+        notices: notices.map((m) => ({
+          id: m.id,
+          from: m.from,
+          content: m.content,
+          sent_at: new Date(m.ts).toISOString(),
         })),
       };
     }
@@ -476,9 +526,15 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/pending") {
     const session = url.searchParams.get("session");
     if (!session) { res.writeHead(400); res.end("missing ?session="); return; }
+    // peek = render without consuming. The idle-listener monitor peeks (it only
+    // needs to detect "something new" to wake the agent); real delivery — and the
+    // mark-delivered for one-way notices — happens via the PostToolUse hook
+    // injection or check_inbox, where the content actually reaches the agent.
+    const peek = url.searchParams.get("peek");
 
-    const pending = [...messages.values()].filter((m) => m.to === session && m.answer === null);
-    if (pending.length === 0) { res.writeHead(200, { "Content-Type": "text/plain" }); res.end(""); return; }
+    const pending = [...messages.values()].filter((m) => m.to === session && m.kind !== "notice" && m.answer === null);
+    const notices = [...messages.values()].filter((m) => m.to === session && m.kind === "notice" && !m.delivered);
+    if (pending.length === 0 && notices.length === 0) { res.writeHead(200, { "Content-Type": "text/plain" }); res.end(""); return; }
 
     let out = "";
     for (const msg of pending) {
@@ -505,6 +561,29 @@ const server = http.createServer(async (req, res) => {
       out += `${"═".repeat(60)}\n`;
     }
 
+    // One-way NOTICEs — delivered exactly once, then marked delivered so they
+    // never re-inject. The `id:` line lets the idle-listener dedupe; "NOTICE from"
+    // is what its grep matches to wake a dormant session.
+    for (const msg of notices) {
+      const fromInfo = [...sessions.values()].find((s) => s.name === msg.from);
+
+      out += `\n${"═".repeat(60)}\n`;
+      out += `📨 NOTICE from "${msg.from}"`;
+      if (fromInfo?.description) out += ` (${fromInfo.description})`;
+      out += `\n${"═".repeat(60)}\n`;
+      out += `id: ${msg.id}\n`;
+      out += `${msg.content}\n\n`;
+      out += `(FYI — no reply needed. This is a one-way message; take it in and continue.)\n`;
+      out += `${"═".repeat(60)}\n`;
+
+      // Only a non-peek read consumes the notice. A peeking idle-listener must
+      // leave it undelivered so the woken agent can still read it via check_inbox.
+      if (!peek) {
+        msg.delivered = true;
+        msg.deliveredAt = Date.now();
+      }
+    }
+
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(out);
     return;
@@ -526,8 +605,9 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({
       status: "ok",
       sessions: activeSessions(),
-      pending: [...messages.values()].filter((m) => !m.answer).length,
+      pending: [...messages.values()].filter((m) => m.kind !== "notice" && !m.answer).length,
       answered: [...messages.values()].filter((m) => m.answer).length,
+      notices: [...messages.values()].filter((m) => m.kind === "notice").length,
     }));
     return;
   }
@@ -572,7 +652,7 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 server.listen(PORT, () => {
   writePid();
   console.log(`\n${"═".repeat(42)}`);
-  console.log(`  claude-bridge v2.5`);
+  console.log(`  claude-bridge v2.6`);
   console.log(`  PID:     ${process.pid}`);
   console.log(`  SSE:     http://localhost:${PORT}/sse`);
   console.log(`  Health:  http://localhost:${PORT}/health`);

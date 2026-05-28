@@ -99,6 +99,19 @@ export class TestBridge {
     throw new Error(`Timed out waiting for response to ${name}`);
   }
 
+  async pending(session, { peek = false } = {}) {
+    const url = `http://localhost:${this.port}/pending?session=${encodeURIComponent(session)}${peek ? "&peek=1" : ""}`;
+    return new Promise((resolve, reject) => {
+      http
+        .get(url, (res) => {
+          let b = "";
+          res.on("data", (c) => (b += c));
+          res.on("end", () => resolve(b));
+        })
+        .on("error", reject);
+    });
+  }
+
   async health() {
     return new Promise((resolve, reject) => {
       http

@@ -163,6 +163,7 @@ When you want agents to coordinate, just tell them in plain language:
 |---|---|
 | See who's online | "Check who's on the bridge" |
 | Get info from another agent | "Ask the frontend session what auth flow they're using" |
+| Tell another agent something (no reply) | "Let the backend session know I merged the auth PR" |
 | Share a decision | "Broadcast to the bridge that we're using PostgreSQL, not MySQL" |
 | Check conversation history | "Show me the thread with the api-builder session" |
 | Check for incoming questions | "Check your bridge inbox" |
@@ -277,10 +278,13 @@ These are called by the agent, not by you. Listed here for debugging and to docu
 | `list_sessions` | — | — | See who's online |
 | `ask` | `to` (string), `question` (string) | — | Ask another session a question (blocks until reply, 5min timeout) |
 | `reply` | `answer` (string) | `message_id` (string) | Answer a pending question (auto-targets if only one pending) |
-| `check_inbox` | — | — | See all unanswered questions addressed to you |
-| `get_thread` | `with_session` (string) | — | Get Q&A history with another session |
+| `notify` | `to` (string), `content` (string) | — | Send a one-way NOTICE (fire-and-forget FYI; non-blocking, no reply expected) |
+| `check_inbox` | — | — | See unanswered questions **and** undelivered one-way NOTICEs addressed to you |
+| `get_thread` | `with_session` (string) | — | Get Q&A + NOTICE history with another session |
 | `broadcast` | `content` (string) | `append` (boolean) | Write to your scratchpad (visible to all) |
 | `read_scratchpad` | — | `session` (string) | Read one or all scratchpads |
+
+> **Note on `notify` and offline targets:** a NOTICE to a session that isn't connected is queued and delivers when a session by that name next polls (30-day TTL). But auto-generated names are random per session-start (`<dir>-<4hex>`), so a NOTICE addressed to a name that has since rotated will essentially never deliver. `notify` is reliable for **currently-online sessions** and for **stable names** (set `CC_BRIDGE_SESSION`). Check `list_sessions()` for the current name before sending to a session that may have reconnected.
 
 ## REST endpoints reference
 
@@ -289,7 +293,7 @@ These are used internally by hook scripts. Listed here for debugging.
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Server status, active sessions, message counts |
-| `GET /pending?session=<name>` | Pending questions for a session |
+| `GET /pending?session=<name>` | Pending questions + undelivered one-way NOTICEs for a session (delivers notices once) |
 | `GET /whoami?session_id=<id>` | Resolve session ID to bridge name |
 | `GET /sse` | SSE transport for MCP |
 | `POST /message` | JSON-RPC for MCP tool calls |

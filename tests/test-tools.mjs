@@ -44,9 +44,63 @@ try {
   const thread = await bridge.call("get_thread", { with_session: "bob" });
   assert("get_thread returns empty for unknown peer", Array.isArray(thread.messages) && thread.messages.length === 0, JSON.stringify(thread));
 
+  // ── notify: input validation (no crash on bad input) ────────────────────
+  const nbad1 = await bridge.call("notify", { to: "alice" });
+  assert("notify rejects missing content", typeof nbad1.error === "string", JSON.stringify(nbad1));
+  const nbad2 = await bridge.call("notify", { content: "hi" });
+  assert("notify rejects missing to", typeof nbad2.error === "string", JSON.stringify(nbad2));
+  const nbad3 = await bridge.call("notify", { to: "alice", content: 42 });
+  assert("notify rejects non-string content", typeof nbad3.error === "string", JSON.stringify(nbad3));
+
+  // ── notify: happy path, non-blocking (alice → alice) ────────────────────
+  const n1 = await bridge.call("notify", { to: "alice", content: "FYI one" });
+  assert("notify returns ok + message_id", n1.ok === true && typeof n1.message_id === "string", JSON.stringify(n1));
+  assert("notify reports target online", n1.target_online === true, JSON.stringify(n1));
+
+  // ── /pending delivers the NOTICE exactly once ───────────────────────────
+  const p1 = await bridge.pending("alice");
+  assert("/pending shows NOTICE banner with id + content",
+    p1.includes("NOTICE from") && p1.includes(`id: ${n1.message_id}`) && p1.includes("FYI one"),
+    JSON.stringify(p1));
+  const p2 = await bridge.pending("alice");
+  assert("/pending does not re-deliver the notice", !p2.includes("FYI one"), JSON.stringify(p2));
+
+  // ── notify is NOT a pending question (reply/check_inbox ignore it) ──────
+  const ibQ = await bridge.call("check_inbox");
+  assert("notice never counts as a pending question", ibQ.pending_count === 0, JSON.stringify(ibQ));
+
+  // ── check_inbox surfaces an undelivered notice once (Desktop path) ──────
+  const n2 = await bridge.call("notify", { to: "alice", content: "FYI two" });
+  const ib1 = await bridge.call("check_inbox");
+  assert("check_inbox lists undelivered notice", (ib1.notices || []).some((x) => x.id === n2.message_id && x.content === "FYI two"), JSON.stringify(ib1));
+  const ib2 = await bridge.call("check_inbox");
+  assert("check_inbox does not re-deliver notice", !(ib2.notices || []).some((x) => x.id === n2.message_id), JSON.stringify(ib2));
+
+  // ── get_thread includes the notice, labelled, with no answer ────────────
+  const th = await bridge.call("get_thread", { with_session: "alice" });
+  assert("get_thread includes a notice entry", (th.messages || []).some((m) => m.kind === "notice" && typeof m.content === "string"), JSON.stringify(th));
+
+  // ── notify to an offline name queues instead of erroring ────────────────
+  const noff = await bridge.call("notify", { to: "ghost-session", content: "later" });
+  assert("notify to offline target queues (ok, target_online=false)", noff.ok === true && noff.target_online === false, JSON.stringify(noff));
+
+  // ── peek mode must NOT consume (the idle-listener bug) ──────────────────
+  // The monitor peeks to wake the agent; the notice must survive so the woken
+  // agent can still read it via check_inbox. Only a non-peek read consumes.
+  const n3 = await bridge.call("notify", { to: "alice", content: "FYI three" });
+  const peek1 = await bridge.pending("alice", { peek: true });
+  assert("peek shows the notice", peek1.includes("FYI three") && peek1.includes(`id: ${n3.message_id}`), JSON.stringify(peek1));
+  const peek2 = await bridge.pending("alice", { peek: true });
+  assert("peek does NOT consume (still there on second peek)", peek2.includes("FYI three"), JSON.stringify(peek2));
+  const ibPeek = await bridge.call("check_inbox");
+  assert("woken agent can still read the peeked notice via check_inbox", (ibPeek.notices || []).some((x) => x.id === n3.message_id), JSON.stringify(ibPeek));
+  const peek3 = await bridge.pending("alice", { peek: true });
+  assert("after check_inbox consumes it, peek is empty", !peek3.includes("FYI three"), JSON.stringify(peek3));
+
   // ── server still alive (Bug 2 regression test) ──────────────────────────
   const h = await bridge.health();
   assert("server still alive after bad inputs", h.status === "ok", JSON.stringify(h));
+  assert("health reports a notices count", typeof h.notices === "number" && h.notices >= 1, JSON.stringify(h));
 } finally {
   await bridge.stop();
   reportAndExit();

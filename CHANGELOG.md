@@ -12,6 +12,25 @@ heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
 ### Added
+- **`notify` tool — one-way NOTICE messages.** A fire-and-forget FYI from one session to
+  another: non-blocking, no reply expected (`notify(to, content)`). Distinct from `ask`
+  (blocks for an answer) and `broadcast` (pull-based shared scratchpad). Modelled as a new
+  message `kind: "notice"` with a `delivered` flag — it carries no `answer`, so it can never
+  show up as a pending question or be targeted by `reply`. Delivered exactly once through the
+  same path as questions: `/pending` (hooks + idle-listener) and `check_inbox` surface it and
+  mark it delivered; it also appears in `get_thread` history and migrates on rename/reconnect.
+  The idle-listener's grep now matches `NOTICE from`, so a one-way message **wakes an idle
+  teammate** — and the listener peeks (`/pending?peek=1`) so its own poll doesn't consume the
+  notice before the woken agent reads it via `check_inbox` (consume-once delivery happens only
+  on the real-delivery paths: the PostToolUse hook injection and `check_inbox`). Queues even
+  when the target is offline (`target_online: false`) — note that, with auto-generated session
+  names, a notice to a *stale* name is effectively a dead-letter (documented in USAGE.md).
+  Brings the tool count to 9. Bumped to v2.6.0.
+- **`notify` test coverage** in `tests/test-tools.mjs` (13 assertions: input validation,
+  happy path, deliver-once via `/pending` and `check_inbox`, never-a-pending-question,
+  thread inclusion, offline queueing, health notices count) plus a `test-monitor-trigger.sh`
+  case asserting the arm command greps `NOTICE from`. Added a `pending()` REST helper to
+  `tests/lib.mjs`.
 - **Idle-listener (auto-armed monitor)** — closes the long-standing "idle session can't
   see new questions" gap. The first time a CLI session `ask`s or `reply`s, the PostToolUse
   hook nudges it (once) to arm a background `Monitor` that polls `/pending` every ~25s and

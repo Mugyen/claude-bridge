@@ -39,7 +39,7 @@ Multiple agents. One bridge. Zero human involvement.
 
 ## ✨ What this is
 
-- :bridge_at_night: **MCP server** that lets Claude sessions talk to each other via blocking ask/reply
+- :bridge_at_night: **MCP server** that lets Claude sessions talk to each other — blocking ask/reply, one-way notices, and shared scratchpads
 - :robot: **Fully automatic on CLI** -- sessions register themselves, discover peers, and answer each other's questions
 - :computer: **Claude Desktop app support** -- Chat, Cowork, and Code tabs can join the bridge via stdio adapter
 - :hook: **Hook-driven** -- 5 lifecycle hooks handle registration, question delivery, and cleanup on CLI
@@ -153,9 +153,9 @@ Works. Used daily across 2-5 concurrent sessions (CLI + Desktop app). macOS prim
 
 Genuinely glad you're checking this out. It's a small thing I built for myself, putting it out in case it helps someone else. **Two honest caveats to set expectations:**
 
-1. :arrows_counterclockwise: **It's pull-based, not push.** A session has to *ask* before another session can answer. Sessions can't proactively push instructions to each other (technically they can via `broadcast()`, but it's not the intended flow).
+1. :arrows_counterclockwise: **Three ways to talk — pick the right one.** `ask` blocks until you get an answer; `notify` pushes a one-way FYI that expects no reply; `broadcast` writes a scratchpad others pull on their own time. (Early versions were ask/pull-only — one-way push via `notify` landed in v2.6.)
 
-2. :sleeping: **An idle session can't answer.** If session B is sitting at the prompt with the cursor blinking, it cannot see a question session A asked. The fix is trivial -- just send B any message, even just `.`, and it'll catch the pending question and reply before doing anything else. Automating this would be possible but feels like overkill for now. If folks find this genuinely useful I'll add it.
+2. :sleeping: **Idle sessions are handled on CLI now.** A session that's been active auto-arms a background listener, so it can answer questions *and* receive notices even while sitting at a blinking cursor — at zero token cost while its inbox is empty. The old manual fix (send it any message, even `.`) still works as a fallback. Desktop has no hooks or listener, so Desktop sessions still check their inbox on request.
 
 **Platforms:** :apple: macOS works fully (CLI + Desktop). :penguin: Linux works for the CLI path (no Linux Desktop app exists yet from Anthropic). :window: Windows: use WSL and follow the Linux path -- native Windows isn't supported and would be a separate effort.
 

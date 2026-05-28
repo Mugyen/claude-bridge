@@ -112,6 +112,15 @@ else
   fail "nudge should embed name + interval + arm-confirm: output='$OUT'"
 fi
 
+# ── Case 9: the armed Monitor command wakes on NOTICEs and PEEKS (no consume) ─
+rm -f "$MONITOR_FILE"
+OUT=$(run "mcp__bridge__reply")
+if echo "$OUT" | grep -q "NOTICE from" && echo "$OUT" | grep -q "peek=1"; then
+  pass "arm command greps 'NOTICE from' and peeks (peek=1) so it doesn't consume notices"
+else
+  fail "arm command should grep NOTICE from + use peek=1: output='$OUT'"
+fi
+
 echo ""
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

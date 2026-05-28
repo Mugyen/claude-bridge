@@ -60,7 +60,8 @@ Gotchas: The JWT_SECRET env var must be set (see .env.example). The middleware c
 | `list_sessions` | — | — | See who's online |
 | `ask` | `to` (string), `question` (string) | — | Ask another session a question (blocks until reply, 5min timeout) |
 | `reply` | `answer` (string) | `message_id` (string) | Answer a pending question (auto-targets if only one pending) |
-| `check_inbox` | — | — | See all unanswered questions addressed to you |
+| `notify` | `to` (string), `content` (string) | — | Send a one-way NOTICE (fire-and-forget FYI; does not block, no reply expected) |
+| `check_inbox` | — | — | See unanswered questions AND undelivered one-way NOTICEs addressed to you |
 | `get_thread` | `with_session` (string) | — | Get Q&A history with another session |
 | `broadcast` | `content` (string) | `append` (boolean) | Write to your scratchpad (visible to all) |
 | `read_scratchpad` | — | `session` (string) | Read one or all scratchpads |
@@ -71,7 +72,7 @@ A session that's active on the bridge should keep listening even while it sits i
 
 **Automatic:** when you `ask` or `reply`, the PostToolUse hook hands you a ready-made `Monitor` command. **Arm it**, then immediately run `echo on > /tmp/claude-bridge-<your_session_id>.monitor` so the reminder stops, and tell the user one line — e.g. "Armed bridge idle-listener (polling 25s)." The hook keeps reminding you on every ask/reply until you actually arm it — a skipped nudge is never lost, but it also won't go quiet until the listener is genuinely running.
 
-**What it does:** polls your `/pending` queue every ~25s and wakes you *only* when a new question arrives. It costs **zero tokens while your inbox is empty** — the loop runs in the shell, not the model, and emits nothing until there's something to answer. When it wakes you, reply from your own context exactly as you would for any bridge question.
+**What it does:** peeks at your `/pending` queue every ~25s and wakes you *only* when a new question or 📨 NOTICE arrives. It costs **zero tokens while your inbox is empty** — the loop runs in the shell, not the model, and emits nothing until something lands. The wake carries just the banner, so **call `check_inbox()` to read what came in**: answer a question from your own context, or simply take in a NOTICE (don't reply to notices). The peek doesn't consume, so `check_inbox()` will still have it.
 
 **Manual:** the user can say "arm the bridge listener" anytime — run the same Monitor command (and the `echo on` confirm).
 
@@ -92,6 +93,27 @@ Call `check_inbox()` to see all unanswered questions addressed to you. This is f
    - Good: "What middleware validates JWT tokens on protected routes, and where is the token signing secret configured?"
 4. **Build on previous answers** — reference them: "You mentioned JWT refresh tokens in your earlier answer — what's the exact expiry configuration and where is it set?"
 5. **Never re-ask** what's already in the thread history
+
+## Sending a one-way NOTICE (no reply needed)
+
+When you want to **tell** another session something it should know but needn't answer — a status update, a heads-up, a decision — use `notify(to="session-name", content="...")`. It's fire-and-forget: it does **not** block you, and the receiver is **not** asked to reply.
+
+```
+notify(to="backend", content="Merged the auth PR — main is green. The /api/auth/refresh endpoint is live; rotate your local JWT_SECRET to match .env.example.")
+```
+
+The receiver sees it as a `📨 NOTICE from "<you>"` — delivered once, marked read, with no reply prompt. If they're idle with a listener armed, the notice wakes them.
+
+**Which verb when:**
+- **`ask`** — you need an answer and will wait for it (blocks up to 5min).
+- **`notify`** — you're telling them something; carry on immediately (one recipient).
+- **`broadcast`** — shared state others pull on their own schedule via `read_scratchpad` (no specific recipient).
+
+Keep `content` self-contained — same bar as a good reply: specifics, the why, and any gotcha the receiver needs.
+
+## When you receive a 📨 NOTICE
+
+Take it in as context and continue your work. **Do not reply** — it's one-way by design. If it genuinely changes what you're doing and you want to respond, start your own `notify` or `ask`; don't treat the NOTICE as a pending question (it isn't one, and `reply()` won't target it).
 
 ## Proactive context sharing
 

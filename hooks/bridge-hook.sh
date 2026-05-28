@@ -103,22 +103,23 @@ case "$TOOL" in
       INTERVAL="${CC_BRIDGE_MONITOR_INTERVAL:-25}"
       NUDGE="🔗 claude-bridge: You're now active on the bridge. Arm your idle-listener so you can answer questions that arrive while you sit idle — without it, a dormant session never sees new questions until the user pokes it. (This reminder repeats on every ask/reply until you actually arm it.)
 
-→ Call the Monitor tool NOW with persistent: true, description: \"incoming bridge questions for ${SESSION}\", and this exact command:
+→ Call the Monitor tool NOW with persistent: true, description: \"incoming bridge messages for ${SESSION}\", and this exact command:
 
 prev=\"\"
 while true; do
-  out=\$(curl -sf \"http://localhost:${PORT}/pending?session=${SESSION}\" 2>/dev/null || true)
+  out=\$(curl -sf \"http://localhost:${PORT}/pending?session=${SESSION}&peek=1\" 2>/dev/null || true)
   if [ -n \"\$out\" ]; then
     ids=\$(printf '%s' \"\$out\" | grep -o 'id: [a-z0-9-]*' | sort)
     if [ \"\$ids\" != \"\$prev\" ]; then
-      printf '%s\\n' \"\$out\" | grep -E 'Question from|NEW QUESTION|id:'
+      printf '%s\\n' \"\$out\" | grep -E 'Question from|NEW QUESTION|NOTICE from|id:'
       prev=\"\$ids\"
     fi
   fi
   sleep ${INTERVAL}
 done
 
-This costs ZERO tokens while your inbox is empty — the loop runs in the shell and only wakes you when a NEW question id appears.
+This costs ZERO tokens while your inbox is empty — the loop runs in the shell and only wakes you when a NEW message id appears.
+When it wakes you, call check_inbox() to read what arrived — a question to answer, or a 📨 NOTICE to simply take in (notices appear in the notices list; do NOT reply to them).
 IMPORTANT: the instant the Monitor is running, run this so the reminder stops:  echo on > ${MONITOR_FILE}
 Then tell the user one line, e.g. \"Armed bridge idle-listener (polling ${INTERVAL}s).\"
 To CLOSE it later (user says \"stop the bridge listener\"): TaskStop the monitor, then run  echo off > ${MONITOR_FILE}  to disable auto-run for this session.
