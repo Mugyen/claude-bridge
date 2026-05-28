@@ -135,6 +135,17 @@ Run it ONCE per session in SessionStart and cache the result. Other hooks just r
 ### 15. Uninstall does NOT stop the bridge server
 Intentional — the server may have active sessions from other users/contexts. Uninstall removes config files and the PID file, but the running process stays. Users must `./install.sh --stop` explicitly (or `lsof -ti:7400 | xargs kill`). The reinstall path handles this gracefully: `--start` reports failure if port is busy, and you can investigate with `--check`.
 
+### 16. The `Monitor` tool is the ONLY way to wake a dormant agent — and the repo can't call it
+Hooks fire during active work (PostToolUse/Stop) but nothing fires while a session is truly idle, waiting on the user. A hook that spawns a detached background poller can't help: a detached process has no channel back into the model. The only primitive that re-invokes a dormant agent is a background `Monitor` task **the agent itself armed** (its stdout lines become harness notifications). So the bridge can't "auto-run" a monitor — it can only *instruct the agent* to arm one. The idle-listener does exactly that: `bridge-hook.sh` nudges the agent (once, on first ask/reply) with a ready-made Monitor command. This is Claude Code CLI only (Desktop has neither hooks nor Monitor).
+
+### 17. Idle-listener costs zero tokens ONLY because the command emits on change
+The Monitor poll loop runs in the shell — the model is invoked **only when the command prints a line**. The arm command must therefore stay silent unless a *new* question id appears (dedupe via `grep -o 'id: ...' | sort` compared to the previous round). If you "improve" it to also emit health/heartbeat/bridge-down lines, every one of those wakes the agent and burns tokens — the user explicitly wanted idle = silent = free. Don't add chatter to that loop. The trigger excludes `register`/`list`/`inbox` on purpose: only *engaging* (ask/reply) means "you're in a conversation, stay reachable."
+
+### 18. The `.monitor` stamp is written by the AGENT on arm — NOT optimistically by the hook
+`/tmp/claude-bridge-${SESSION_ID}.monitor` holds `on` (agent has armed the Monitor), `off` (user disabled), or is absent (eligible). The hook nudges whenever it's absent and re-nudges on every ask/reply until it's set. **The first version had the hook write `on` itself, the moment it nudged — that was a bug.** The nudge is only advisory `additionalContext`; the agent may not act on it (especially as an *asker*, where the nudge arrives bundled with the reply it was waiting on). Writing `on` pre-emptively meant a skipped nudge was lost forever: the session showed `on` but had no monitor running, and never got re-nudged. Fix: the AGENT runs `echo on > $MONITOR_FILE` only once the Monitor is actually live; the hook keeps reminding until then. "Stop the bridge listener" → agent writes `off`; re-enable → `rm`s the file. It's a `/tmp` runtime file, not an install artifact, so it's NOT in the manifest — but `bridge-end-hook.sh` must `rm` it on SessionEnd (it's in the glob). If you add more per-session `/tmp` files, add them there too.
+
+Trade-off accepted: while un-armed, the reminder repeats on each ask/reply (engagement-rate-limited, never on idle ticks). A session that genuinely can't run Monitor (no such tool) would be reminded each time it engages — bound it with a retry cap if that ever bites, but don't go back to the silent optimistic write.
+
 ---
 
 ## Versioning + manifest approach

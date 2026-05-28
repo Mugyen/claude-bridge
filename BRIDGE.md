@@ -45,6 +45,20 @@ I considered Passport.js but rejected it — adds 40KB of dependencies for funct
 Gotchas: The JWT_SECRET env var must be set (see .env.example). The middleware checks Authorization header first, falls back to cookie — make sure CORS is configured if you're calling from a different origin. The refresh endpoint is POST /api/auth/refresh, not GET."
 ```
 
+## Staying reachable while idle (auto-armed listener)
+
+A session that's active on the bridge should keep listening even while it sits idle — otherwise questions that arrive between your turns go unseen until the user pokes you.
+
+**Automatic:** when you `ask` or `reply`, the PostToolUse hook hands you a ready-made `Monitor` command. **Arm it**, then immediately run `echo on > /tmp/claude-bridge-<your_session_id>.monitor` so the reminder stops, and tell the user one line — e.g. "Armed bridge idle-listener (polling 25s)." The hook keeps reminding you on every ask/reply until you actually arm it — a skipped nudge is never lost, but it also won't go quiet until the listener is genuinely running.
+
+**What it does:** polls your `/pending` queue every ~25s and wakes you *only* when a new question arrives. It costs **zero tokens while your inbox is empty** — the loop runs in the shell, not the model, and emits nothing until there's something to answer. When it wakes you, reply from your own context exactly as you would for any bridge question.
+
+**Manual:** the user can say "arm the bridge listener" anytime — run the same Monitor command (and the `echo on` confirm).
+
+**Closing / re-enabling:** on "stop the bridge listener", `TaskStop` the monitor and run `echo off > /tmp/claude-bridge-<your_session_id>.monitor` to disable auto-run for this session. To turn it back on, `rm -f` that file and arm again.
+
+Configurable via `CC_BRIDGE_MONITOR_INTERVAL` (seconds, default 25). Claude Code CLI only — Desktop has no Monitor tool, so Desktop sessions still check inbox manually.
+
 ## Checking your inbox
 
 Call `check_inbox()` to see all unanswered questions addressed to you. This is faster than calling `get_thread` with every session name.

@@ -174,18 +174,27 @@ You don't need to know tool names or parameters. The agent handles `register()`,
 
 - **Register on first message** -- the UserPromptSubmit hook forces registration before anything else
 - **Answer bridge questions immediately** -- when a question arrives via PostToolUse hook, the agent answers before continuing its own work
+- **Arm an idle-listener once active** -- the first time a CLI agent asks or replies, it's nudged to start a background monitor so it keeps answering questions even while sitting idle (see below)
 - **Re-register on disconnect** -- if the bridge restarts or SSE drops, hooks detect it and prompt re-registration
 - **Build on thread history** -- agents check `get_thread()` before asking to avoid repeats
 
-### :bangbang: Known limitation: idle sessions
+### Idle sessions: the auto-armed listener
 
-If session B is **sitting idle** (cursor blinking, waiting for your input) and session A asks it a question, B **cannot see the question** until it wakes up. This is a Claude Code harness limitation -- there is no way to inject context into a truly idle session.
+The PostToolUse/Stop hooks only fire during a session's **active work** -- they can't wake a session that's sitting idle (cursor blinking, waiting for your input). So historically, if session A asked idle session B a question, B couldn't see it until you poked it.
 
-**The workaround:** Send session B any message -- even just `.` or `reply`. The Stop hook fires and catches the pending question. The agent will answer it before doing anything else.
+The **idle-listener** closes that gap. The first time a CLI agent `ask`s or `reply`s, it arms a background monitor that polls its inbox every ~25s and wakes the agent **only when a new question arrives**. It costs **zero tokens while the inbox is empty** -- the poll loop runs in the shell, not the model. The agent tells you when it arms one ("Armed bridge idle-listener (polling 25s).").
 
-The Stop hook covers ~95% of cases (it fires when an agent finishes a turn). The only gap is when a session has been completely idle for a while and a new question arrives after that.
+| What you want | What to tell your agent |
+|---|---|
+| Start listening manually | "Arm the bridge listener" |
+| Stop it (disables auto-run for the session) | "Stop the bridge listener" |
+| Turn it back on | "Arm the bridge listener" again |
 
-This applies to **Desktop sessions too** -- since they have no hooks at all, you must tell them to "check your inbox" for them to see pending questions.
+Tune the interval with `CC_BRIDGE_MONITOR_INTERVAL` (seconds, default 25).
+
+**Fallback poke:** you can still wake any session by sending it any message -- even `.` -- which fires the Stop hook and catches pending questions.
+
+**Desktop sessions** have no hooks and no Monitor tool, so the listener doesn't apply -- tell them to "check your inbox" to see pending questions.
 
 ---
 
@@ -213,6 +222,7 @@ Tell your Desktop agent:
 |---|---|---|
 | `CC_BRIDGE_PORT` | `7400` | "Use port 8888 for the bridge" |
 | `CC_BRIDGE_SESSION` | auto-generated | "Register on the bridge as 'api-builder'" |
+| `CC_BRIDGE_MONITOR_INTERVAL` | `25` | "Poll the bridge every 15 seconds for idle questions" |
 
 Auto-generated names follow the pattern `<dirname>-<4hex>`. For stable names, set in your shell profile:
 
@@ -242,6 +252,7 @@ export CC_BRIDGE_SESSION=api-builder
 |---|---|---|
 | **PostToolUse hook** | After every tool call | Checks `/pending`, injects questions into agent's context |
 | **Stop hook** | Agent finishes a turn | If questions are pending, blocks idle and re-injects them |
+| **Idle-listener (Monitor)** | Self-armed after first `ask`/`reply` | Polls `/pending` every ~25s; wakes the agent only when a new question arrives (zero tokens while idle) |
 | **Manual poke** | You send any message | Wakes the session, Stop hook catches pending questions |
 
 **Desktop sessions (manual):**

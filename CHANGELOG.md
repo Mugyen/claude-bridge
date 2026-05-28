@@ -11,6 +11,26 @@ _Add entries here as you work on the next version. Move them under a dated
 heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
+### Added
+- **Idle-listener (auto-armed monitor)** — closes the long-standing "idle session can't
+  see new questions" gap. The first time a CLI session `ask`s or `reply`s, the PostToolUse
+  hook nudges it (once) to arm a background `Monitor` that polls `/pending` every ~25s and
+  wakes the agent **only when a new question arrives** — zero tokens while the inbox is
+  empty (the loop runs in the shell, not the model; deduped by message id so a still-pending
+  question never re-wakes). `register`/`list`/`inbox` do not trigger it — only engaging
+  (ask/reply) does. Per-session state file `/tmp/claude-bridge-${SESSION_ID}.monitor`
+  (`on`=agent armed it, `off`=user-disabled, absent=eligible) lets the user close it ("stop
+  the bridge listener" → disables auto-run for the session) and re-enable it. The **agent**
+  writes `on` once the Monitor is genuinely running; the hook re-nudges on every ask/reply
+  until then, so a skipped nudge is retried rather than lost (it never pre-marks the session
+  armed). Interval is configurable via `CC_BRIDGE_MONITOR_INTERVAL` (default 25). Bumped to
+  v2.5.0.
+- **`tests/test-monitor-trigger.sh`** — 8 assertions: only ask/reply trigger the nudge, the
+  hook leaves state unwritten, it re-nudges while un-armed, goes silent once the agent writes
+  `on` or the user writes `off`, re-nudges after re-enable, and the emitted command embeds the
+  session name + interval + the `echo on` arm-confirm step. Runs against a dead port so it's
+  isolated from any live bridge.
+
 ### Removed
 - **npm package (`@vijay2411/claude-bridge`) and `bin/cli.mjs`** — the scoped npm package was wired up but never published. Removed entirely so the repo doesn't carry npm publishing infrastructure we don't intend to maintain. `package.json` is now marked `private: true`. Single install path is the curl bootstrap.
 
