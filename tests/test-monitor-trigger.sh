@@ -1,10 +1,12 @@
 #!/bin/bash
 # Verify the PostToolUse hook auto-arms the idle-listener correctly.
 #
-# Trigger: the hook nudges the agent to arm a background Monitor ONLY after the
-# session engages by calling ask or reply — and only once. The per-session state
-# file /tmp/claude-bridge-${SESSION_ID}.monitor records the auto-run setting:
-#   absent → eligible    on → armed (don't re-nudge)    off → user disabled
+# Trigger: the hook nudges the agent to arm a background Monitor after the
+# session engages by calling ask or reply. The per-session state file
+# /tmp/claude-bridge-${SESSION_ID}.monitor records the auto-run setting:
+#   absent → eligible (nudge on ask/reply)   on → armed (agent wrote it)
+#   off → user disabled   rearm → was armed before a restart/resume; SessionStart
+#   sets this so the PostToolUse hook re-arms on the NEXT tool call (any tool).
 #
 # These run WITHOUT a live bridge: the hook resolves its name from the .name
 # fallback file (the bridge /whoami call fails), and /pending returns nothing,
@@ -120,6 +122,53 @@ if echo "$OUT" | grep -q "NOTICE from" && echo "$OUT" | grep -q "peek=1"; then
 else
   fail "arm command should grep NOTICE from + use peek=1: output='$OUT'"
 fi
+
+# ── Case 10: 'rearm' state (resumed while armed) → re-nudge on ANY tool call ──
+#    (not just ask/reply) so the listener comes back after a restart/resume.
+echo "rearm" > "$MONITOR_FILE"
+OUT=$(run "mcp__bridge__list_sessions")
+if echo "$OUT" | grep -q "idle-listener" && [ "$(cat "$MONITOR_FILE")" = "rearm" ]; then
+  pass "rearm + non-engaging tool → re-nudges (any tool), stays 'rearm' until agent arms"
+else
+  fail "rearm should re-nudge on any tool: output='$OUT' state='$(cat "$MONITOR_FILE" 2>/dev/null)'"
+fi
+
+# ── Case 11: 'rearm' goes silent once the agent actually arms (writes 'on') ──
+echo "on" > "$MONITOR_FILE"
+OUT=$(run "mcp__bridge__list_sessions")
+if [ -z "$OUT" ]; then
+  pass "after agent arms (on), a non-engaging tool is silent"
+else
+  fail "armed state should be silent on any tool: output='$OUT'"
+fi
+
+# ── Case 12: SessionStart flips 'on' → 'rearm' (the resume fix) ──────────────
+#    bridge-start-hook runs `claude mcp list` directly, so stub it as present.
+START_STUB=$(mktemp -d)
+cat > "$START_STUB/claude" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+  "mcp list") echo "bridge: SSE → http://localhost:7499/sse"; exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$START_STUB/claude"
+echo "on" > "$MONITOR_FILE"
+input_for noop | PATH="$START_STUB:$PATH" "$REPO_DIR/hooks/bridge-start-hook.sh" >/dev/null 2>&1
+if [ "$(cat "$MONITOR_FILE")" = "rearm" ]; then
+  pass "SessionStart flips armed 'on' → 'rearm' so a resumed session re-arms"
+else
+  fail "SessionStart should flip on→rearm: state='$(cat "$MONITOR_FILE" 2>/dev/null)'"
+fi
+# 'off' (user-disabled) must survive a SessionStart untouched
+echo "off" > "$MONITOR_FILE"
+input_for noop | PATH="$START_STUB:$PATH" "$REPO_DIR/hooks/bridge-start-hook.sh" >/dev/null 2>&1
+if [ "$(cat "$MONITOR_FILE")" = "off" ]; then
+  pass "SessionStart leaves user-disabled 'off' untouched"
+else
+  fail "SessionStart should not touch 'off': state='$(cat "$MONITOR_FILE" 2>/dev/null)'"
+fi
+rm -rf "$START_STUB"
 
 echo ""
 echo "$PASS passed, $FAIL failed"

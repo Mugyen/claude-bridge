@@ -15,6 +15,14 @@ heading when you tag the release and bump `package.json` + the banner in
 - **Design spec for cross-network federation** — `docs/specs/cross-network-federation.md`. Hub-and-spoke bridge linking so sessions on different machines can talk while each stays autonomous locally if the link drops. Designed and shelved as future work (not implemented); referenced from DEVELOPER.md "Planned features."
 
 ### Fixed
+- **Idle-listener didn't survive a session resume/restart** (v2.6.2). A background `Monitor`
+  dies with the old session process, but its `.monitor` stamp (a `/tmp` file) survived — and
+  since a resume doesn't reliably fire `SessionEnd` (which would clear it), a resumed session
+  showed `on` with no live listener, and the hook never re-armed it. Fix: a new `rearm` stamp
+  state. `bridge-start-hook.sh` flips `on` → `rearm` on every (re)start; `bridge-hook.sh`
+  re-nudges on the **next tool call** (any tool, not just ask/reply) when it sees `rearm`, with
+  the name freshly resolved — so the listener comes back right after a resume. `off`
+  (user-disabled) and absent (never armed) are left untouched. 4 new test assertions.
 - **Bridge restart could kill the calling session, and a process-leak left 17-day-old orphans** (v2.6.1 — incident fixes):
   - `./install.sh --stop` / `--restart` now print a loud warning that they disconnect **every** Claude session whose MCP client is on the bridge — including the one running the command (when its tool transport drops, the harness kills it; graceful shutdown makes the disconnect tidy but can't prevent it). Run lifecycle commands from a **separate terminal**, never from a session bound to the bridge. A plain `--start` is safe.
   - `bridge-server.mjs` now has a `server.on("error")` handler that `process.exit(1)`s on `EADDRINUSE` instead of letting the catch-all `uncaughtException` swallow it — the old behaviour left a headless process that never bound a port and never exited (kept alive by the keepalive/gc intervals).

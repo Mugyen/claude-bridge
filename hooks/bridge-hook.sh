@@ -93,13 +93,21 @@ PENDING=$(curl -sf --max-time 1 "http://localhost:${PORT}/pending?session=${SESS
 # nudge the agent to arm it. State file holds the auto-run setting:
 #   absent → eligible   on → agent armed it   off → user disabled
 # CRITICAL: the hook does NOT write "on" — the AGENT writes it only once it has
-# actually armed the Monitor. So while the file is absent, the hook re-nudges on
-# every ask/reply until the listener is genuinely up. A nudge the agent ignores
-# is retried next time it engages, instead of being silently lost forever.
+# actually armed the Monitor. So while the file is absent/"rearm", the hook
+# re-nudges until the listener is genuinely up. A nudge the agent ignores is
+# retried, instead of being silently lost forever. Stamp states:
+#   absent → eligible (nudge on ask/reply)   on → armed   off → user disabled
+#   rearm  → was armed before a restart/resume; re-nudge on ANY tool call so the
+#            listener comes back even if the session doesn't ask/reply again.
 MONITOR_FILE="/tmp/claude-bridge-${SESSION_ID}.monitor"
-case "$TOOL" in
-  mcp__bridge__ask|mcp__bridge__reply)
-    if [ ! -f "$MONITOR_FILE" ]; then
+MONITOR_STATE=$(cat "$MONITOR_FILE" 2>/dev/null)
+NUDGE_MONITOR=0
+case "$MONITOR_STATE" in
+  on|off) ;;                                  # armed, or user-disabled → stay quiet
+  rearm)  NUDGE_MONITOR=1 ;;                   # resumed while armed → re-arm on any tool
+  *) case "$TOOL" in mcp__bridge__ask|mcp__bridge__reply) NUDGE_MONITOR=1 ;; esac ;;
+esac
+if [ "$NUDGE_MONITOR" = 1 ]; then
       INTERVAL="${CC_BRIDGE_MONITOR_INTERVAL:-25}"
       NUDGE="🔗 claude-bridge: You're now active on the bridge. Arm your idle-listener so you can answer questions that arrive while you sit idle — without it, a dormant session never sees new questions until the user pokes it. (This reminder repeats on every ask/reply until you actually arm it.)
 
@@ -124,15 +132,13 @@ IMPORTANT: the instant the Monitor is running, run this so the reminder stops:  
 Then tell the user one line, e.g. \"Armed bridge idle-listener (polling ${INTERVAL}s).\"
 To CLOSE it later (user says \"stop the bridge listener\"): TaskStop the monitor, then run  echo off > ${MONITOR_FILE}  to disable auto-run for this session.
 To RE-ENABLE: run  rm -f ${MONITOR_FILE}  then arm it again (or just ask/reply once more)."
-      if [ -n "$MSG" ]; then
-        MSG="${MSG}
+  if [ -n "$MSG" ]; then
+    MSG="${MSG}
 ${NUDGE}"
-      else
-        MSG="$NUDGE"
-      fi
-    fi
-    ;;
-esac
+  else
+    MSG="$NUDGE"
+  fi
+fi
 
 [ -z "$MSG" ] && exit 0
 emit_context "$MSG"

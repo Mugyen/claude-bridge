@@ -25,6 +25,16 @@ else
   exit 0
 fi
 
+# A background Monitor (idle-listener) dies with the old process on a
+# restart/resume, but its /tmp stamp survives. If this session had it armed
+# ("on"), flip the stamp to "rearm" so the PostToolUse hook re-nudges the agent
+# to start a fresh Monitor on its next tool call (with the correctly-resolved
+# name). "off" (user-disabled) and absent (never armed) are left untouched.
+MONITOR_FILE="/tmp/claude-bridge-${SESSION_ID}.monitor"
+if [ "$(cat "$MONITOR_FILE" 2>/dev/null)" = "on" ]; then
+  echo "rearm" > "$MONITOR_FILE"
+fi
+
 # Check if bridge is running — if not, skip silently
 if ! curl -sf --max-time 1 "http://localhost:${PORT}/health" > /dev/null 2>&1; then
   exit 0
