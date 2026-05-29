@@ -60,17 +60,42 @@ These are absolute principles the user has stated explicitly. Don't second-guess
 ```
 Claude Code CLI ──SSE──┐
                        ├── bridge-server.mjs ──┐
-Claude Desktop ──stdio──┘   (port 7400)        │
-                                                ├── /tmp/claude-bridge-*  (session name files, MCP cache, stamps, PID)
-                                                ├── /tmp/claude-bridge-server.log
-                                                └── In-memory state (messages, threads, scratchpads — 30d TTL)
+Claude Desktop ──stdio──┘  MAIN listener        │
+                           127.0.0.1:7400        │   ← loopback ONLY; serves /sse,/message,/pending,
+                           (all local routes)    │     /whoami,/health,/health/ping,/link/reload.
+                                                 │     NEVER tunneled, unreachable from the LAN.
+                                                 │
+                           FED listener          ├── /tmp/claude-bridge-*  (session name files, MCP cache, stamps, PID)
+                           127.0.0.1:7401        ├── /tmp/claude-bridge-server.log
+                           (hub mode ONLY)       └── In-memory state (messages, threads, scratchpads — 30d TTL)
+                           serves ONLY /link/* (token-gated) + /health/ping; every other path 404.
+                           ← this is the ONLY thing the cloudflared tunnel exposes.
 
 ~/.claude/settings.json                       — 5 hooks point to hooks/*.sh
 ~/.claude/skills/claude-bridge/SKILL.md        — protocol docs (loaded on-demand by Claude)
 ~/.claude/.cc-bridge-version                   — installed version marker
 ~/.claude/.cc-bridge-manifest                  — list of files/dirs install touched (for uninstall)
+~/.claude/.cc-bridge-token                     — federation shared secret (only if --share/--join; chmod 600)
+~/.claude/.cc-bridge-role                      — federation role: hub | spoke | standalone
+~/.claude/.cc-bridge-hub                       — spoke only: the hub's https://host URL
+~/.claude/.cc-bridge-node                      — this node's stable id (defaults to hostname)
+/tmp/claude-bridge-tunnel.{pid,url}            — cloudflared child PID + parsed tunnel URL (runtime)
 ~/Library/Application Support/Claude/claude_desktop_config.json  — Desktop MCP entry (macOS)
 ```
+
+### Federation (cross-network, v2.7.0+)
+
+Hub-and-spoke. A bridge is `standalone` (default, no token), a `hub` (token + tunnel, accepts spokes), or a `spoke` (token + hub URL, opens an outbound link). **All federation logic lives in `bridge-server.mjs`, gated behind `FED.token` / `FED.role !== "standalone"`** — with no token file the server is byte-for-byte v2.6.2. **Sessions stay local; hooks are unchanged.** A remote message is *injected into the destination bridge's local `messages` Map* as a shape-identical object (`injectRemote`), so every existing delivery path is reused untouched. Helpers: `loadFedConfig`/`applyFedConfig`, `globalRoster`, `resolveTarget` (local-first; `name@node`), `injectRemote`, `routeForward` (hub router), `relayForward`/`relayAnswer`, `connectToHub` (spoke outbound SSE with backoff), `flushPendingForwards`/`flushSpokeOutbound` (lossless reconnect), `startFedListener`/`stopFedListener` (the hub-only loopback link listener), `handleLinkRequest` (the link surface served on the fed port).
+
+**Two listeners (v2.7.0 hardening — lesson #29).** The MAIN server binds `127.0.0.1:PORT` and is never tunneled. In hub mode a SECOND server binds `127.0.0.1:FED_PORT` (`CC_BRIDGE_FED_PORT`, default `PORT+1`) and serves ONLY `/link/*` + `/health/ping`. The cloudflared tunnel points at `FED_PORT`. A spoke makes only outbound connections and never binds the fed port.
+
+```
+Spoke bridge ──POST /link/{register,forward,heartbeat,unregister}──▶ Hub FED listener (127.0.0.1:FED_PORT)
+Spoke bridge ◀──SSE /link/stream (roster + forward events)──────────  Hub FED listener
+   (token in X-Bridge-Token header; cloudflared tunnel → Hub FED_PORT ONLY; /link/* token-gated, /health/ping ungated/content-free)
+```
+
+install.sh: `--share [--named-tunnel <h>] [--node <id>]`, `--join '<link>'`, `--unlink`, `--stop-share` — all flip a *running* bridge via `POST /link/reload` (no restart). `cloudflared` is detect-and-instruct (bridge stays zero-dep).
 
 ### The 5 hooks (CLI only)
 
@@ -165,7 +190,31 @@ Two related failures, both diagnosed from a real incident (a live session was SI
 
 **(a) The self-restart hazard.** `--stop`/`--restart` tears down every SSE connection — including the MCP transport of the session running the command. When that session loses its tool provider, the Claude Code harness kills it (the in-flight Bash child takes the SIGKILL). Graceful shutdown (`event: close`) does NOT save it: it makes the disconnect *tidy*, but you cannot keep a tool provider alive while it restarts itself. There is no server-side fix. The mitigation is procedural: **run lifecycle commands from a separate terminal**, never from a Claude session bound to the bridge. `install.sh` now prints a loud warning on `--stop`/`--restart`. A plain `--start` is safe (it never stops anything). It was NOT an OOM and NOT install.sh killing the parent — `stop_bridge` only ever `kill`s the bridge PID.
 
-**(b) The orphan-process leak.** `bridge-server.mjs` had no `server.on("error")` handler, so a startup `EADDRINUSE` was swallowed by the catch-all `uncaughtException` (lesson #7) — the process never bound a port and never exited, kept alive forever by the keepalive + gc `setInterval`s. Result: headless zombie servers (we found three ~17 days old). Fixed: `server.on("error")` now `process.exit(1)` on bind failure. And `start_bridge` no longer trusts the PID file alone (it's written only *after* a successful bind) — it polls `/health` and reaps the child if the server never serves. Regression-tested in `test-process-mgmt.sh` (a second server on a busy port must exit, not orphan).
+**(b) The orphan-process leak.** `bridge-server.mjs` had no `server.on("error")` handler, so a startup `EADDRINUSE` was swallowed by the catch-all `uncaughtException` (lesson #7) — the process never bound a port and never exited, kept alive forever by the keepalive + gc `setInterval`s. Result: headless zombie servers (we found three ~17 days old). Fixed: `server.on("error")` now `process.exit(1)` on bind failure. And `start_bridge` no longer trusts the PID file alone (it's written only *after* a successful bind) — it polls `/health/ping` (the ungated liveness probe; the full `/health` is token-gated when sharing is on — see lesson #26) and reaps the child if the server never serves. Regression-tested in `test-process-mgmt.sh` (a second server on a busy port must exit, not orphan).
+
+### 24. Federation is an additive relay layer — inject remote messages into the LOCAL store, don't rewrite handlers
+The whole reason cross-network is small: a remote `ask`/`notify` is forwarded to the owning node, which calls `injectRemote()` to put a **shape-identical** message object into its own `messages` Map. From there, every existing path runs untouched — `/pending`, the Stop hook, the idle-listener peek, `check_inbox`, the blocking `ask` poll loop, `get_thread`, GC, rename migration. **Do not add a "remote" branch to each tool handler.** The only handler changes are: target resolution via `resolveTarget` (`ask`/`notify`), and an answer-relay tail on `reply`. `injectRemote` MUST preserve the invariants: a question has `answer:null`; a notice carries **no** `answer` field, only `delivered` (lesson #19). Inject is idempotent (`messages.has(id)` for q/notice; `answer!==null` for an answer) so re-forwards on reconnect are safe.
+
+### 25. `resolveTarget` is local-first; `globalRoster` is live-only but routing must see offline-but-known spokes
+`resolveTarget(to)` resolves a **bare** name to a LOCAL session if one exists (local-name-wins), else a remote one; `name@node` targets a specific remote session. **Subtlety:** `globalRoster()` only lists spokes whose stream is currently live (so `list_sessions` doesn't show ghosts). But for **lossless reconnect** the hub must still *route* a message to a spoke whose stream just dropped (its `spokes` entry persists until the 45s sweep). So `resolveTarget` has a hub-side fallback that scans `spokes` (incl. offline) for the name and returns `{kind:"remote", node}` — `relayForward` then queues it (`markPendingRelay`) and `flushPendingForwards` re-pushes on reconnect. If you "simplify" routing to use `globalRoster` alone, you reintroduce message loss across a brief link blip. The split is deliberate: **roster = live (display); routing-for-queue = known (durability).**
+
+### 26. The `/health` split: ungated `/health/ping` + token-gated `/health`
+A localhost-forwarding tunnel makes remote requests arrive from `127.0.0.1` — you **cannot** trust loopback to skip the token on anything tunneled. So when sharing is on, `/health` (which lists session names) and all `/link/*` require `X-Bridge-Token`. But `install.sh --check`, `start_bridge`'s liveness poll, and the test `health()` helper hit `/health` unauthenticated — gating it fully would break them. Fix: a separate **ungated** `/health/ping` returning only `{status, role, node, sharing}` (NO session names). `--check` and `start_bridge` use the ping; the full `/health` stays gated. `/sse`, `/message`, `/pending`, `/whoami` are never gated (never tunneled — gating them would force the token into the hooks, which we refuse). Standalone (no token) leaves `/health` open, so existing tests are unchanged.
+
+### 27. `POST /link/reload` exists so `--share`/`--join` never restart a running bridge (lesson #23a)
+A restart drops every SSE client and can kill the calling session. So federation config lives in dotfiles (`.cc-bridge-{token,role,hub,node}`) and `--share`/`--join`/`--unlink`/`--stop-share` write them, then `curl -X POST localhost:7400/link/reload` makes the **running** bridge re-read them and bring up/tear down the link in place. `/link/reload` lives on the **main (loopback-only) server**, never the tunneled fed listener, and is **token-gated (when a token is configured) AND restricted to a loopback peer** (`req.socket.remoteAddress`) — defense-in-depth from the v2.7.0 hardening (lesson #29). `install.sh fed_reload` and `tests/lib.mjs reloadFed` therefore send `X-Bridge-Token` when a token is present. Never go back to "restart the bridge to enable sharing," and never make `/link/reload` token-free again.
+
+### 28. The spoke outbound link needs reconnect backoff; the hub prunes on write-error + sweep
+The spoke opens `GET /link/stream` to the hub with `node:https` (or `http` for tests). On any drop it reconnects with exponential backoff (1s→2s→5s→…→30s, reset on success) — **do not hot-loop** a reconnect (lesson #8/#23 cascade risk). The hub prunes a spoke on stream close, on SSE write-error (`linkSend` nulls `res`), and via a 15s liveness sweep (45s stale cutoff), rebroadcasting the roster each time — the link version of lesson #9 ghost de-merge. A `spokeGen` counter invalidates stale stream callbacks after a teardown so a late `data` event from an old connection can't corrupt `remoteRoster`. Tunnel/cloudflared is never invoked in CI — the link transport is plain HTTP between two local ports in tests; cloudflared is detect-and-instruct (`test-share-flags.sh` uses a fake cloudflared on PATH). **Gotcha:** install.sh runs under `set -euo pipefail`, so an empty `grep ... | head -1` in a command substitution aborts the script — guard tunnel-URL parsing with `|| true`.
+
+### 29. NEVER tunnel the main bridge port — there are TWO listeners, and only the loopback fed port is exposed (v2.7.0 hardening)
+The original Phase-1 federation tunneled the whole bridge (`cloudflared tunnel --url http://localhost:7400`). But `/sse`, `/message`, `/pending`, `/whoami` are intentionally token-free ("local only, never tunneled" — lesson #26). With the whole port tunneled, anyone with the URL could register a session, ask/notify, and read any session's pending messages **with no token**. The fix is structural, not just gating:
+
+- **Two listeners, both loopback.** The **main** `http.createServer` binds `127.0.0.1:PORT` (was all-interfaces — also LAN-exposed; fixed) and serves ALL local routes. It is NEVER tunneled. In **hub mode** a **second** server binds `127.0.0.1:FED_PORT` (`CC_BRIDGE_FED_PORT`, default `PORT+1`) and serves ONLY the token-gated `/link/*` surface + the content-free `/health/ping`; **every other path 404s** (`handleLinkRequest`). The fed listener shares the process's in-memory state (same module scope).
+- **The tunnel points at `FED_PORT`, not `PORT`.** Both the quick-tunnel and named-tunnel `cloudflared` invocations in `install.sh` use `$FED_PORT`. So `/sse`/`/message`/`/pending`/`/whoami`/full-`/health` simply do not exist on the tunneled surface — the hole is closed by construction, not just by a token check.
+- **Lifecycle:** `applyFedConfig()` calls `startFedListener()` when this node becomes a hub and `stopFedListener()` when it leaves hub mode. A **spoke** makes only OUTBOUND connections to the hub and **never binds the fed port** (verify this if you touch `applyFedConfig`). Standalone never binds it either, so standalone is byte-for-byte unchanged. Both listeners get the EADDRINUSE-fatal `server.on("error")` treatment (lesson #23b) and are closed in `shutdown()`.
+- **Why a separate port instead of path-filtering one port?** A single port can't be "tunneled for `/link/*` but not for `/sse`" — cloudflared forwards the whole origin. Two ports is the only way to expose the link surface without exposing the local routes.
+- **Tests:** `tests/lib.mjs` knows the fed port (`port+1` default, third constructor arg to override); `raw()` routes `/link/*` to the fed port automatically (`onMain`/`onFed` overrides force a port). The federation tests point the spoke's `hub` URL at the HUB's fed port. `test-token-auth.mjs` has the regression assertions: main port 404s `/link/*`; fed port 404s the local routes + full `/health`; fed `/link/*` needs the token; fed `/health/ping` leaks no names; `/link/reload` rejects a wrong token. **Do not collapse back to one port.**
 
 ---
 
@@ -246,8 +295,14 @@ tests/
 ├── test-tools.mjs                # MCP tools: register, broadcast, list_sessions, check_inbox, ...
 ├── test-graceful-shutdown.mjs    # SIGTERM emits `event: close` before exit
 ├── test-hook-mcp-check.sh        # hooks silent when MCP=no, runs clean when MCP=yes
-└── test-process-mgmt.sh          # install.sh --start / --stop / --restart, PID file, idempotency
+├── test-process-mgmt.sh          # install.sh --start / --stop / --restart, PID file, idempotency
+├── test-token-auth.mjs           # federation token gate accept/reject; ungated /health/ping; no-token guardrail
+├── test-federation.mjs           # two-bridge link: roster merge, cross-link ask/reply, notify relay, invariants, gated health, drop-prune
+├── test-federation-reconnect.mjs # lossless reconnect: queued message flushes idempotently after the link returns
+└── test-share-flags.sh           # install.sh --share/--join/--unlink/--stop-share parsing (fake cloudflared on PATH)
 ```
+
+`lib.mjs`'s `TestBridge(port, fed)` takes an optional `fed = {token, role, hub, node}` that writes per-bridge temp config files and points the server at them (env `CC_BRIDGE_{TOKEN,ROLE,HUB,NODE}_FILE`) — so federation tests never touch the developer's real `~/.claude` dotfiles. `reloadFed()` rewrites them + hits `/link/reload`; `raw()`, `healthPing()`, and `health(token)` cover the gated endpoints.
 
 ### Rule: every new feature ships with a test
 

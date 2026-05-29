@@ -199,6 +199,51 @@ Tune the interval with `CC_BRIDGE_MONITOR_INTERVAL` (seconds, default 25).
 
 ---
 
+## Part 4: Cross-network (talk to agents on other machines)
+
+By default the bridge is localhost-only. **Federation** links bridges on different machines so their agents can `ask`/`reply`/`notify` each other. It's hub-and-spoke: one person runs the **hub** (and a tunnel); everyone else **joins** as a spoke. Your sessions never leave localhost -- only the bridge-to-bridge link rides the tunnel, so if the link drops, local coordination keeps working and cross-network resumes automatically (queued messages are not lost).
+
+### What you do
+
+**Prerequisite (hub only):** install `cloudflared` once -- `brew install cloudflared` (macOS) or see the [Cloudflare downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/). No account needed for the default quick tunnel. The bridge itself stays zero-dependency.
+
+| Action | Command | Notes |
+|---|---|---|
+| **Be the hub** | `./install.sh --share` | Generates a token, opens a Cloudflare quick tunnel, prints a one-line join command. Run from a **separate terminal** (not a Claude session bound to the bridge). |
+| Stable URL (optional) | `./install.sh --share --named-tunnel <hostname>` | Uses a pre-configured cloudflared *named* tunnel on your own domain (stable URL that survives restarts). You set up the tunnel + DNS route once with cloudflared. |
+| **Join a hub** | `./install.sh --join 'https://<host>#<token>'` | Paste the exact join command the hub printed. Your local bridge links upstream; your sessions stay on localhost. |
+| Spoke leaves | `./install.sh --unlink` | Drops the link, back to local-only. Local sessions unaffected. |
+| Hub stops sharing | `./install.sh --stop-share` | Closes the tunnel, keeps the token (fast re-share). The bridge keeps running. |
+| Check status | `./install.sh --check` | Shows role (hub/spoke/standalone), node id, the loopback **fed port** the tunnel points at, and the tunnel URL if open. |
+
+`--share`/`--join` flip a **running** bridge into hub/spoke mode without a restart, so attached sessions are never dropped.
+
+**What gets tunneled:** `--share` opens the tunnel against a *separate* loopback **federation port** (default `7401`, i.e. main port `+ 1`; override with `CC_BRIDGE_FED_PORT`), **not** the main bridge port. That fed port serves only the token-gated bridge-to-bridge link surface plus a content-free health probe. The main bridge (`/sse`, your sessions, pending messages) binds `127.0.0.1` only and is never reachable from the tunnel or the LAN. The join link is unchanged -- the tunnel hostname maps to the fed port for you.
+
+### What to tell your agent
+
+Once linked, it's transparent: agents talk **by name**, same as local. `list_sessions` now shows remote sessions too, tagged with their machine's node id.
+
+- "List bridge sessions" -> the agent sees both local and remote sessions (remote ones show a `node`).
+- "Ask `frontend` about the API contract" -> a bare name resolves to a **local** session first; if it only exists remotely, it routes across the link.
+- "Ask `frontend@alice` ..." -> targets a **specific** remote session when the same name exists on more than one machine. **Local always wins for a bare name** -- use `name@node` to reach a remote one explicitly.
+
+### Quick-tunnel URLs rotate
+
+A Cloudflare quick tunnel's URL is **ephemeral** -- if `cloudflared` restarts, the URL changes and the old join link stops working. Re-run `./install.sh --share` to reprint the current join link, and spokes must re-`--join` with the new one. For a URL that survives restarts, use `--named-tunnel` (your own domain).
+
+### Security, honestly
+
+- **TLS in transit, not strict end-to-end.** The Cloudflare tunnel encrypts the wire, but Cloudflare terminates TLS at its edge -- it is not E2E. For a **trusted group** plus a shared token, this is the accepted bar. The closest no-VPN path to "no third party sees plaintext" is a self-hosted tunnel with your own cert (out of scope here).
+- **The token is the only boundary.** Anyone with the join link (token + URL) is fully trusted: they can see the roster and message any session. Treat the join link like a password. Within the group, session names are self-asserted (a member could claim another's name) -- documented, not engineered against.
+- **Only the link surface is exposed -- by construction, not just by a token.** The bridge runs two listeners: the **main** one (`127.0.0.1:7400`) serves your local routes (`/sse`, `/message`, `/pending`, `/whoami`, `/health`) and is **never tunneled and unreachable from the LAN**; a **separate fed listener** (`127.0.0.1:7401` in hub mode) serves ONLY the token-gated `/link/*` plus the content-free `/health/ping`, and that fed port is the **only** thing the tunnel exposes. So `/sse`/`/pending`/etc. simply don't exist on the public surface -- a remote caller cannot register, ask, or read pending messages even without a token. When sharing is on, every internet-reachable path requires the token except `/health/ping` (which leaks no session names). `/link/reload` (config hot-reload) is loopback-only and token-gated.
+
+### `notify` to an offline remote name
+
+A NOTICE to a remote session that's currently offline queues on the hub and delivers when that node reconnects (30-day TTL). As with local names, a **rotated/auto-generated** remote name may never reconnect under the same name and will dead-letter -- prefer stable names (`CC_BRIDGE_SESSION`) for cross-network NOTICEs.
+
+---
+
 ## Manual installation
 
 ### CLI (without install.sh)
@@ -222,6 +267,7 @@ Tell your Desktop agent:
 | Variable | Default | What to tell your agent |
 |---|---|---|
 | `CC_BRIDGE_PORT` | `7400` | "Use port 8888 for the bridge" |
+| `CC_BRIDGE_FED_PORT` | `PORT + 1` (`7401`) | Loopback port for the federation link surface (hub mode); the tunnel points here, never at the main port |
 | `CC_BRIDGE_SESSION` | auto-generated | "Register on the bridge as 'api-builder'" |
 | `CC_BRIDGE_MONITOR_INTERVAL` | `25` | "Poll the bridge every 15 seconds for idle questions" |
 
@@ -275,10 +321,10 @@ These are called by the agent, not by you. Listed here for debugging and to docu
 | Tool | Required args | Optional args | What it does |
 |---|---|---|---|
 | `register` | `name` (string) | `description` (string), `claude_session_id` (string) | Join the bridge with a name and description |
-| `list_sessions` | — | — | See who's online |
-| `ask` | `to` (string), `question` (string) | — | Ask another session a question (blocks until reply, 5min timeout) |
-| `reply` | `answer` (string) | `message_id` (string) | Answer a pending question (auto-targets if only one pending) |
-| `notify` | `to` (string), `content` (string) | — | Send a one-way NOTICE (fire-and-forget FYI; non-blocking, no reply expected) |
+| `list_sessions` | — | — | See who's online (local + remote when federated; remote entries carry a `node`) |
+| `ask` | `to` (string), `question` (string) | — | Ask another session a question (blocks until reply, 5min timeout). `to` may be a bare name (local-first) or `name@node` for a specific remote session |
+| `reply` | `answer` (string) | `message_id` (string) | Answer a pending question (auto-targets if only one pending). Routes the answer back across the link automatically if the question came from another machine |
+| `notify` | `to` (string), `content` (string) | — | Send a one-way NOTICE (fire-and-forget FYI; non-blocking, no reply expected). `to` may be `name@node` |
 | `check_inbox` | — | — | See unanswered questions **and** undelivered one-way NOTICEs addressed to you |
 | `get_thread` | `with_session` (string) | — | Get Q&A + NOTICE history with another session |
 | `broadcast` | `content` (string) | `append` (boolean) | Write to your scratchpad (visible to all) |
@@ -290,13 +336,18 @@ These are called by the agent, not by you. Listed here for debugging and to docu
 
 These are used internally by hook scripts. Listed here for debugging.
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /health` | Server status, active sessions, message counts |
-| `GET /pending?session=<name>` | Pending questions + undelivered one-way NOTICEs for a session (delivers notices once) |
-| `GET /whoami?session_id=<id>` | Resolve session ID to bridge name |
-| `GET /sse` | SSE transport for MCP |
-| `POST /message` | JSON-RPC for MCP tool calls |
+The bridge serves on **two loopback listeners**: the **main** port (default `7400`) for all local routes, and -- in hub mode only -- a **fed** port (default `7401` = main `+ 1`, `CC_BRIDGE_FED_PORT`) for the federation link surface. **Only the fed port is tunneled.** The "Listener" column says where each endpoint lives.
+
+| Endpoint | Listener | Purpose |
+|---|---|---|
+| `GET /health` | main (loopback) | Server status, sessions (merged roster when federated), message counts. **Token-gated when sharing is on** (401 without `X-Bridge-Token`). Not on the tunneled fed surface |
+| `GET /health/ping` | main + fed | Ungated liveness only -- status, role, node, sharing flag. No session names. Used by `--check` and tests; mirrored on the fed port so a spoke can probe the hub through the tunnel |
+| `GET /pending?session=<name>` | main (loopback) | Pending questions + undelivered one-way NOTICEs for a session (delivers notices once; `&peek=1` renders without consuming) |
+| `GET /whoami?session_id=<id>` | main (loopback) | Resolve session ID to bridge name |
+| `GET /sse` | main (loopback) | SSE transport for MCP (local only, never tunneled, never gated) |
+| `POST /message` | main (loopback) | JSON-RPC for MCP tool calls |
+| `POST /link/reload` | main (loopback) | Hot-reload federation config (used by `--share`/`--join`/`--unlink`/`--stop-share` to flip role without a restart). **Loopback-only AND token-gated** when a token is set |
+| `/link/*` | **fed (tunneled)** | Federation link surface (hub-to-spoke). Token-gated; 503 if no token configured. Served ONLY on the fed listener -- the main port 404s these |
 
 ## What install.sh modifies
 
@@ -308,7 +359,8 @@ The installer touches these files and locations. All changes are fully reversibl
 | MCP server registration | Claude Code user config | Registers `bridge` MCP server (SSE transport, `http://localhost:7400/sse`) |
 | Bridge protocol skill | `~/.claude/skills/claude-bridge/SKILL.md` | Copies protocol docs as a Claude Code skill |
 | Desktop app config | `~/Library/Application Support/Claude/claude_desktop_config.json` | Adds `claude-bridge` MCP server entry pointing to `bridge-stdio.mjs` (macOS only) |
-| Temp files (runtime) | `/tmp/claude-bridge-*` | Session name files, confirmation stamps, MCP check cache, PID file |
+| Federation config (only if you `--share`/`--join`) | `~/.claude/.cc-bridge-{token,role,hub,node}` | Shared token, role (hub/spoke/standalone), hub URL, node id. Removed by `--uninstall` |
+| Temp files (runtime) | `/tmp/claude-bridge-*` | Session name files, confirmation stamps, MCP check cache, PID file, tunnel PID/URL |
 | Server log (runtime) | `/tmp/claude-bridge-server.log` | Append-only log from bridge-server.mjs |
 
 **Legacy cleanup:** Older versions appended protocol docs directly to `~/.claude/CLAUDE.md`. The installer automatically detects and removes this if present.
@@ -326,6 +378,11 @@ The installer touches these files and locations. All changes are fully reversibl
 | Sessions died after bridge restart | Expected — all CLI sessions have a persistent SSE connection. Use `./install.sh --stop` (SIGTERM) instead of `kill -9` so the bridge closes connections gracefully. You may need to resume affected sessions |
 | Desktop can't see bridge tools | Quit and relaunch the Desktop app (reads config on launch) |
 | Hooks fire but agent can't call bridge tools | Session was open before install — restart the session to load MCP tools |
+| `--share` says "cloudflared not found" | Install it: `brew install cloudflared` (no account needed for a quick tunnel) |
+| Spoke can't reach the hub / join link stopped working | Quick-tunnel URLs rotate when cloudflared restarts. Re-run `./install.sh --share` on the hub to reprint the link, then re-`--join` on the spoke |
+| `/health` returns 401 | Expected when sharing is on — it's token-gated. Use `./install.sh --check` (it probes the ungated `/health/ping`) |
+| Remote session doesn't appear in `list_sessions` | Confirm the link is up (`--check` on both ends shows role/tunnel). The spoke re-advertises on (re)connect; give it a few seconds |
+| Two machines have the same session name | Bare-name `ask` resolves **local-first**; reach the remote one explicitly as `name@node` (see `list_sessions` for the node) |
 | Something seems wrong | Run `./install.sh --check` in the repo directory |
 
 ## Hook configuration reference

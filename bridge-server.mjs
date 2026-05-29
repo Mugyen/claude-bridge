@@ -13,14 +13,98 @@
  */
 
 import http from "node:http";
+import https from "node:https";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 
 const PORT = parseInt(
   process.argv.find((_, i, a) => a[i - 1] === "--port") ??
     process.env.CC_BRIDGE_PORT ??
     "7400"
 );
+
+// Federation listener port. The MAIN server binds 127.0.0.1:PORT and serves ALL
+// local routes — it is NEVER tunneled. When this node is a hub, a SECOND server
+// binds 127.0.0.1:FED_PORT and serves ONLY the token-gated /link/* surface (plus
+// content-free /health/ping). ONLY the fed port is exposed via the cloudflared
+// tunnel, so the ungated local routes (/sse, /message, /pending, /whoami) can
+// never be reached from the internet. See DEVELOPER.md (two-listener security).
+const FED_PORT = parseInt(process.env.CC_BRIDGE_FED_PORT ?? String(PORT + 1));
+
+// ─── Federation config (cross-network hub-and-spoke linking) ─────────────────
+//
+// Everything federation-related is gated behind FED.token / FED.role so that a
+// standalone bridge (no token file, no hub URL) behaves byte-for-byte like the
+// pre-federation server. See docs/specs/cross-network-federation*.md.
+//
+// Config lives in dotfiles under ~/.claude so a RUNNING bridge can hot-reload it
+// without a restart (restarting drops every SSE client and can kill the calling
+// session — DEVELOPER.md lesson #23a). `POST /link/reload` re-reads these files.
+//
+//   .cc-bridge-token  — shared secret; presence ⇒ "sharing on" (gate active)
+//   .cc-bridge-role   — "hub" | "spoke" | "standalone" (default standalone-with-token = hub)
+//   .cc-bridge-hub    — spoke only: the hub's https://host base URL
+//   .cc-bridge-node   — this node's stable id (defaults to hostname)
+
+const HOME = os.homedir();
+const TOKEN_FILE = process.env.CC_BRIDGE_TOKEN_FILE ?? `${HOME}/.claude/.cc-bridge-token`;
+const ROLE_FILE = process.env.CC_BRIDGE_ROLE_FILE ?? `${HOME}/.claude/.cc-bridge-role`;
+const HUB_FILE = process.env.CC_BRIDGE_HUB_FILE ?? `${HOME}/.claude/.cc-bridge-hub`;
+const NODE_FILE = process.env.CC_BRIDGE_NODE_FILE ?? `${HOME}/.claude/.cc-bridge-node`;
+
+function sanitizeNode(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "") || "node";
+}
+
+function readFileTrim(p) {
+  try { return fs.readFileSync(p, "utf8").trim() || null; } catch { return null; }
+}
+
+/** Federation runtime state. Re-derived from disk by loadFedConfig(). */
+const FED = {
+  role: "standalone", // "hub" | "spoke" | "standalone"
+  token: null,
+  node: sanitizeNode(process.env.CC_BRIDGE_NODE ?? os.hostname()),
+  hubUrl: null, // spoke only
+};
+
+// HUB side: node → { res:SSEResponse|null, sessions:[{name,description}], lastSeen:number }
+const spokes = new Map();
+
+// SPOKE side: outbound link to the hub.
+let hubStream = null; // active https/http response object (for teardown)
+let hubStreamReq = null; // active request (for teardown)
+let remoteRoster = []; // [{name, description, node}] last snapshot pushed by the hub
+let spokeReconnectTimer = null;
+let spokeReconnectDelay = 1000; // backoff: 1s → 2s → 5s → … → 30s max
+let spokeGen = 0; // bumped on each (re)connect attempt to invalidate stale callbacks
+
+function loadFedConfig() {
+  const token = readFileTrim(TOKEN_FILE);
+  let role = readFileTrim(ROLE_FILE);
+  const hubUrl = readFileTrim(HUB_FILE);
+  const node = readFileTrim(NODE_FILE);
+
+  FED.token = token;
+  FED.node = sanitizeNode(node ?? process.env.CC_BRIDGE_NODE ?? os.hostname());
+  FED.hubUrl = hubUrl;
+
+  // Role inference: explicit role file wins; else token+hubUrl ⇒ spoke, token alone ⇒ hub.
+  if (role === "hub" || role === "spoke" || role === "standalone") {
+    FED.role = role;
+  } else if (token && hubUrl) {
+    FED.role = "spoke";
+  } else if (token) {
+    FED.role = "hub";
+  } else {
+    FED.role = "standalone";
+  }
+
+  // Guardrail: cannot be a hub or spoke without a token.
+  if (!token && FED.role !== "standalone") FED.role = "standalone";
+  if (FED.role === "spoke" && !hubUrl) FED.role = token ? "hub" : "standalone";
+}
 
 // ─── State ──────────────────────────────────────────────────────────────────
 
@@ -131,6 +215,485 @@ function getPendingFor(name) {
   // Questions awaiting a reply. Notices are one-way (no answer), so they're
   // explicitly excluded — they must never show up as something to reply to.
   return [...messages.values()].filter((m) => m.to === name && m.kind !== "notice" && m.answer === null);
+}
+
+// ─── Federation helpers ──────────────────────────────────────────────────────
+
+function tokenOk(req) {
+  // Gate is active only when a token is configured (sharing on). When standalone
+  // (no token), endpoints stay open — preserving the pre-federation behaviour so
+  // install.sh --check and the existing tests keep working. The loopback tunnel
+  // makes remote requests look local, so we MUST require the token here and never
+  // trust 127.0.0.1 (DEVELOPER.md: cross-network token insight).
+  if (!FED.token) return true;
+  const got = req.headers["x-bridge-token"];
+  if (typeof got !== "string") return false;
+  const a = Buffer.from(got);
+  const b = Buffer.from(FED.token);
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch { return false; }
+}
+
+/** True if the request's peer is the loopback interface. Used to lock down
+ *  /link/reload on the main server (it must only be driven by a local caller —
+ *  install.sh, tests — never through a tunnel). The main server is already bound
+ *  to 127.0.0.1, so this is belt-and-suspenders, but it makes the intent explicit
+ *  and survives a future rebind mistake. */
+function isLoopback(req) {
+  const a = req.socket?.remoteAddress;
+  return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
+}
+
+function pushThread(a, b, id) {
+  const key = tkey(a, b);
+  if (!threads.has(key)) threads.set(key, []);
+  threads.get(key).push(id);
+}
+
+/** Merged roster: local sessions tagged "local" ∪ remote sessions tagged by node. */
+function globalRoster() {
+  const out = activeSessions().map((s) => ({ name: s.name, description: s.description, node: "local" }));
+  if (FED.role === "hub") {
+    for (const [node, sp] of spokes) {
+      if (!sp.res) continue; // only live spokes
+      for (const s of sp.sessions || []) {
+        out.push({ name: s.name, description: s.description, node });
+      }
+    }
+  } else if (FED.role === "spoke") {
+    for (const s of remoteRoster) {
+      out.push({ name: s.name, description: s.description, node: s.node });
+    }
+  }
+  return out;
+}
+
+/**
+ * Resolve a target name to local / remote / none.
+ * Local-name-wins: a bare name that exists locally always routes locally; a
+ * specific remote session is targeted as "name@node".
+ */
+function resolveTarget(to) {
+  // Qualified "name@node" — explicit remote address.
+  const at = to.lastIndexOf("@");
+  if (at > 0) {
+    const bareName = to.slice(0, at);
+    const node = to.slice(at + 1);
+    if (node === "local" || node === FED.node) {
+      const sse = nameToSSE.get(bareName);
+      if (sse && sseClients.has(sse)) return { kind: "local", sse, name: bareName };
+      return { kind: "none" };
+    }
+    const remote = globalRoster().find((e) => e.name === bareName && e.node === node);
+    if (remote) return { kind: "remote", node, name: bareName };
+    return { kind: "none" };
+  }
+  // Bare name — local wins.
+  const sse = nameToSSE.get(to);
+  if (sse && sseClients.has(sse)) return { kind: "local", sse, name: to };
+  if (FED.role !== "standalone") {
+    const remote = globalRoster().find((e) => e.name === to && e.node !== "local");
+    if (remote) return { kind: "remote", node: remote.node, name: to };
+    // Hub fallback: a name advertised by a spoke whose stream is momentarily down
+    // (entry persists until the liveness sweep). Route to that node anyway so the
+    // message queues and flushes when the spoke reconnects (lossless reconnect).
+    if (FED.role === "hub") {
+      for (const [node, sp] of spokes) {
+        if ((sp.sessions || []).some((s) => s.name === to)) return { kind: "remote", node, name: to };
+      }
+    }
+  }
+  return { kind: "none" };
+}
+
+/**
+ * Inject a forwarded message into THIS bridge's local store, shape-identical to a
+ * locally-created one, so every existing delivery path (/pending, Stop hook,
+ * idle-listener peek, check_inbox, blocking ask, get_thread, GC, migration) works
+ * unchanged. Idempotent: replaying the same id is a no-op.
+ *   fwd = { kind:"question"|"notice"|"answer", id, from, to, question?/content?, ts?, originNode? }
+ */
+function injectRemote(fwd) {
+  if (fwd.kind === "question") {
+    if (messages.has(fwd.id)) return; // idempotent re-forward
+    const msg = {
+      id: fwd.id, from: fwd.from, to: fwd.to, question: fwd.question,
+      answer: null, ts: fwd.ts ?? Date.now(), answeredAt: null,
+      origin: { node: fwd.originNode },
+    };
+    messages.set(msg.id, msg);
+    pushThread(fwd.from, fwd.to, msg.id);
+    console.log(`${ts()} ⇄ injected remote question ${msg.id} ${fwd.from}@${fwd.originNode} → ${fwd.to}`);
+  } else if (fwd.kind === "notice") {
+    if (messages.has(fwd.id)) return; // idempotent
+    // NO answer field — lesson #19: a notice with answer:null re-injects forever.
+    const msg = {
+      id: fwd.id, from: fwd.from, to: fwd.to, kind: "notice",
+      content: fwd.content, delivered: false, ts: fwd.ts ?? Date.now(),
+      origin: { node: fwd.originNode },
+    };
+    messages.set(msg.id, msg);
+    pushThread(fwd.from, fwd.to, msg.id);
+    console.log(`${ts()} ⇄ injected remote notice ${msg.id} ${fwd.from}@${fwd.originNode} → ${fwd.to}`);
+  } else if (fwd.kind === "answer") {
+    const msg = messages.get(fwd.id); // the original question, queued on this node
+    if (msg && msg.answer === null) { // idempotent: already-answered is a no-op
+      msg.answer = fwd.answer;
+      msg.answeredAt = fwd.ts ?? Date.now();
+      console.log(`${ts()} ⇄ injected remote answer for ${fwd.id} (${String(fwd.answer).length} chars)`);
+    }
+  }
+}
+
+/** Outbound JSON POST to the hub (spoke side). Always sends the token header. */
+function hubPost(path, payload) {
+  return new Promise((resolve) => {
+    if (!FED.hubUrl || !FED.token) { resolve({ error: "not a spoke" }); return; }
+    let u;
+    try { u = new URL(path, FED.hubUrl); } catch { resolve({ error: "bad hub url" }); return; }
+    const body = JSON.stringify(payload);
+    const mod = u.protocol === "https:" ? https : http;
+    const req = mod.request(
+      u,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+          "X-Bridge-Token": FED.token,
+          "X-Bridge-Node": FED.node,
+        },
+        timeout: 10000,
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (c) => (data += c));
+        res.on("end", () => {
+          try { resolve(JSON.parse(data || "{}")); }
+          catch { resolve({ status: res.statusCode }); }
+        });
+      }
+    );
+    req.on("error", (e) => resolve({ error: e.message }));
+    req.on("timeout", () => { try { req.destroy(); } catch {} resolve({ error: "timeout" }); });
+    try { req.write(body); req.end(); } catch (e) { resolve({ error: e.message }); }
+  });
+}
+
+/**
+ * Hub-side router for an inbound /link/forward from a spoke. Decides where the
+ * message goes: a hub-local target → inject here; a question/notice for another
+ * spoke → push to its stream (or queue); an answer → inject here if the asker is
+ * hub-local (destNode is the hub / unset and the question is local), else push to
+ * the owning spoke identified by destNode.
+ */
+function routeForward(payload) {
+  try {
+    if (payload.kind === "answer") {
+      const dest = payload.destNode ? sanitizeNode(payload.destNode) : null;
+      if (!dest || dest === FED.node) {
+        injectRemote(payload); // asker is hub-local
+      } else {
+        const sp = spokes.get(dest);
+        if (sp && sp.res && !sp.res.destroyed) {
+          linkSend(sp, "forward", { kind: "answer", id: payload.id, answer: payload.answer, ts: payload.ts });
+        }
+        // If the asker's spoke is gone, the answer is dropped (asker timed out).
+      }
+      return;
+    }
+    // question | notice
+    const target = resolveTarget(payload.to);
+    if (target.kind === "local") {
+      injectRemote(payload); // wakes the hub-local target via normal delivery
+    } else if (target.kind === "remote") {
+      relayForward(target.node, payload); // another spoke
+    } else {
+      // Unknown target on the hub: inject so it queues (30d TTL) and delivers if a
+      // session by that name appears locally later (lesson #22 dead-letter caveat).
+      injectRemote(payload);
+    }
+  } catch (e) {
+    console.error(`${ts()} ✗ routeForward failed: ${e.message}`);
+  }
+}
+
+/**
+ * Route an answer back to the node where the asker lives (destNode).
+ *  - Spoke: POST /link/forward to the hub (hub routes it home — possibly to
+ *    another spoke). The payload carries destNode so the hub knows the asker.
+ *  - Hub: if destNode is a spoke, push event:forward over that spoke's stream.
+ */
+function relayAnswer(destNode, payload) {
+  try {
+    const withDest = { ...payload, destNode };
+    if (FED.role === "spoke") {
+      hubPost("/link/forward", withDest); // fire-and-forget
+    } else if (FED.role === "hub") {
+      const sp = spokes.get(destNode);
+      if (sp && sp.res && !sp.res.destroyed) {
+        linkSend(sp, "forward", payload);
+      }
+    }
+  } catch (e) {
+    console.error(`${ts()} ✗ relayAnswer failed: ${e.message}`);
+  }
+}
+
+/** Relay a question/notice toward its remote target. */
+function relayForward(targetNode, payload) {
+  try {
+    if (FED.role === "spoke") {
+      hubPost("/link/forward", payload);
+    } else if (FED.role === "hub") {
+      const sp = spokes.get(targetNode);
+      if (sp && sp.res && !sp.res.destroyed) {
+        linkSend(sp, "forward", payload);
+      } else {
+        // Target spoke offline: the message stays queued locally (30d TTL) and is
+        // re-forwarded on reconnect via flushPendingForwards. Lesson #22: a stale
+        // auto-generated remote name may never reconnect (dead-letter) — accepted.
+        markPendingRelay(payload, targetNode);
+      }
+    }
+  } catch (e) {
+    console.error(`${ts()} ✗ relayForward failed: ${e.message}`);
+  }
+}
+
+// ── Lossless reconnect bookkeeping (hub side) ────────────────────────────────
+// Messages that couldn't be pushed to a spoke (offline) are remembered so they
+// re-forward when that spoke's /link/stream reconnects. Reuses the durable
+// `messages` store; this set just tracks which ids still need a push per node.
+const pendingRelay = new Map(); // node → Set<msgId>
+
+function markPendingRelay(payload, node) {
+  if (!payload.id) return;
+  if (!pendingRelay.has(node)) pendingRelay.set(node, new Set());
+  pendingRelay.get(node).add(payload.id);
+}
+
+function flushPendingForwards(node) {
+  const sp = spokes.get(node);
+  if (!sp || !sp.res || sp.res.destroyed) return;
+  const set = pendingRelay.get(node);
+  if (!set || set.size === 0) return;
+  for (const id of [...set]) {
+    const m = messages.get(id);
+    if (!m) { set.delete(id); continue; }
+    if (m.kind === "notice") {
+      if (m.delivered) { set.delete(id); continue; }
+      linkSend(sp, "forward", { kind: "notice", id: m.id, from: m.from, to: m.to, content: m.content, ts: m.ts, originNode: m.origin?.node ?? FED.node });
+    } else {
+      if (m.answer !== null) { set.delete(id); continue; }
+      linkSend(sp, "forward", { kind: "question", id: m.id, from: m.from, to: m.to, question: m.question, ts: m.ts, originNode: m.origin?.node ?? FED.node });
+    }
+    set.delete(id);
+  }
+  console.log(`${ts()} ⇄ flushed queued forwards to spoke "${node}"`);
+}
+
+/** Write an SSE event to a spoke's link stream; prune the spoke on write error. */
+function linkSend(sp, event, data) {
+  if (!sp.res || sp.res.destroyed) { sp.res = null; return false; }
+  try {
+    sp.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    return true;
+  } catch (e) {
+    // Prune-on-write-error: a dead spoke leaves the roster fast (lesson #9).
+    sp.res = null;
+    console.log(`${ts()} ✗ link write failed for spoke; pruned stream`);
+    return false;
+  }
+}
+
+/** Broadcast the merged roster to every live spoke (hub side). */
+function broadcastRoster() {
+  if (FED.role !== "hub") return;
+  const nodes = {};
+  nodes[FED.node] = activeSessions();
+  for (const [node, sp] of spokes) {
+    if (sp.res) nodes[node] = sp.sessions || [];
+  }
+  for (const [, sp] of spokes) {
+    if (sp.res) linkSend(sp, "roster", { nodes });
+  }
+}
+
+/** Hub liveness sweep: prune spokes whose stream is dead or stale, then rebroadcast. */
+function spokeSweep() {
+  if (FED.role !== "hub") return;
+  let changed = false;
+  const now = Date.now();
+  for (const [node, sp] of spokes) {
+    const dead = !sp.res || sp.res.destroyed;
+    const stale = now - (sp.lastSeen || 0) > 45000;
+    if (dead && stale) {
+      spokes.delete(node);
+      pendingRelay.delete(node);
+      changed = true;
+      console.log(`${ts()} ✗ spoke "${node}" pruned (dead/stale)`);
+    }
+  }
+  if (changed) broadcastRoster();
+}
+setInterval(spokeSweep, 15000);
+
+// ── Spoke outbound link client ───────────────────────────────────────────────
+
+function spokeAdvertise() {
+  if (FED.role !== "spoke") return Promise.resolve();
+  return hubPost("/link/register", { node: FED.node, sessions: activeSessions() }).then((r) => {
+    if (r && Array.isArray(r.roster)) {
+      remoteRoster = r.roster.filter((e) => e.node !== FED.node);
+    }
+    return r;
+  });
+}
+
+function scheduleSpokeReconnect() {
+  if (FED.role !== "spoke") return;
+  if (spokeReconnectTimer) return;
+  const delay = spokeReconnectDelay;
+  spokeReconnectDelay = Math.min(spokeReconnectDelay * 2, 30000);
+  spokeReconnectTimer = setTimeout(() => {
+    spokeReconnectTimer = null;
+    connectToHub();
+  }, delay);
+}
+
+function teardownHubStream() {
+  spokeGen++; // invalidate any in-flight stream callbacks
+  try { if (hubStreamReq) hubStreamReq.destroy(); } catch {}
+  try { if (hubStream) hubStream.destroy(); } catch {}
+  hubStream = null;
+  hubStreamReq = null;
+  if (spokeReconnectTimer) { clearTimeout(spokeReconnectTimer); spokeReconnectTimer = null; }
+}
+
+function connectToHub() {
+  if (FED.role !== "spoke" || !FED.hubUrl || !FED.token) return;
+  const myGen = ++spokeGen;
+  let u;
+  try { u = new URL("/link/stream", FED.hubUrl); } catch { return; }
+  const mod = u.protocol === "https:" ? https : http;
+
+  // Advertise our sessions first (also primes the hub's roster).
+  spokeAdvertise();
+
+  const req = mod.request(
+    u,
+    {
+      method: "GET",
+      headers: { "X-Bridge-Token": FED.token, "X-Bridge-Node": FED.node, Accept: "text/event-stream" },
+    },
+    (res) => {
+      if (myGen !== spokeGen) { try { res.destroy(); } catch {} return; }
+      if (res.statusCode !== 200) {
+        console.log(`${ts()} ✗ hub link rejected (HTTP ${res.statusCode}) — retrying`);
+        try { res.destroy(); } catch {}
+        scheduleSpokeReconnect();
+        return;
+      }
+      console.log(`${ts()} ⇄ linked to hub ${FED.hubUrl} as node "${FED.node}"`);
+      spokeReconnectDelay = 1000; // reset backoff on success
+      hubStream = res;
+      try { res.socket?.setKeepAlive(true, 15000); } catch {}
+
+      // Re-advertise + re-flush any unrelayed local outbound messages on (re)connect.
+      flushSpokeOutbound();
+
+      let buf = "";
+      let event = null;
+      res.on("data", (chunk) => {
+        if (myGen !== spokeGen) return;
+        buf += chunk.toString();
+        const parts = buf.split("\n\n");
+        buf = parts.pop();
+        for (const block of parts) {
+          event = null;
+          let dataLine = null;
+          for (const line of block.split("\n")) {
+            if (line.startsWith("event: ")) event = line.slice(7).trim();
+            else if (line.startsWith("data: ")) dataLine = line.slice(6);
+            else if (line.startsWith(":")) { /* keepalive */ }
+          }
+          if (event === "roster" && dataLine) {
+            try {
+              const obj = JSON.parse(dataLine);
+              const next = [];
+              for (const [node, sess] of Object.entries(obj.nodes || {})) {
+                if (node === FED.node) continue;
+                for (const s of sess) next.push({ name: s.name, description: s.description, node });
+              }
+              remoteRoster = next;
+            } catch (e) { console.error(`${ts()} ✗ bad roster event: ${e.message}`); }
+          } else if (event === "forward" && dataLine) {
+            try { injectRemote(JSON.parse(dataLine)); }
+            catch (e) { console.error(`${ts()} ✗ bad forward event: ${e.message}`); }
+          } else if (event === "close") {
+            console.log(`${ts()} ⇄ hub closed the link`);
+          }
+        }
+      });
+      res.on("end", () => { if (myGen === spokeGen) { hubStream = null; console.log(`${ts()} ⇄ hub link ended — reconnecting`); scheduleSpokeReconnect(); } });
+      res.on("error", () => { if (myGen === spokeGen) { hubStream = null; scheduleSpokeReconnect(); } });
+    }
+  );
+  req.on("error", (e) => {
+    if (myGen !== spokeGen) return;
+    console.log(`${ts()} ✗ hub link error: ${e.message} — retrying`);
+    scheduleSpokeReconnect();
+  });
+  hubStreamReq = req;
+  try { req.end(); } catch (e) { scheduleSpokeReconnect(); }
+}
+
+/** Spoke: re-forward any local outbound messages still awaiting relay (reconnect flush). */
+function flushSpokeOutbound() {
+  if (FED.role !== "spoke") return;
+  // Re-forward our locally-originated, still-pending questions and undelivered
+  // notices addressed to remote targets. Idempotent on the hub (messages.has(id)).
+  for (const m of messages.values()) {
+    const originLocal = !m.origin || m.origin.node === FED.node;
+    if (!originLocal) continue;
+    const t = resolveTarget(m.to);
+    if (t.kind !== "remote") continue;
+    if (m.kind === "notice") {
+      if (m.delivered) continue;
+      hubPost("/link/forward", { kind: "notice", id: m.id, from: m.from, to: m.to, content: m.content, ts: m.ts, originNode: FED.node });
+    } else {
+      if (m.answer !== null) continue;
+      hubPost("/link/forward", { kind: "question", id: m.id, from: m.from, to: m.to, question: m.question, ts: m.ts, originNode: FED.node });
+    }
+  }
+}
+
+/** Apply a freshly-loaded FED config: (re)start or tear down the spoke link, the
+ *  hub fed listener, etc. A SPOKE makes only OUTBOUND connections and never binds
+ *  the fed port; only a HUB runs the inbound fed listener. */
+function applyFedConfig() {
+  if (FED.role === "spoke") {
+    teardownHubStream();
+    connectToHub();
+  } else {
+    teardownHubStream();
+    remoteRoster = [];
+  }
+  if (FED.role === "hub") {
+    // Become reachable: bring up the loopback fed listener (the tunneled surface).
+    startFedListener();
+  } else {
+    // No longer a hub: gracefully close spoke streams and tear down the fed port.
+    for (const [, sp] of spokes) {
+      if (sp.res && !sp.res.destroyed) {
+        try { sp.res.write("event: close\ndata: hub stopped sharing\n\n"); sp.res.end(); } catch {}
+      }
+    }
+    spokes.clear();
+    pendingRelay.clear();
+    stopFedListener();
+  }
 }
 
 // ─── MCP Tool Definitions ───────────────────────────────────────────────────
@@ -297,33 +860,42 @@ async function executeTool(sseId, name, args) {
     }
 
     case "list_sessions":
-      return { sessions: activeSessions() };
+      return { sessions: FED.role === "standalone" ? activeSessions() : globalRoster() };
 
     case "ask": {
       if (!myName) return { error: "Call register() first." };
       const { to, question } = args;
-      const targetSSE = nameToSSE.get(to);
-      if (!targetSSE || !sseClients.has(targetSSE)) {
-        return { error: `"${to}" not connected. Active: ${activeSessions().map((s) => s.name).join(", ") || "(none)"}` };
+      const target = resolveTarget(to);
+      if (target.kind === "none") {
+        const roster = (FED.role === "standalone" ? activeSessions().map((s) => s.name)
+          : globalRoster().map((e) => (e.node === "local" ? e.name : `${e.name}@${e.node}`)));
+        return { error: `"${to}" not connected. Active: ${roster.join(", ") || "(none)"}` };
       }
 
-      // Dedup check
-      const key = tkey(myName, to);
+      // Dedup check (keyed on the bare name we resolved)
+      const key = tkey(myName, target.name);
       for (const msgId of threads.get(key) || []) {
         const m = messages.get(msgId);
-        if (m?.answer && norm(m.question) === norm(question)) {
+        if (m?.answer && m.kind !== "notice" && norm(m.question) === norm(question)) {
           console.log(`${ts()} ↩ dedup hit for "${question.slice(0, 50)}..."`);
           return { cached: true, message_id: m.id, question: m.question, answer: m.answer, note: "Already asked and answered. Previous answer returned." };
         }
       }
 
-      // Queue
+      // Queue locally (the poll loop watches this object regardless of where the
+      // target lives — the answer lands on it via injectRemote for remote targets).
       const id = crypto.randomUUID().slice(0, 8);
-      const msg = { id, from: myName, to, question, answer: null, ts: Date.now(), answeredAt: null };
+      const msg = { id, from: myName, to: target.name, question, answer: null, ts: Date.now(), answeredAt: null, origin: { node: FED.node } };
       messages.set(id, msg);
-      if (!threads.has(key)) threads.set(key, []);
-      threads.get(key).push(id);
-      console.log(`${ts()} ? ${myName} → ${to}: "${question.slice(0, 80)}"`);
+      pushThread(myName, target.name, id);
+
+      if (target.kind === "remote") {
+        // Relay toward the owning node; the answer routes home via relayAnswer.
+        console.log(`${ts()} ? ${myName} → ${target.name}@${target.node} (remote): "${question.slice(0, 80)}"`);
+        relayForward(target.node, { kind: "question", id, from: myName, to: target.name, question, ts: msg.ts, originNode: FED.node });
+      } else {
+        console.log(`${ts()} ? ${myName} → ${target.name}: "${question.slice(0, 80)}"`);
+      }
 
       // Poll for answer
       const deadline = Date.now() + 5 * 60 * 1000;
@@ -353,6 +925,10 @@ async function executeTool(sseId, name, args) {
       msg.answer = args.answer;
       msg.answeredAt = Date.now();
       console.log(`${ts()} ← reply to ${msg.id} (${args.answer.length} chars)`);
+      // If the question originated on another node, route the answer home.
+      if (msg.origin && msg.origin.node && msg.origin.node !== FED.node) {
+        relayAnswer(msg.origin.node, { kind: "answer", id: msg.id, answer: msg.answer, ts: msg.answeredAt });
+      }
       return { ok: true, message_id: msg.id };
     }
 
@@ -362,18 +938,26 @@ async function executeTool(sseId, name, args) {
       if (typeof to !== "string" || typeof content !== "string") {
         return { error: "notify requires { to: string, content: string }" };
       }
+      const target = resolveTarget(to);
       const id = crypto.randomUUID().slice(0, 8);
-      const msg = { id, from: myName, to, kind: "notice", content, delivered: false, ts: Date.now() };
+      // NO answer field — lesson #19.
+      const msg = { id, from: myName, to: target.name ?? to, kind: "notice", content, delivered: false, ts: Date.now(), origin: { node: FED.node } };
       messages.set(id, msg);
-      const key = tkey(myName, to);
-      if (!threads.has(key)) threads.set(key, []);
-      threads.get(key).push(id);
-      const targetSSE = nameToSSE.get(to);
-      const online = !!(targetSSE && sseClients.has(targetSSE));
-      console.log(`${ts()} 📨 ${myName} → ${to} (notice): "${content.slice(0, 80)}"`);
-      const result = { ok: true, message_id: id, to, target_online: online };
+      pushThread(myName, msg.to, id);
+
+      if (target.kind === "remote") {
+        console.log(`${ts()} 📨 ${myName} → ${target.name}@${target.node} (remote notice): "${content.slice(0, 80)}"`);
+        relayForward(target.node, { kind: "notice", id, from: myName, to: target.name, content, ts: msg.ts, originNode: FED.node });
+        return { ok: true, message_id: id, to: `${target.name}@${target.node}`, target_online: true };
+      }
+
+      const online = target.kind === "local";
+      console.log(`${ts()} 📨 ${myName} → ${msg.to} (notice): "${content.slice(0, 80)}"`);
+      const result = { ok: true, message_id: id, to: msg.to, target_online: online };
       if (!online) {
-        result.note = `"${to}" is not currently connected — the NOTICE is queued and delivers when a session named "${to}" next polls (within the 30-day TTL). Active: ${activeSessions().map((s) => s.name).join(", ") || "(none)"}`;
+        const roster = (FED.role === "standalone" ? activeSessions().map((s) => s.name)
+          : globalRoster().map((e) => (e.node === "local" ? e.name : `${e.name}@${e.node}`)));
+        result.note = `"${to}" is not currently connected — the NOTICE is queued and delivers when a session named "${to}" next polls (within the 30-day TTL). Active: ${roster.join(", ") || "(none)"}`;
       }
       return result;
     }
@@ -441,6 +1025,181 @@ function sendSSE(sessionId, data) {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
+// ─── Federation link surface (served ONLY on the fed listener) ───────────────
+//
+// The ONLY thing the cloudflared tunnel exposes is the fed listener (hub mode),
+// and the ONLY paths it serves are the token-gated /link/* surface plus the
+// content-free /health/ping. Everything else → 404. This is what closes the
+// "whole-port tunnel" hole: a remote caller can never reach /sse, /message,
+// /pending, /whoami or the full /health through the tunnel because they don't
+// exist on this listener.
+async function handleLinkRequest(req, res, url) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Bridge-Token, X-Bridge-Node");
+  if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+
+  // Content-free liveness — ungated, leaks no session names / roster. Mirrors the
+  // main server's /health/ping so a remote spoke (or a probe) can confirm the hub
+  // is reachable through the tunnel without the token.
+  if (req.method === "GET" && url.pathname === "/health/ping") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", role: FED.role, node: FED.node, sharing: !!FED.token }));
+    return;
+  }
+
+  if (!url.pathname.startsWith("/link/")) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+    return;
+  }
+
+  // /link/reload is NOT exposed here — config hot-reload is a loopback-only
+  // operation on the main server. Reject it explicitly on the tunneled surface.
+  if (url.pathname === "/link/reload") {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+    return;
+  }
+
+  // No-token guardrail: you cannot be reachable as a hub without a token.
+  if (!FED.token) { res.writeHead(503, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "federation disabled: no token" })); return; }
+  if (!tokenOk(req)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+
+  // GET /link/stream — hub → spoke SSE
+  if (req.method === "GET" && url.pathname === "/link/stream") {
+    if (FED.role !== "hub") { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "not a hub" })); return; }
+    const node = sanitizeNode(req.headers["x-bridge-node"] || "");
+    if (!node) { res.writeHead(400); res.end("missing X-Bridge-Node"); return; }
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    try { req.socket.setKeepAlive(true, 15000); } catch {}
+    const existing = spokes.get(node);
+    // Close a stale stream for the same node (ghost avoidance, lesson #9).
+    if (existing && existing.res && existing.res !== res && !existing.res.destroyed) {
+      try { existing.res.end(); } catch {}
+    }
+    spokes.set(node, { res, sessions: existing?.sessions || [], lastSeen: Date.now() });
+    console.log(`${ts()} ⇄ spoke "${node}" stream connected`);
+    broadcastRoster();
+    flushPendingForwards(node);
+
+    const ka = setInterval(() => {
+      const sp = spokes.get(node);
+      if (!sp || !sp.res || sp.res.destroyed) { clearInterval(ka); return; }
+      try { sp.res.write(`: ping ${Date.now()}\n\n`); } catch { sp.res = null; clearInterval(ka); }
+    }, 25000);
+
+    req.on("close", () => {
+      clearInterval(ka);
+      const sp = spokes.get(node);
+      if (sp && sp.res === res) { sp.res = null; }
+      console.log(`${ts()} ✗ spoke "${node}" stream closed`);
+      broadcastRoster();
+    });
+    return;
+  }
+
+  // POST /link/* — JSON bodies
+  if (req.method === "POST") {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    let payload;
+    try { payload = JSON.parse(body || "{}"); } catch { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "bad json" })); return; }
+
+    try {
+      if (url.pathname === "/link/register") {
+        if (FED.role !== "hub") { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "not a hub" })); return; }
+        const node = sanitizeNode(payload.node || req.headers["x-bridge-node"] || "");
+        if (!node) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "missing node" })); return; }
+        const existing = spokes.get(node);
+        spokes.set(node, { res: existing?.res || null, sessions: Array.isArray(payload.sessions) ? payload.sessions : [], lastSeen: Date.now() });
+        console.log(`${ts()} ⇄ spoke "${node}" registered (${(payload.sessions || []).length} sessions)`);
+        broadcastRoster();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, node: FED.node, roster: globalRoster() }));
+        return;
+      }
+      if (url.pathname === "/link/forward") {
+        // A spoke is forwarding a message toward its destination node.
+        const node = sanitizeNode(payload.originNode || req.headers["x-bridge-node"] || "");
+        const sp = spokes.get(node);
+        if (sp) sp.lastSeen = Date.now();
+        routeForward(payload);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (url.pathname === "/link/heartbeat") {
+        const node = sanitizeNode(payload.node || req.headers["x-bridge-node"] || "");
+        const sp = spokes.get(node);
+        if (sp) sp.lastSeen = Date.now();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, roster: globalRoster() }));
+        return;
+      }
+      if (url.pathname === "/link/unregister") {
+        const node = sanitizeNode(payload.node || req.headers["x-bridge-node"] || "");
+        const sp = spokes.get(node);
+        if (sp && sp.res && !sp.res.destroyed) { try { sp.res.end(); } catch {} }
+        spokes.delete(node);
+        pendingRelay.delete(node);
+        console.log(`${ts()} ⇄ spoke "${node}" unregistered (graceful --unlink)`);
+        broadcastRoster();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+    } catch (e) {
+      console.error(`${ts()} ✗ /link handler threw: ${e.message}`);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+      return;
+    }
+  }
+
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "unknown link endpoint" }));
+}
+
+// ── Fed listener lifecycle (hub mode only) ───────────────────────────────────
+// A SECOND http server bound to 127.0.0.1:FED_PORT. Brought up by applyFedConfig
+// when this node becomes a hub; closed when it leaves hub mode (standalone/spoke
+// never bind it — a spoke makes only OUTBOUND connections). Shares the process's
+// in-memory state (same module scope). Same EADDRINUSE-fatal + graceful-shutdown
+// treatment as the main server (lessons #7, #23b).
+let fedServer = null;
+
+function startFedListener() {
+  if (fedServer) return; // already up
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, `http://localhost:${FED_PORT}`);
+    Promise.resolve(handleLinkRequest(req, res, u)).catch((e) => {
+      console.error(`${ts()} ✗ fed handler threw: ${e.message}`);
+      try { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "internal error" })); } catch {}
+    });
+  });
+  srv.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`${ts()} ✗ fed port ${FED_PORT} already in use — exiting.`);
+      process.exit(1);
+    }
+    console.error(`${ts()} ✗ fed server error: ${err.message}`);
+    process.exit(1);
+  });
+  fedServer = srv;
+  srv.listen(FED_PORT, "127.0.0.1", () => {
+    console.log(`${ts()} ⇄ fed listener up on http://127.0.0.1:${FED_PORT} (link surface; tunnel points here)`);
+  });
+}
+
+function stopFedListener() {
+  if (!fedServer) return;
+  const srv = fedServer;
+  fedServer = null;
+  try { srv.close(); } catch {}
+  console.log(`${ts()} ⇄ fed listener stopped`);
+}
+
 // ─── HTTP Server ────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
@@ -456,6 +1215,9 @@ const server = http.createServer(async (req, res) => {
     const sid = crypto.randomUUID().slice(0, 12);
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
     res.write(`event: endpoint\ndata: http://localhost:${PORT}/message?session=${sid}\n\n`);
+    // TCP keepalive tightens ghost de-merge: a dead client's socket errors faster
+    // than the 30d TTL, so its name frees up within tens of seconds (lesson #9).
+    try { req.socket.setKeepAlive(true, 15000); } catch {}
     sseClients.set(sid, res);
 
     // Keepalive: SSE comment every 25s prevents idle timeout on Claude Code's MCP client
@@ -599,12 +1361,63 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── GET /health/ping — UNGATED liveness (no session names) ─────────────
+  // Always open, even when sharing is on, so install.sh --check and the test
+  // health() helper can probe liveness without the token. Leaks no roster.
+  if (req.method === "GET" && url.pathname === "/health/ping") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", role: FED.role, node: FED.node, sharing: !!FED.token }));
+    return;
+  }
+
+  // ── POST /link/reload — loopback-only hot-reload of federation config ──
+  // Re-reads the dotfiles so --share/--join can flip a RUNNING bridge into
+  // hub/spoke mode WITHOUT a restart (a restart drops every SSE client and can
+  // kill the calling session — lesson #23a). Lives on the MAIN (loopback-only)
+  // server, NOT the fed listener — it must never be tunneled. Defense-in-depth:
+  // restricted to a loopback peer AND token-gated when a token is configured.
+  if (req.method === "POST" && url.pathname === "/link/reload") {
+    if (!isLoopback(req)) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "forbidden: loopback only" })); return; }
+    if (FED.token && !tokenOk(req)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+    try {
+      loadFedConfig();
+      applyFedConfig();
+      console.log(`${ts()} ⇄ federation reloaded: role=${FED.role} node=${FED.node}${FED.hubUrl ? ` hub=${FED.hubUrl}` : ""}`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, role: FED.role, node: FED.node, sharing: !!FED.token }));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  // ── /link/* — NOT served on the main (loopback) server ──────────────────
+  // The federation link surface lives ONLY on the fed listener (hub mode), which
+  // is the sole thing tunneled. Serving /link/* here would mean a tunnel that
+  // (mis)pointed at the main port could reach the link surface; more importantly
+  // the security tests assert the main port returns 404 for /link/*.
+  if (url.pathname.startsWith("/link/")) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+    return;
+  }
+
   // ── GET /health ───────────────────────────────────────────────────────
   if (req.method === "GET" && url.pathname === "/health") {
+    // Gated when sharing is on (don't leak session names through the tunnel).
+    // Standalone keeps it open — preserves install.sh --check + existing tests.
+    if (FED.token && !tokenOk(req)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       status: "ok",
-      sessions: activeSessions(),
+      role: FED.role,
+      node: FED.node,
+      sessions: FED.role === "standalone" ? activeSessions() : globalRoster(),
       pending: [...messages.values()].filter((m) => m.kind !== "notice" && !m.answer).length,
       answered: [...messages.values()].filter((m) => m.answer).length,
       notices: [...messages.values()].filter((m) => m.kind === "notice").length,
@@ -639,6 +1452,16 @@ function shutdown(signal) {
     }
   }
   sseClients.clear();
+  // Tear down federation: close spoke streams (hub) + the outbound hub link (spoke).
+  for (const [, sp] of spokes) {
+    if (sp.res && !sp.res.destroyed) {
+      try { sp.res.write("event: close\ndata: bridge shutting down\n\n"); } catch {}
+      try { sp.res.end(); } catch {}
+    }
+  }
+  spokes.clear();
+  teardownHubStream();
+  stopFedListener();
   removePid();
   server.close(() => {
     console.log("[bridge] server closed.");
@@ -662,12 +1485,19 @@ server.on("error", (err) => {
   process.exit(1);
 });
 
-server.listen(PORT, () => {
+// Bind the MAIN server to loopback ONLY. It serves every LOCAL route (/sse,
+// /message, /pending, /whoami, /health, /health/ping, /link/reload) and must
+// NEVER be tunneled or reachable from the LAN. The tunnel exposes the separate
+// fed listener (127.0.0.1:FED_PORT, hub mode) instead. See DEVELOPER.md.
+server.listen(PORT, "127.0.0.1", () => {
   writePid();
+  // Load federation config from disk and bring up the link if we're a hub/spoke.
+  try { loadFedConfig(); applyFedConfig(); } catch (e) { console.error(`${ts()} ✗ fed config load failed: ${e.message}`); }
   console.log(`\n${"═".repeat(42)}`);
-  console.log(`  claude-bridge v2.6.2`);
+  console.log(`  claude-bridge v2.7.0`);
   console.log(`  PID:     ${process.pid}`);
-  console.log(`  SSE:     http://localhost:${PORT}/sse`);
-  console.log(`  Health:  http://localhost:${PORT}/health`);
+  console.log(`  SSE:     http://127.0.0.1:${PORT}/sse`);
+  console.log(`  Health:  http://127.0.0.1:${PORT}/health`);
+  console.log(`  Fed:     role=${FED.role} node=${FED.node}${FED.token ? ` (sharing on; link surface on 127.0.0.1:${FED_PORT})` : ""}`);
   console.log(`${"═".repeat(42)}\n`);
 });

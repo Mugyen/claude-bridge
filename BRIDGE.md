@@ -94,6 +94,15 @@ Keep `content` self-contained — same bar as a good reply: specifics, the why, 
 
 Take it in as context and continue your work. **Do not reply** — it's one-way by design. If it genuinely changes what you're doing and you want to respond, start your own `notify` or `ask`; don't treat the NOTICE as a pending question (it isn't one, and `reply()` won't target it).
 
+## Talking across machines (cross-network federation)
+
+If the user has linked this bridge to others (`--share`/`--join`), some sessions in `list_sessions` live on **other machines**. This is **transparent** — talk to them exactly like local sessions via `ask`/`reply`/`notify`, and remote questions arrive in your inbox identically to local ones.
+
+- A **bare name** resolves to a **local** session first; if it only exists remotely, it routes across the link automatically.
+- To target a specific remote session when names collide, use **`name@node`** (the `node` shown in `list_sessions`). Local always wins for a bare name.
+- Scratchpads (`broadcast`/`read_scratchpad`) are **local-only** — they don't federate. Use `ask`/`notify` to reach remote sessions.
+- If the link drops, local coordination keeps working and queued cross-network messages flush on reconnect — nothing special required of you.
+
 ## Proactive context sharing
 
 When you make a significant decision or the user gives you important preferences, call `broadcast()` to share it:

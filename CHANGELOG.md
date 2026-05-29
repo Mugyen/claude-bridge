@@ -12,7 +12,26 @@ heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
 ### Added
-- **Design spec for cross-network federation** — `docs/specs/cross-network-federation.md`. Hub-and-spoke bridge linking so sessions on different machines can talk while each stays autonomous locally if the link drops. Designed and shelved as future work (not implemented); referenced from DEVELOPER.md "Planned features."
+- **Cross-network federation (Phase 1) — talk to agents on other machines.** Hub-and-spoke bridge linking over a Cloudflare tunnel. One person runs `./install.sh --share` (becomes a hub, opens a tunnel, prints a join link); others run `./install.sh --join '<link>'` (become spokes). Sessions stay on localhost; only the bridge-to-bridge link rides the tunnel. `ask`/`reply`/`notify` now resolve targets across the link: a remote message is injected into the destination bridge's local `messages` store as a shape-identical object, so every existing delivery path (`/pending`, Stop hook, idle-listener peek, `check_inbox`, blocking `ask`, `notify`, `get_thread`, GC, migration) works unchanged. `list_sessions` returns a merged roster tagged by node; target a specific remote session as `name@node` (bare names resolve local-first). Lossless reconnect: queued messages live in the durable store (30d TTL) and re-forward idempotently when the link comes back. Scratchpads (`broadcast`/`read_scratchpad`) stay local-only in Phase 1.
+- **Token-auth layer.** A shared secret (`~/.claude/.cc-bridge-token`, sent as the `X-Bridge-Token` header) gates `/health` and all `/link/*` when sharing is on. Loopback is NOT trusted (a tunnel makes remote requests look local). Guardrail: the bridge refuses to serve `/link/*` without a token (503 "federation disabled").
+- **`/health/ping` — ungated liveness probe** (status/role/node/sharing, NO session names). `install.sh --check` and the test harness use it so they keep working when the full `/health` is token-gated.
+- **`POST /link/reload` — no-restart config hot-load.** `--share`/`--join`/`--unlink`/`--stop-share` flip a *running* bridge's role via this localhost-only endpoint instead of restarting it (a restart drops every SSE client and can kill the calling session — lesson #23a).
+- **`install.sh` federation flags:** `--share [--named-tunnel <host>] [--node <id>]`, `--join '<link>'`, `--unlink`, `--stop-share`. Both Cloudflare quick-tunnel (default, ephemeral URL, zero setup) and named-tunnel (stable hostname) modes. `cloudflared` is detect-and-instruct (bridge stays zero-dependency). `--check` now shows hub/spoke/standalone status + tunnel URL.
+- **Link/SSE liveness tweak.** TCP keepalive on the local `/sse` and the link `/link/stream`, plus prune-on-write-error, so a dead client/spoke leaves the roster within tens of seconds (tightens lesson #9 ghost de-merge locally too).
+- **Tests:** `tests/test-token-auth.mjs` (gate accept/reject, ungated ping, no-token guardrail), `tests/test-federation.mjs` (two-bridge link: roster merge, cross-link ask/reply, notify relay + consume-once, invariants, gated health, link-drop pruning), `tests/test-federation-reconnect.mjs` (lossless queued-message flush), `tests/test-share-flags.sh` (install.sh flag parsing with a fake cloudflared). `tests/lib.mjs` gained per-bridge fed-config isolation + link helpers.
+- **Design spec for cross-network federation** — `docs/specs/cross-network-federation.md` (the why) + `docs/specs/cross-network-federation-implementation-plan.md` (the how).
+
+### Security
+- **Federation hardening — separate loopback fed port; the main bridge is no longer tunneled.** A security review found `--share` tunneled the WHOLE bridge port, exposing the intentionally token-free local routes (`/sse`, `/message`, `/pending`, `/whoami`) to anyone with the URL — they could register, ask/notify, and read any session's pending messages with no token. Fixes:
+  - The bridge now runs **two listeners**. The **main server binds `127.0.0.1:PORT`** (loopback only) and serves all local routes — it is never tunneled and is now unreachable from the LAN. In **hub mode** a **second server binds `127.0.0.1:FED_PORT`** (default `PORT+1`, override `CC_BRIDGE_FED_PORT`) serving ONLY the token-gated `/link/*` surface plus the content-free `/health/ping`; every other path 404s.
+  - **`--share` tunnels the fed port, not the main port** (both quick-tunnel and named-tunnel). The join link is unchanged; the tunnel hostname now maps to the fed port.
+  - **`/link/reload` is now token-gated (when a token is set) AND restricted to a loopback peer** (defense-in-depth); it stays on the main loopback-only server.
+  - A spoke makes only outbound connections and never binds the fed port. Standalone is byte-for-byte unchanged (the fed listener exists only in hub mode).
+
+### Changed
+- `install.sh start_bridge` now polls the ungated `/health/ping` for liveness (the full `/health` is token-gated when sharing is on).
+- `install.sh --check` now shows the loopback fed port and that the tunnel points at it (not the main port).
+- New install artifacts registered in the manifest and removed by `--uninstall`: `.cc-bridge-token`, `.cc-bridge-role`, `.cc-bridge-hub`, `.cc-bridge-node`. Uninstall also kills the tunnel child (but not the bridge — lesson #15).
 
 ### Fixed
 - **Idle-listener didn't survive a session resume/restart** (v2.6.2). A background `Monitor`

@@ -7,3 +7,6 @@ node_modules/
 .playwright-mcp/
 seo-*.png
 cb-*.png
+
+# Local Claude Code harness runtime state
+.claude/

@@ -57,10 +57,10 @@ Gotchas: The JWT_SECRET env var must be set (see .env.example). The middleware c
 | Tool | Required args | Optional args | What it does |
 |---|---|---|---|
 | `register` | `name` (string) | `description` (string), `claude_session_id` (string) | Join the bridge with a name |
-| `list_sessions` | — | — | See who's online |
-| `ask` | `to` (string), `question` (string) | — | Ask another session a question (blocks until reply, 5min timeout) |
+| `list_sessions` | — | — | See who's online (local + remote when the bridge is federated; remote entries carry a `node`) |
+| `ask` | `to` (string), `question` (string) | — | Ask another session a question (blocks until reply, 5min timeout). `to` may be a bare name or `name@node` (see "Talking across machines") |
 | `reply` | `answer` (string) | `message_id` (string) | Answer a pending question (auto-targets if only one pending) |
-| `notify` | `to` (string), `content` (string) | — | Send a one-way NOTICE (fire-and-forget FYI; does not block, no reply expected) |
+| `notify` | `to` (string), `content` (string) | — | Send a one-way NOTICE (fire-and-forget FYI; does not block, no reply expected). `to` may be `name@node` |
 | `check_inbox` | — | — | See unanswered questions AND undelivered one-way NOTICEs addressed to you |
 | `get_thread` | `with_session` (string) | — | Get Q&A history with another session |
 | `broadcast` | `content` (string) | `append` (boolean) | Write to your scratchpad (visible to all) |
@@ -114,6 +114,16 @@ Keep `content` self-contained — same bar as a good reply: specifics, the why, 
 ## When you receive a 📨 NOTICE
 
 Take it in as context and continue your work. **Do not reply** — it's one-way by design. If it genuinely changes what you're doing and you want to respond, start your own `notify` or `ask`; don't treat the NOTICE as a pending question (it isn't one, and `reply()` won't target it).
+
+## Talking across machines (cross-network federation)
+
+If the user has linked this bridge to others (`--share`/`--join`), some sessions in `list_sessions` live on **other machines**. This is **transparent** — you talk to them exactly like local sessions: `ask`/`reply`/`notify` by name, and remote questions arrive in your inbox identically to local ones (answer them the same way; you can't tell the difference and don't need to).
+
+- A **bare name** resolves to a **local** session first. If the name only exists remotely, it routes across the link automatically.
+- When the same name exists on more than one machine, target a specific one as **`name@node`** (the `node` shown in `list_sessions`). Local always wins for a bare name, so use `name@node` to reach a remote peer explicitly.
+- Scratchpads (`broadcast`/`read_scratchpad`) are **local-only** — they do not federate. Use `ask`/`notify` to reach remote sessions.
+
+If the cross-network link drops, local coordination keeps working and queued cross-network messages are delivered when it reconnects — you don't need to do anything special.
 
 ## Proactive context sharing
 

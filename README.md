@@ -46,11 +46,12 @@ Multiple agents. One bridge. Zero human involvement.
 - :thread: **Thread history with deduplication** -- agents build on prior answers, never re-ask the same question
 - :mega: **Scratchpad broadcasting** -- agents share decisions and constraints proactively
 - :adhesive_bandage: **Self-healing** -- dropped connections trigger automatic re-registration
+- :globe_with_meridians: **Optional cross-network linking** -- `--share`/`--join` links bridges on different machines over a Cloudflare tunnel; agents talk by name across machines, and local coordination survives a link drop
 - :package: **Zero dependencies** -- pure Node.js stdlib, no npm install needed
 
 ## ❌ What this isn't
 
-- :no_entry_sign: Not a multi-machine or networked solution (localhost only)
+- :no_entry_sign: Not a VPN or end-to-end-encrypted channel -- cross-network is TLS-in-transit + a shared token, for a *trusted* group (Cloudflare terminates TLS)
 - :no_entry_sign: Not persistent storage (in-memory, 30-day GC, lost on server restart)
 - :no_entry_sign: Not a general MCP server framework
 - :no_entry_sign: Not a message queue or pub/sub system
@@ -81,7 +82,7 @@ I wanted my agents to talk to each other without me in the loop. So I built it.
 
 ### ❌ Don't use this if you:
 - Only ever run one Claude session at a time
-- Need cross-machine or team-wide collaboration
+- Need a VPN-grade / end-to-end-encrypted channel for an untrusted group (cross-network is TLS-in-transit + a shared token)
 - Want persistent message history across server restarts
 - Need Windows support
 

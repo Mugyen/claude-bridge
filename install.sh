@@ -8,8 +8,20 @@ LEGACY_SKILL_DIR="$HOME/.claude/skills/cc-bridge"
 DESKTOP_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
 PID_FILE="/tmp/claude-bridge.pid"
 PORT="${CC_BRIDGE_PORT:-7400}"
+# Federation listener port. The cloudflared tunnel points HERE (the loopback-only
+# link surface), NEVER at the main port — the main bridge stays unreachable from
+# the LAN / internet. Defaults to PORT+1; override with CC_BRIDGE_FED_PORT.
+FED_PORT="${CC_BRIDGE_FED_PORT:-$((PORT + 1))}"
 VERSION_FILE="$HOME/.claude/.cc-bridge-version"
 MANIFEST_FILE="$HOME/.claude/.cc-bridge-manifest"
+
+# ── Federation (cross-network) config files ──────────────────────────────────
+TOKEN_FILE="$HOME/.claude/.cc-bridge-token"
+ROLE_FILE="$HOME/.claude/.cc-bridge-role"
+HUB_FILE="$HOME/.claude/.cc-bridge-hub"
+NODE_FILE="$HOME/.claude/.cc-bridge-node"
+TUNNEL_PID_FILE="/tmp/claude-bridge-tunnel.pid"
+TUNNEL_URL_FILE="/tmp/claude-bridge-tunnel.url"
 
 # Read version from package.json
 VERSION=$(jq -r '.version // "unknown"' "$REPO_DIR/package.json" 2>/dev/null || echo "unknown")
@@ -26,21 +38,37 @@ warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 # ── Argument parsing ────────────────────────────────────────────────────────
 
 ACTION="install"
+ARG2="${2:-}"
+ARG3="${3:-}"
 case "${1:-}" in
-  --uninstall) ACTION="uninstall" ;;
-  --check)     ACTION="check" ;;
-  --start)     ACTION="start" ;;
-  --stop)      ACTION="stop" ;;
-  --restart)   ACTION="restart" ;;
+  --uninstall)   ACTION="uninstall" ;;
+  --check)       ACTION="check" ;;
+  --start)       ACTION="start" ;;
+  --stop)        ACTION="stop" ;;
+  --restart)     ACTION="restart" ;;
+  --share)       ACTION="share" ;;
+  --join)        ACTION="join" ;;
+  --unlink)      ACTION="unlink" ;;
+  --stop-share)  ACTION="stop-share" ;;
   --help|-h)
-    echo "Usage: ./install.sh [--uninstall | --check | --start | --stop | --restart | --help]"
+    echo "Usage: ./install.sh [command]"
     echo ""
-    echo "  (no args)    Install claude-bridge hooks, MCP server, skill, and Desktop config"
-    echo "  --uninstall  Remove all claude-bridge configuration"
-    echo "  --check      Verify installation without changing anything"
-    echo "  --start      Start the bridge server (writes PID to $PID_FILE)"
-    echo "  --stop       Stop the bridge server (graceful SIGTERM)"
-    echo "  --restart    Stop then start the bridge server"
+    echo "  (no args)         Install hooks, MCP server, skill, and Desktop config"
+    echo "  --uninstall       Remove all claude-bridge configuration"
+    echo "  --check           Verify installation without changing anything"
+    echo "  --start           Start the bridge server (writes PID to $PID_FILE)"
+    echo "  --stop            Stop the bridge server (graceful SIGTERM)"
+    echo "  --restart         Stop then start the bridge server"
+    echo ""
+    echo "Cross-network federation (link bridges across machines):"
+    echo "  --share [--named-tunnel <hostname>] [--node <id>]"
+    echo "                    Become a hub: generate a token, open a tunnel, print a join link."
+    echo "                    Default tunnel = Cloudflare quick tunnel (ephemeral URL, zero setup)."
+    echo "                    --named-tunnel uses a pre-configured cloudflared named tunnel (stable URL)."
+    echo "  --join '<link>'   Become a spoke: link your local bridge to a hub via its join link"
+    echo "                    (https://host#token). Sessions stay on localhost."
+    echo "  --unlink          Spoke leaves its hub (local sessions unaffected)."
+    echo "  --stop-share      Hub stops sharing: closes the tunnel, keeps the bridge + token."
     exit 0
     ;;
 esac
@@ -435,9 +463,12 @@ start_bridge() {
   # server writes the PID file only AFTER a successful bind, so a bind failure
   # (EADDRINUSE) would otherwise look like a silent "no PID file" while leaving a
   # child process behind. Poll /health, and reap the child if it never serves.
+  # Poll the UNGATED /health/ping — the full /health is token-gated when sharing
+  # is on, so an unauthenticated liveness probe must use the ping (else a hub that
+  # came up fine would look like a failed start). /health/ping always responds.
   local up=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if curl -sf --max-time 1 "http://localhost:$PORT/health" >/dev/null 2>&1; then up=1; break; fi
+    if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then up=1; break; fi
     sleep 0.3
   done
 
@@ -475,18 +506,241 @@ stop_bridge() {
 }
 
 check_bridge() {
-  if curl -sf --max-time 1 "http://localhost:${PORT}/health" &>/dev/null; then
-    local sessions pid_info
-    sessions=$(curl -sf --max-time 1 "http://localhost:${PORT}/health" | jq '.sessions | length')
-    if [ -f "$PID_FILE" ]; then
-      pid_info=" (PID $(cat "$PID_FILE"))"
+  # Use the UNGATED /health/ping so this works even when sharing is on (the full
+  # /health requires the token then). Ping reports role + node + sharing state.
+  local ping
+  ping=$(curl -sf --max-time 1 "http://localhost:${PORT}/health/ping" 2>/dev/null)
+  if [ -n "$ping" ]; then
+    local pid_info role node sharing
+    role=$(echo "$ping" | jq -r '.role // "standalone"')
+    node=$(echo "$ping" | jq -r '.node // "?"')
+    sharing=$(echo "$ping" | jq -r '.sharing // false')
+    if [ -f "$PID_FILE" ]; then pid_info=" (PID $(cat "$PID_FILE"))"; else pid_info=""; fi
+    ok "Bridge running on port $PORT${pid_info}"
+    if [ "$sharing" = "true" ]; then
+      ok "Federation: role=$role node=$node (sharing ON)"
+      if [ "$role" = "hub" ]; then
+        ok "Link surface (loopback): http://127.0.0.1:${FED_PORT} (the tunnel points here, NOT the main port $PORT)"
+      fi
+      if [ -f "$TUNNEL_URL_FILE" ] && [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null; then
+        ok "Tunnel open: $(cat "$TUNNEL_URL_FILE") → 127.0.0.1:${FED_PORT}"
+      elif [ "$role" = "hub" ]; then
+        warn "Hub mode on but no tunnel running — run ./install.sh --share to open one"
+      fi
     else
-      pid_info=""
+      ok "Federation: standalone (local only)"
     fi
-    ok "Bridge running on port $PORT${pid_info} ($sessions active sessions)"
   else
     warn "Bridge not running (start with: ./install.sh --start)"
   fi
+}
+
+# ── Federation (cross-network hub-and-spoke) ─────────────────────────────────
+
+# Tell a RUNNING bridge to re-read its federation config WITHOUT a restart. A
+# restart would drop every SSE client and can kill the calling session
+# (DEVELOPER.md lesson #23a) — so --share/--join flip the role on a live bridge
+# via the localhost-only /link/reload endpoint instead.
+fed_reload() {
+  # /link/reload is loopback-only AND token-gated (defense-in-depth) when a token
+  # is configured. Send the token header if we have one so the reload is accepted.
+  local hdr=()
+  if [ -s "$TOKEN_FILE" ]; then hdr=(-H "X-Bridge-Token: $(cat "$TOKEN_FILE")"); fi
+  curl -sf --max-time 2 -X POST "http://localhost:${PORT}/link/reload" "${hdr[@]}" -d '{}' >/dev/null 2>&1
+}
+
+fed_bridge_running() {
+  curl -sf --max-time 1 "http://localhost:${PORT}/health/ping" >/dev/null 2>&1
+}
+
+ensure_token() {
+  if [ ! -s "$TOKEN_FILE" ]; then
+    mkdir -p "$(dirname "$TOKEN_FILE")"
+    local tok
+    if command -v openssl &>/dev/null; then
+      tok=$(openssl rand -hex 32)
+    else
+      tok=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+    fi
+    printf '%s' "$tok" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+    ok "Generated access token ($TOKEN_FILE)"
+  else
+    ok "Reusing existing access token"
+  fi
+}
+
+ensure_node() {
+  local explicit="$1"
+  if [ -n "$explicit" ]; then
+    printf '%s' "$explicit" > "$NODE_FILE"
+  elif [ ! -s "$NODE_FILE" ]; then
+    local host
+    host=$(hostname | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/^-*//;s/-*$//')
+    [ -z "$host" ] && host="node"
+    printf '%s' "$host" > "$NODE_FILE"
+  fi
+  ok "Node id: $(cat "$NODE_FILE")"
+}
+
+share_hub() {
+  # Parse optional flags: --named-tunnel <hostname>, --node <id>
+  local named_tunnel="" node_override=""
+  shift_args=("$@")
+  local i=0
+  while [ $i -lt ${#shift_args[@]} ]; do
+    case "${shift_args[$i]}" in
+      --named-tunnel) i=$((i+1)); named_tunnel="${shift_args[$i]:-}" ;;
+      --node)         i=$((i+1)); node_override="${shift_args[$i]:-}" ;;
+    esac
+    i=$((i+1))
+  done
+
+  if ! command -v cloudflared &>/dev/null; then
+    fail "cloudflared not found — required to open a tunnel."
+    echo "    Install it once (no account needed for a quick tunnel):"
+    echo "      brew install cloudflared       # macOS"
+    echo "      https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+    exit 1
+  fi
+
+  ensure_token
+  ensure_node "$node_override"
+  printf '%s' "hub" > "$ROLE_FILE"
+  : > "$HUB_FILE"   # a hub has no upstream hub URL
+
+  # Bring the bridge up (or hot-reload a running one — never restart it).
+  if fed_bridge_running; then
+    fed_reload && ok "Hub mode enabled on the running bridge (no restart — sessions preserved)"
+  else
+    start_bridge
+  fi
+
+  local token
+  token=$(cat "$TOKEN_FILE")
+
+  # If a tunnel is already running, just reprint the current join link.
+  if [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
+    local existing
+    existing=$(cat "$TUNNEL_URL_FILE")
+    ok "Tunnel already open: $existing"
+    echo ""
+    echo "  Share this ONE command:"
+    echo "    ./install.sh --join '${existing}#${token}'"
+    echo ""
+    return
+  fi
+
+  local tunnel_log="/tmp/claude-bridge-tunnel.log"
+  : > "$tunnel_log"
+
+  if [ -n "$named_tunnel" ]; then
+    # Named tunnel: stable hostname on the user's own domain. The user must have
+    # configured the tunnel + DNS route already (cloudflared tunnel route dns ...).
+    # Tunnel the FED PORT (loopback-only link surface), never the main bridge port.
+    nohup cloudflared tunnel --url "http://localhost:${FED_PORT}" run "$named_tunnel" >> "$tunnel_log" 2>&1 &
+    echo "$!" > "$TUNNEL_PID_FILE"
+    printf '%s' "https://${named_tunnel}" > "$TUNNEL_URL_FILE"
+    ok "Named tunnel started ($named_tunnel)"
+    echo ""
+    echo "  Share this ONE command:"
+    echo "    ./install.sh --join 'https://${named_tunnel}#${token}'"
+    echo ""
+  else
+    # Quick tunnel: ephemeral *.trycloudflare.com URL, zero setup.
+    # Tunnel the FED PORT (loopback-only link surface), never the main bridge port.
+    nohup cloudflared tunnel --url "http://localhost:${FED_PORT}" >> "$tunnel_log" 2>&1 &
+    echo "$!" > "$TUNNEL_PID_FILE"
+    ok "Opening Cloudflare quick tunnel..."
+    # NB: `set -e` + `pipefail` would abort on an empty grep (the pipeline exits
+    # non-zero), so guard the substitution with `|| true`.
+    local url=""
+    for _ in $(seq 1 30); do
+      url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$tunnel_log" 2>/dev/null | head -1 || true)
+      [ -n "$url" ] && break
+      sleep 1
+    done
+    if [ -z "$url" ]; then
+      fail "Tunnel did not report a URL — check $tunnel_log"
+      exit 1
+    fi
+    printf '%s' "$url" > "$TUNNEL_URL_FILE"
+    ok "Secure tunnel open (Cloudflare): $url"
+    echo ""
+    echo "  Share this ONE command:"
+    echo "    ./install.sh --join '${url}#${token}'"
+    echo ""
+    echo "  Note: quick-tunnel URLs are ephemeral. If cloudflared restarts the URL"
+    echo "  rotates — re-run ./install.sh --share to reprint the new join link, and"
+    echo "  spokes must re-join. For an always-on URL, use --named-tunnel <hostname>."
+    echo ""
+  fi
+  warn "Keep this set up while you want the link open. --stop-share closes the tunnel."
+}
+
+join_hub() {
+  local link="$1"
+  if [ -z "$link" ]; then
+    fail "Usage: ./install.sh --join 'https://<host>#<token>'"
+    exit 1
+  fi
+  # Split on the '#' fragment locally — the token never travels to a server.
+  local host="${link%%#*}"
+  local token="${link#*#}"
+  if [ "$token" = "$link" ] || [ -z "$token" ]; then
+    fail "Join link must include the token fragment: 'https://<host>#<token>'"
+    exit 1
+  fi
+  host="${host%/}"
+
+  mkdir -p "$(dirname "$TOKEN_FILE")"
+  printf '%s' "$token" > "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
+  printf '%s' "$host"  > "$HUB_FILE"
+  printf '%s' "spoke"  > "$ROLE_FILE"
+  ensure_node "${ARG3_NODE:-}"
+
+  if fed_bridge_running; then
+    fed_reload && ok "Spoke mode enabled on the running bridge (no restart)"
+  else
+    start_bridge
+  fi
+  ok "Linked to hub $host as node $(cat "$NODE_FILE")"
+  echo ""
+  echo "  Your sessions stay local. Other agents now appear in list_sessions"
+  echo "  tagged with their node; target a specific remote session as name@node."
+  echo ""
+}
+
+unlink_hub() {
+  # Tell the hub we're leaving (graceful), then drop to standalone via reload.
+  local host token node
+  host=$(cat "$HUB_FILE" 2>/dev/null || echo "")
+  token=$(cat "$TOKEN_FILE" 2>/dev/null || echo "")
+  node=$(cat "$NODE_FILE" 2>/dev/null || echo "")
+  if [ -n "$host" ] && [ -n "$token" ]; then
+    curl -sf --max-time 3 -X POST "${host}/link/unregister" \
+      -H "X-Bridge-Token: ${token}" -H "Content-Type: application/json" \
+      -d "{\"node\":\"${node}\"}" >/dev/null 2>&1 && ok "Hub notified (unregistered)" || warn "Could not reach hub (it will prune us via liveness sweep)"
+  fi
+  : > "$HUB_FILE"
+  printf '%s' "standalone" > "$ROLE_FILE"
+  fed_reload && ok "Unlinked — back to standalone (local sessions unaffected)"
+}
+
+stop_share() {
+  if [ -f "$TUNNEL_PID_FILE" ]; then
+    local tp
+    tp=$(cat "$TUNNEL_PID_FILE")
+    if kill -0 "$tp" 2>/dev/null; then
+      kill "$tp" 2>/dev/null && ok "Tunnel closed (PID $tp)"
+    fi
+    rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE"
+  else
+    warn "No tunnel PID file — nothing to close (the bridge keeps running)"
+  fi
+  # Drop to standalone but KEEP the token so re-sharing is fast.
+  printf '%s' "standalone" > "$ROLE_FILE"
+  fed_reload && ok "Hub mode disabled (token kept; bridge still running, sessions preserved)"
 }
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -508,6 +762,13 @@ case "$ACTION" in
     chmod +x "$REPO_DIR"/hooks/*.sh
     manifest_init
     write_version
+    # Register federation config files so --uninstall removes them even if they
+    # are created later by --share/--join. (DEVELOPER.md: every install artifact
+    # is in the manifest + the hardcoded cleanup fallback.)
+    manifest_add FILE "$TOKEN_FILE"
+    manifest_add FILE "$ROLE_FILE"
+    manifest_add FILE "$HUB_FILE"
+    manifest_add FILE "$NODE_FILE"
     echo ""
     echo "Claude Code CLI:"
     install_hooks
@@ -558,8 +819,18 @@ case "$ACTION" in
     remove_skill
     remove_claude_md_legacy
     remove_desktop
+    # Kill the federation tunnel child if running (it's not the bridge; lesson #15
+    # — uninstall does NOT stop the bridge server itself).
+    if [ -f "$TUNNEL_PID_FILE" ]; then
+      tp=$(cat "$TUNNEL_PID_FILE" 2>/dev/null || echo "")
+      if [ -n "$tp" ] && kill -0 "$tp" 2>/dev/null; then
+        kill "$tp" 2>/dev/null && ok "Closed federation tunnel (PID $tp)"
+      fi
+    fi
+    # Federation config files (hardcoded fallback in case the manifest is missing).
+    rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" && ok "Federation config removed (token, role, hub, node)"
     rm -f /tmp/claude-bridge-* /tmp/cc-bridge-* /tmp/claude-bridge.pid /tmp/cc-bridge.pid
-    ok "Temp files cleaned (/tmp/{claude,cc}-bridge-*)"
+    ok "Temp files cleaned (/tmp/{claude,cc}-bridge-* incl. tunnel pid/url)"
     rm -f "$VERSION_FILE"
     echo ""
     echo "Done. Stop any running bridge server: ./install.sh --stop"
@@ -616,5 +887,32 @@ case "$ACTION" in
     warn "from a SEPARATE terminal, not from a Claude session bound to this bridge. (lesson #23)"
     stop_bridge
     start_bridge
+    ;;
+
+  share)
+    echo ""
+    echo "claude-bridge --share (become a hub)"
+    echo "===================================="
+    echo ""
+    share_hub "$@"
+    ;;
+
+  join)
+    echo ""
+    echo "claude-bridge --join (become a spoke)"
+    echo "====================================="
+    echo ""
+    ARG3_NODE=""
+    # support: --join '<link>' --node <id>
+    if [ "${3:-}" = "--node" ]; then ARG3_NODE="${4:-}"; fi
+    join_hub "$ARG2"
+    ;;
+
+  unlink)
+    unlink_hub
+    ;;
+
+  stop-share)
+    stop_share
     ;;
 esac
