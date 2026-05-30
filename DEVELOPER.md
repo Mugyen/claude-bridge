@@ -216,6 +216,17 @@ The original Phase-1 federation tunneled the whole bridge (`cloudflared tunnel -
 - **Why a separate port instead of path-filtering one port?** A single port can't be "tunneled for `/link/*` but not for `/sse`" — cloudflared forwards the whole origin. Two ports is the only way to expose the link surface without exposing the local routes.
 - **Tests:** `tests/lib.mjs` knows the fed port (`port+1` default, third constructor arg to override); `raw()` routes `/link/*` to the fed port automatically (`onMain`/`onFed` overrides force a port). The federation tests point the spoke's `hub` URL at the HUB's fed port. `test-token-auth.mjs` has the regression assertions: main port 404s `/link/*`; fed port 404s the local routes + full `/health`; fed `/link/*` needs the token; fed `/health/ping` leaks no names; `/link/reload` rejects a wrong token. **Do not collapse back to one port.**
 
+### 30. Chaos suite gotchas + the federation resilience gaps it pins (test-federation-chaos.mjs)
+The chaos suite (hub + two spokes, all localhost) is the first test to **restart a bridge on the same `TestBridge` instance** and to crash spokes mid-flight. Two harness fixes were required and must stay (lesson: a harness built for one-shot bridges hides restart bugs):
+- **`TestBridge.start()` resets `this.sid` + `this.responses`.** Without it, a second `start()` keeps the stale session id and the SSE handshake's `!this.sid` guard never captures the new `session=` line → a silent 5-min-style "SSE handshake timeout". Any test that does `stop()`+`start()` depends on this reset.
+- **Spawn the server's stdout as `"ignore"`, not `"pipe"`.** An unread pipe fills its ~64KB buffer once the server logs enough and the **synchronous** `console.log` blocks the event loop → `/sse` stops being served. Production redirects stdout to the log file, so it never bites there — only the harness did. Don't reintroduce an unread stdout pipe.
+- **Node ids are lowercased by `sanitizeNode`,** so the roster renders `name@spokea` (not `name@spokeA`) and **`name@node` addressing is case-sensitive to the sanitized (lowercased) form** — `ask("alice@MyLaptop")` fails; use `alice@mylaptop`. Tests must use lowercase node ids. (Minor real UX gotcha worth a doc note if a user hits it.)
+
+The suite also **pins three real resilience limitations** as passing assertions (so a future fix flips them and forces a test update — they are documented, not silently accepted):
+1. **In-flight question loss.** If the answering spoke crashes *after* receiving a relayed question but *before* replying, the hub never `markPendingRelay`'d it (it was delivered while the spoke was live) and `flushSpokeOutbound` only re-sends **locally-originated** messages — so on reconnect nothing re-delivers it and the asker times out at the 5-min `ask` deadline. A fix would re-push un-answered relayed questions on reconnect.
+2. **Qualified-notify to an offline spoke is dropped.** `resolveTarget`'s hub-side offline-spoke fallback (lesson #25) only covers **bare** names; the `name@node` branch has no such scan, so `notify carol@spokeb` while spokeB is briefly down resolves to `none` and is mis-queued on the hub instead of `markPendingRelay`'d. The **bare** `notify carol` form IS lossless. Inconsistent — a candidate fix is to add the offline-spoke scan to the qualified branch too.
+3. **Orphan-question adoption.** The asker keeps an un-answered question with `to:"<name>"` forever (30d TTL); if a NEW *local* session later registers under that same name it inherits the orphaned question as pending. Rare for auto-generated names; surprising for stable `CC_BRIDGE_SESSION` names.
+
 ---
 
 ## Versioning + manifest approach
@@ -299,6 +310,7 @@ tests/
 ├── test-token-auth.mjs           # federation token gate accept/reject; ungated /health/ping; no-token guardrail
 ├── test-federation.mjs           # two-bridge link: roster merge, cross-link ask/reply, notify relay, invariants, gated health, drop-prune
 ├── test-federation-reconnect.mjs # lossless reconnect: queued message flushes idempotently after the link returns
+├── test-federation-chaos.mjs     # hub+2 spokes: crash/restart/churn, spoke→hub→spoke routing, name@node, auth-under-chaos (lesson #30)
 └── test-share-flags.sh           # install.sh --share/--join/--unlink/--stop-share parsing (fake cloudflared on PATH)
 ```
 

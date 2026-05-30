@@ -72,6 +72,13 @@ export class TestBridge {
   }
 
   async start() {
+    // Reset per-connection state so the SAME instance can be restarted (the chaos
+    // suite does stop()+start() to model a crash). Without this, a stale this.sid
+    // from the previous start makes the handshake's `!this.sid` guard false, so the
+    // new session= line is never captured and start() hangs to the 5s timeout.
+    this.sid = null;
+    this.responses.clear();
+
     // Free the main + fed ports if anything is squatting on them
     await new Promise((r) => {
       const k = spawn("sh", ["-c", `lsof -ti:${this.port} -ti:${this.fedPort} | xargs kill 2>/dev/null; true`]);
@@ -83,7 +90,11 @@ export class TestBridge {
     const repoRoot = new URL("..", import.meta.url).pathname;
     this.server = spawn("node", [`${repoRoot}/bridge-server.mjs`], {
       env: { ...process.env, CC_BRIDGE_PORT: String(this.port), CC_BRIDGE_FED_PORT: String(this.fedPort), ...fedEnv },
-      stdio: ["ignore", "pipe", "pipe"],
+      // stdout → "ignore" (discarded by the OS, like production's redirect to the
+      // log file). An unread PIPE fills its 64KB buffer once the server logs enough
+      // and console.log blocks the event loop synchronously — which surfaced as an
+      // /sse handshake timeout when restarting a server mid-test (chaos suite).
+      stdio: ["ignore", "ignore", "pipe"],
     });
     // Capture stderr if anything goes wrong
     this.server.stderr.on("data", (d) => process.stderr.write(`[bridge] ${d}`));
