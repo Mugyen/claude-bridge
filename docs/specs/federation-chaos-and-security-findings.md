@@ -103,4 +103,7 @@ None are release-blockers *given* the docs state the trusted-group framing hones
 ### Status (updated 2026-05-30)
 - ✅ **G1 (spoke heartbeat)** — DONE. Spoke POSTs `/link/heartbeat` every 25s; regression test `tests/test-federation-heartbeat.mjs`.
 - ✅ **`reply()`/`register()` arg validation** — DONE. Covered in `test-tools.mjs` + the chaos suite.
-- ⬜ G2 (cloudflared supervisor/docs), G3 (qualified-notify fallback), G4 (in-flight re-push), G5/G6, S1–S6, info-leak — open, not yet implemented (deferred to a follow-up pass).
+- ✅ **G3 (qualified-notify offline fallback)** — DONE. `resolveTarget`'s `@node` branch now uses the offline-spoke fallback, so `notify name@node` to a briefly-down spoke is lossless. Chaos assertion flipped to assert delivery.
+- ✅ **G4 (in-flight re-push)** — DONE. `flushPendingForwards` now also scans `messages` and re-pushes any still-open question/notice addressed to a session on the reconnecting node — so a question the spoke received and lost to a crash is re-delivered and the asker is answered. Chaos assertion flipped.
+- ✅ **G6 (`@node` case-insensitivity)** — DONE. The `@node` part is `sanitizeNode`-normalized before matching.
+- ⬜ G2 (cloudflared supervisor/docs), G5 (orphan-adoption, low), S1–S6, info-leak, DoS caps — open (Tiers 2–3 in progress).

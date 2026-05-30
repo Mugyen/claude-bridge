@@ -171,20 +171,23 @@ try {
   await spokeB.start();
   await sleep(1800);
   carol = await register(SB, "carol", "spokeB session v2");
-  // bare-name notice delivers (exactly once) after reconnect
-  const got = await until(async () => {
+  // BOTH the bare and the (G3-fixed) qualified notice should flush losslessly.
+  // check_inbox consumes notices, so collect across reads until both are seen.
+  const seen = new Set();
+  await until(async () => {
     const ib = await carol.call("check_inbox");
-    return (ib.notices || []).some((n) => (n.content || "").includes("bare-queued-marker")) ? ib : null;
+    for (const n of (ib.notices || [])) {
+      if ((n.content || "").includes("bare-queued-marker")) seen.add("bare");
+      if ((n.content || "").includes("qualified-queued-marker")) seen.add("qual");
+    }
+    return seen.has("bare") && seen.has("qual");
   }, 25000);
-  assert("LOSSLESS: bare-name queued notice delivers after spokeB reconnects", !!got, JSON.stringify(got));
+  assert("LOSSLESS: bare-name queued notice delivers after spokeB reconnects", seen.has("bare"), [...seen].join(","));
+  assert("G3 FIXED: qualified name@node queued notice ALSO delivers losslessly", seen.has("qual"), [...seen].join(","));
+  // exactly once: neither marker re-appears on a subsequent read
   const again = await carol.call("check_inbox");
-  const dupCount = (again.notices || []).filter((n) => (n.content || "").includes("bare-queued-marker")).length;
-  assert("bare-name queued notice delivered exactly once (no duplicate)", dupCount === 0, JSON.stringify(again));
-  // qualified-name notice: KNOWN GAP — never relayed to the reconnected spoke.
-  const finalIb = await carol.call("check_inbox");
-  const qualDelivered = [...(got?.notices || []), ...(again?.notices || []), ...(finalIb?.notices || [])]
-    .some((n) => (n.content || "").includes("qualified-queued-marker"));
-  assert("KNOWN GAP: qualified notify to an offline spoke is NOT lossless (dropped)", qualDelivered === false, "qualified marker delivered — gap may be fixed; update the test");
+  const dupCount = (again.notices || []).filter((n) => /bare-queued-marker|qualified-queued-marker/.test(n.content || "")).length;
+  assert("queued notices delivered exactly once (no duplicate after reconnect)", dupCount === 0, JSON.stringify(again));
 
   // ── 5. Hub HARD crash + restart → spoke reconnects via backoff, re-merges ───
   await hub.stop({ signal: "SIGKILL" });
@@ -222,16 +225,23 @@ try {
   // hub must stay responsive while the ask is outstanding + remote is dead
   const hubResponsive = await alice.call("list_sessions");
   assert("hub stays responsive while a remote ask is outstanding and the spoke is dead", Array.isArray(hubResponsive.sessions), JSON.stringify(hubResponsive));
-  // restart spokeA + re-register bob; the original question is NOT re-delivered
-  // (origin=hub, so flushSpokeOutbound skips it; hub never queued it). Asker would
-  // hit the 5-min timeout. This asserts the gap is still the known behaviour.
+  // restart spokeA + re-register bob. G4: on reconnect the hub re-pushes the
+  // still-unanswered in-flight question to the node now hosting bob (the message
+  // scan in flushPendingForwards), so it reappears in bob's inbox and the asker
+  // can finally be answered.
   await spokeA.start();
   await sleep(1800);
   bob = await register(SA, "bob", "spokeA session v2");
-  await sleep(2500);
-  const inbox = await bob.call("check_inbox");
-  const lostStillThere = (inbox.questions || []).some((q) => (q.question || "").includes("inflight-loss-probe"));
-  assert("KNOWN GAP: in-flight question is lost on answerer crash (not re-delivered)", lostStillThere === false, JSON.stringify(inbox));
+  const reDelivered = await until(async () => {
+    const ib = await bob.call("check_inbox");
+    return (ib.questions || []).some((q) => (q.question || "").includes("inflight-loss-probe")) ? ib : null;
+  }, 15000);
+  assert("G4 FIXED: in-flight question re-delivered to the answerer after its spoke restarts", !!reDelivered, JSON.stringify(reDelivered));
+  // and replying now unblocks the original asker (answer routes home across the link)
+  const q4 = (reDelivered.questions || []).find((q) => (q.question || "").includes("inflight-loss-probe"));
+  await bob.call("reply", { message_id: q4.id, answer: "recovered-after-crash" });
+  const lostR = await lostP;
+  assert("G4 FIXED: the asker's blocking ask completes after in-flight recovery", lostR.answer === "recovered-after-crash", JSON.stringify(lostR));
 
   // ── 7. name@node collision: local-name-wins; @node targets the remote ───────
   // register a SECOND "bob" on the hub (bob@hub) alongside bob@spokea.
@@ -274,6 +284,9 @@ try {
   if (remoteBobSaw) { await bob.call("reply", { answer: "remote-spokeA-bob" }); }
   const remoteAskR = await remoteAskP;
   assert("qualified ask answered by the remote bob", remoteAskR.answer === "remote-spokeA-bob", JSON.stringify(remoteAskR));
+  // G6: a mixed-case @node target resolves (node ids are sanitized/lowercased).
+  const g6 = await alice.call("notify", { to: "bob@SpokeA", content: "g6-case-probe" });
+  assert("G6 FIXED: mixed-case 'bob@SpokeA' resolves to the remote spoke", g6.target_online === true && g6.to === "bob@spokea", JSON.stringify(g6));
   bobLocal.close();
 
   // ── 8. Auth still enforced after all the chaos ──────────────────────────────

@@ -292,7 +292,9 @@ function resolveTarget(to) {
   const at = to.lastIndexOf("@");
   if (at > 0) {
     const bareName = to.slice(0, at);
-    const node = to.slice(at + 1);
+    // G6: node ids are sanitized (lowercased) at the source, so a qualified
+    // "name@Node" target must be sanitized the same way or it never matches.
+    const node = sanitizeNode(to.slice(at + 1));
     if (node === "local" || node === FED.node) {
       const sse = nameToSSE.get(bareName);
       if (sse && sseClients.has(sse)) return { kind: "local", sse, name: bareName };
@@ -300,6 +302,14 @@ function resolveTarget(to) {
     }
     const remote = globalRoster().find((e) => e.name === bareName && e.node === node);
     if (remote) return { kind: "remote", node, name: bareName };
+    // G3: a qualified target whose spoke is momentarily offline-but-known still
+    // routes to that node, so the message queues and flushes on reconnect — the
+    // same durability the bare-name path already has (lesson #25). Without this,
+    // notify name@node to a briefly-down spoke was dropped while bare-name wasn't.
+    if (FED.role === "hub") {
+      const sp = spokes.get(node);
+      if (sp && (sp.sessions || []).some((s) => s.name === bareName)) return { kind: "remote", node, name: bareName };
+    }
     return { kind: "none" };
   }
   // Bare name — local wins.
@@ -487,24 +497,45 @@ function markPendingRelay(payload, node) {
   pendingRelay.get(node).add(payload.id);
 }
 
+function pushForwardToSpoke(sp, m) {
+  if (m.kind === "notice") {
+    linkSend(sp, "forward", { kind: "notice", id: m.id, from: m.from, to: m.to, content: m.content, ts: m.ts, originNode: m.origin?.node ?? FED.node });
+  } else {
+    linkSend(sp, "forward", { kind: "question", id: m.id, from: m.from, to: m.to, question: m.question, ts: m.ts, originNode: m.origin?.node ?? FED.node });
+  }
+}
+
+// Re-sync a (re)connected spoke: (1) drain the explicit relay queue, then (2)
+// re-push any hub-known unanswered question / undelivered notice whose TARGET
+// session lives on this node. (2) closes G4 — an in-flight message the spoke
+// received and then lost to a crash was delivered (never queued in pendingRelay),
+// so only a message-scan re-delivers it. injectRemote on the spoke is idempotent
+// on id, so re-pushing a message the spoke still has is a harmless no-op.
 function flushPendingForwards(node) {
   const sp = spokes.get(node);
   if (!sp || !sp.res || sp.res.destroyed) return;
+  // (1) explicit relay queue
   const set = pendingRelay.get(node);
-  if (!set || set.size === 0) return;
-  for (const id of [...set]) {
-    const m = messages.get(id);
-    if (!m) { set.delete(id); continue; }
-    if (m.kind === "notice") {
-      if (m.delivered) { set.delete(id); continue; }
-      linkSend(sp, "forward", { kind: "notice", id: m.id, from: m.from, to: m.to, content: m.content, ts: m.ts, originNode: m.origin?.node ?? FED.node });
-    } else {
-      if (m.answer !== null) { set.delete(id); continue; }
-      linkSend(sp, "forward", { kind: "question", id: m.id, from: m.from, to: m.to, question: m.question, ts: m.ts, originNode: m.origin?.node ?? FED.node });
+  if (set) {
+    for (const id of [...set]) {
+      const m = messages.get(id);
+      if (m && !(m.kind === "notice" ? m.delivered : m.answer !== null)) pushForwardToSpoke(sp, m);
+      set.delete(id);
     }
-    set.delete(id);
   }
-  console.log(`${ts()} ⇄ flushed queued forwards to spoke "${node}"`);
+  // (2) G4 in-flight recovery: re-push messages addressed to this node's sessions
+  // that are still open (unanswered question / undelivered notice). Skip messages
+  // that ORIGINATED on this node (don't echo them back to their source).
+  const names = new Set((sp.sessions || []).map((s) => s.name));
+  if (names.size) {
+    for (const m of messages.values()) {
+      if (m.origin?.node === node) continue;
+      if (!names.has(m.to)) continue;
+      if (m.kind === "notice" ? m.delivered : m.answer !== null) continue;
+      pushForwardToSpoke(sp, m);
+    }
+  }
+  console.log(`${ts()} ⇄ resynced spoke "${node}" (queue + in-flight)`);
 }
 
 /** Write an SSE event to a spoke's link stream; prune the spoke on write error. */
@@ -1167,6 +1198,10 @@ async function handleLinkRequest(req, res, url) {
         spokes.set(node, { res: existing?.res || null, sessions: Array.isArray(payload.sessions) ? payload.sessions : [], lastSeen: Date.now() });
         console.log(`${ts()} ⇄ spoke "${node}" registered (${(payload.sessions || []).length} sessions)`);
         broadcastRoster();
+        // Re-sync now that this node's session list is known — covers the race
+        // where /link/register lands AFTER /link/stream connected (so the
+        // stream-connect resync saw an empty session list). No-op if no stream.
+        flushPendingForwards(node);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, node: FED.node, roster: globalRoster() }));
         return;
