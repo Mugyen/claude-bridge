@@ -270,6 +270,16 @@ Tell your Desktop agent:
 | `CC_BRIDGE_FED_PORT` | `PORT + 1` (`7401`) | Loopback port for the federation link surface (hub mode); the tunnel points here, never at the main port |
 | `CC_BRIDGE_SESSION` | auto-generated | "Register on the bridge as 'api-builder'" |
 | `CC_BRIDGE_MONITOR_INTERVAL` | `25` | "Poll the bridge every 15 seconds for idle questions" |
+| `CC_BRIDGE_SHARE_DESCRIPTIONS` | `0` (off) | Set `1` to publish each session's description across the federation roster. Off by default — descriptions can carry project/file context and a hub broadcasts the roster to every node. Local `list_sessions` always shows local descriptions. |
+
+**Federation hardening limits** (rarely changed; raise only if you hit them):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CC_BRIDGE_MAX_BODY` | `1000000` (1MB) | Max POST body; larger → `413`. |
+| `CC_BRIDGE_RATE_MAX` / `CC_BRIDGE_RATE_WINDOW_MS` | `60` / `10000` | Token bucket on `ask`/`notify`/`broadcast` + `/link/forward`, per source. Reads + `register`/`reply` are never limited. |
+| `CC_BRIDGE_MAX_NODES` | `64` | Distinct federated nodes a hub will track (new node past the cap → `429`). |
+| `CC_BRIDGE_MAX_SESSIONS` | `256` | Advertised sessions accepted per node (over-long lists truncated). |
 
 Auto-generated names follow the pattern `<dirname>-<4hex>`. For stable names, set in your shell profile:
 

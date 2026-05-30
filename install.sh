@@ -456,7 +456,16 @@ start_bridge() {
     fi
   fi
 
-  nohup node "$REPO_DIR/bridge-server.mjs" >> /tmp/claude-bridge-server.log 2>&1 &
+  # Keep the server log private (it can hold session names + message metadata)
+  # and bounded (it grows unbounded otherwise — rotate at ~10MB on start).
+  local LOG=/tmp/claude-bridge-server.log
+  if [ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 10485760 ]; then
+    mv -f "$LOG" "$LOG.1" 2>/dev/null || true
+  fi
+  touch "$LOG" 2>/dev/null || true
+  chmod 600 "$LOG" 2>/dev/null || true
+
+  nohup node "$REPO_DIR/bridge-server.mjs" >> "$LOG" 2>&1 &
   local child=$!
 
   # Verify the server actually came up — don't trust the PID file alone. The

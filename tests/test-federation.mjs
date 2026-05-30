@@ -60,6 +60,13 @@ try {
     (spokeList.sessions || []).some((s) => s.name === "alice" && s.node === "hub"),
     JSON.stringify(spokeList));
 
+  // Info-leak: descriptions are NOT shared across the link by default. The remote
+  // entry carries no description; the local entry keeps its own.
+  const remoteBob = (hubList.sessions || []).find((s) => s.name === "bob" && s.node === "spoke");
+  assert("remote roster entry carries NO description (not shared across the link)", !remoteBob.description, JSON.stringify(remoteBob));
+  const localAlice = (hubList.sessions || []).find((s) => s.name === "alice" && (s.node === "local" || !s.node));
+  assert("local roster entry keeps its own description", localAlice && localAlice.description === "hub session", JSON.stringify(localAlice));
+
   // ── 3. Cross-link ask/reply round-trip (alice@hub asks bob@spoke) ────────
   // ask blocks; drive it without awaiting, then have bob reply.
   const askP = hub.call("ask", { to: "bob", question: "what is the auth header name?" });

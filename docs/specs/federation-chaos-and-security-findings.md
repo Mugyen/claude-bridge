@@ -106,4 +106,7 @@ None are release-blockers *given* the docs state the trusted-group framing hones
 - ✅ **G3 (qualified-notify offline fallback)** — DONE. `resolveTarget`'s `@node` branch now uses the offline-spoke fallback, so `notify name@node` to a briefly-down spoke is lossless. Chaos assertion flipped to assert delivery.
 - ✅ **G4 (in-flight re-push)** — DONE. `flushPendingForwards` now also scans `messages` and re-pushes any still-open question/notice addressed to a session on the reconnecting node — so a question the spoke received and lost to a crash is re-delivered and the asker is answered. Chaos assertion flipped.
 - ✅ **G6 (`@node` case-insensitivity)** — DONE. The `@node` part is `sanitizeNode`-normalized before matching.
-- ⬜ G2 (cloudflared supervisor/docs), G5 (orphan-adoption, low), S1–S6, info-leak, DoS caps — open (Tiers 2–3 in progress).
+- ✅ **S3 (kind allowlist + full UUIDs), S4 (node/session caps), S6 (body cap + rate limit)** — DONE (`test-hardening.mjs`).
+- ✅ **Info-leak** — DONE: descriptions no longer cross the link by default; message content removed from the log; log `0600` + rotated.
+- ⬜ **S1/S2/S5 (node identity)** — Tier 3, in progress (TOFU per-node secret).
+- ⬜ **G2 (cloudflared supervisor/docs)**, **G5 (orphan-adoption, low)** — open; G2 is ops/docs, will document in USAGE.

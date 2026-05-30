@@ -229,6 +229,13 @@ Resilience limitations the suite originally pinned — status after the Tier-1 f
 2. ✅ **Qualified-notify to an offline spoke — FIXED (G3).** The `@node` branch of `resolveTarget` now has the same offline-spoke fallback as the bare-name path, so both forms `markPendingRelay` and flush losslessly.
 3. ⬜ **Orphan-question adoption** (low, still open). The asker keeps an un-answered question with `to:"<name>"` (30d TTL); a NEW *local* session later registering under that name inherits it as pending. Rare for auto-generated names; surprising for stable `CC_BRIDGE_SESSION` names.
 
+### 31. Tier-2 DoS/info-leak hardening — caps, rate limit, and the 413 keep-alive gotcha
+Added bounds so a flood / hostile-but-authenticated peer can't exhaust the hub, plus privacy fixes. All limits are env-overridable (`CC_BRIDGE_MAX_BODY`/`MAX_NODES`/`MAX_SESSIONS`/`RATE_MAX`/`RATE_WINDOW_MS`/`SHARE_DESCRIPTIONS`) with production-safe defaults; `test-hardening.mjs` shrinks them to trip the caps deterministically.
+- **Rate limiting** is on the message-CREATING tools only (`ask`/`notify`/`broadcast`) keyed by `sse:<sseId>`, plus `/link/forward` keyed by `node:<node>`. **Never** rate-limit reads (`check_inbox`/`list_sessions`/`get_thread`/`/pending`), `register`, or `reply` — that would break the blocking-`ask` round-trip and reconnect flushes. The bucket map is GC-pruned (idle buckets refill fully → deleted).
+- **Descriptions don't cross the link** by default — `linkSessions()` (name-only) is what `broadcastRoster`/`spokeAdvertise` send, NOT `activeSessions()` (which keeps descriptions for LOCAL `list_sessions`). If you add a new link-crossing roster path, use `linkSessions()`.
+- **The 413 keep-alive gotcha (cost me a test):** on an over-cap body, do **not** `req.destroy()` mid-read and keep the connection — Node ≥19 pools keep-alive sockets by default, so the half-read socket gets reused and the NEXT request on it ECONNRESETs. Respond `413` with **`Connection: close`** and `res.end()` so the agent discards the socket. Same rule for any early-abort response that hasn't drained the request body.
+- **Don't log message content.** `ask`/`notify` log lines carry only `id` + char-count, never the question/notice text (the log is world-readable until install.sh's `0600`). Keep it that way.
+
 ---
 
 ## Versioning + manifest approach

@@ -24,6 +24,14 @@ heading when you tag the release and bump `package.json` + the banner in
 - **Design spec for cross-network federation** — `docs/specs/cross-network-federation.md` (the why) + `docs/specs/cross-network-federation-implementation-plan.md` (the how).
 
 ### Security
+- **DoS + info-leak hardening (Tier 2).** A second-pass security review fed these in:
+  - **Request-body cap** — any POST body over `CC_BRIDGE_MAX_BODY` (default 1MB) is rejected `413` (closes the connection cleanly so a poisoned keep-alive socket isn't pooled).
+  - **Rate limiting** — the message-*creating* tools (`ask`/`notify`/`broadcast`) and `/link/forward` are token-bucketed per source (`CC_BRIDGE_RATE_MAX` default 60 per `CC_BRIDGE_RATE_WINDOW_MS` default 10s). Reads and `register`/`reply` are never limited.
+  - **Federated-node caps** — a hub tracks at most `CC_BRIDGE_MAX_NODES` (default 64) distinct nodes (a new node past the cap → `429`; a known node can always re-advertise) and accepts at most `CC_BRIDGE_MAX_SESSIONS` (default 256) advertised sessions per node (over-long lists truncated).
+  - **Full-length message ids** — message ids are now full UUIDs (was 8 hex), removing the id pre-claim / birthday-collision vector.
+  - **`injectRemote` allowlists `kind`** and requires string `id`/`from`/`to` before storing, so a malformed/hostile forward can't create a junk message.
+  - **Descriptions are no longer shared across the federation link by default** (they can carry project/file context, and a hub broadcasts the roster to every node). Local `list_sessions` still shows local descriptions; opt back in with `CC_BRIDGE_SHARE_DESCRIPTIONS=1`.
+  - **Server log is created `0600` and rotated at ~10MB** on start (`install.sh`); message **content** is no longer written to the log (ids + lengths only) — only names/metadata remain.
 - **Federation hardening — separate loopback fed port; the main bridge is no longer tunneled.** A security review found `--share` tunneled the WHOLE bridge port, exposing the intentionally token-free local routes (`/sse`, `/message`, `/pending`, `/whoami`) to anyone with the URL — they could register, ask/notify, and read any session's pending messages with no token. Fixes:
   - The bridge now runs **two listeners**. The **main server binds `127.0.0.1:PORT`** (loopback only) and serves all local routes — it is never tunneled and is now unreachable from the LAN. In **hub mode** a **second server binds `127.0.0.1:FED_PORT`** (default `PORT+1`, override `CC_BRIDGE_FED_PORT`) serving ONLY the token-gated `/link/*` surface plus the content-free `/health/ping`; every other path 404s.
   - **`--share` tunnels the fed port, not the main port** (both quick-tunnel and named-tunnel). The join link is unchanged; the tunnel hostname now maps to the fed port.

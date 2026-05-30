@@ -94,6 +94,34 @@ const SPOKE_HEARTBEAT_MS = Number(process.env.CC_BRIDGE_HEARTBEAT_MS) || 25000;
 const SPOKE_STALE_MS = Number(process.env.CC_BRIDGE_SPOKE_STALE_MS) || 45000;
 const SPOKE_SWEEP_MS = Number(process.env.CC_BRIDGE_SPOKE_SWEEP_MS) || 15000;
 
+// ── Hardening limits (Tier 2: DoS / resource caps) ──────────────────────────
+// All generous enough that normal use never trips them; they exist to bound a
+// flood or a buggy/hostile peer. Env-overridable.
+const MAX_BODY_BYTES = Number(process.env.CC_BRIDGE_MAX_BODY) || 1_000_000; // 1MB cap on any POST body → 413
+const MAX_SPOKE_NODES = Number(process.env.CC_BRIDGE_MAX_NODES) || 64;       // distinct federated nodes a hub will track
+const MAX_SESSIONS_PER_NODE = Number(process.env.CC_BRIDGE_MAX_SESSIONS) || 256; // advertised sessions accepted per node
+const RATE_MAX = Number(process.env.CC_BRIDGE_RATE_MAX) || 60;              // message-creating ops …
+const RATE_WINDOW_MS = Number(process.env.CC_BRIDGE_RATE_WINDOW_MS) || 10_000; // … per source per this window
+// Share each session's free-text description across the federation? Default OFF:
+// descriptions can carry project/file context and a hub broadcasts the roster to
+// every node. Local list_sessions always shows local descriptions regardless.
+const SHARE_DESCRIPTIONS = process.env.CC_BRIDGE_SHARE_DESCRIPTIONS === "1";
+
+// Token-bucket rate limiter keyed by source (sseId / spoke node). Bounds floods
+// on the message-CREATING paths (ask/notify/broadcast, /link/forward); reads and
+// register/reply are never limited.
+const _rate = new Map(); // key → { tokens, last }
+function rateOk(key) {
+  const now = Date.now();
+  let b = _rate.get(key);
+  if (!b) { b = { tokens: RATE_MAX, last: now }; _rate.set(key, b); }
+  b.tokens = Math.min(RATE_MAX, b.tokens + ((now - b.last) / RATE_WINDOW_MS) * RATE_MAX);
+  b.last = now;
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+}
+
 function loadFedConfig() {
   const token = readFileTrim(TOKEN_FILE);
   let role = readFileTrim(ROLE_FILE);
@@ -148,6 +176,11 @@ const GC_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30 days
 function gc() {
   const cutoff = Date.now() - GC_MAX_AGE;
   let pruned = 0;
+
+  // Prune idle rate-limit buckets (full again ⇒ no recent activity) so the map
+  // doesn't accumulate one entry per ever-seen sseId/node.
+  const rateIdle = Date.now() - RATE_WINDOW_MS * 2;
+  for (const [k, b] of _rate) if (b.last < rateIdle) _rate.delete(k);
 
   for (const [id, msg] of messages) {
     if (msg.ts < cutoff) {
@@ -204,6 +237,14 @@ function activeSessions() {
     }
   }
   return out;
+}
+
+// Sessions as advertised ACROSS the federation link. Strips the free-text
+// description by default (it can carry project/file context, and the hub
+// broadcasts the roster to every node) — opt in with CC_BRIDGE_SHARE_DESCRIPTIONS=1.
+// Local list_sessions still shows local descriptions regardless.
+function linkSessions() {
+  return activeSessions().map((s) => (SHARE_DESCRIPTIONS ? { name: s.name, description: s.description } : { name: s.name }));
 }
 
 function getName(sseId) {
@@ -338,6 +379,12 @@ function resolveTarget(to) {
  *   fwd = { kind:"question"|"notice"|"answer", id, from, to, question?/content?, ts?, originNode? }
  */
 function injectRemote(fwd) {
+  // Allowlist kind + require the core fields are strings — a malformed/hostile
+  // forward must not create a junk messages entry (S3 + the injectRemote
+  // shape-validation note). Unknown kinds are dropped.
+  if (!["question", "notice", "answer"].includes(fwd.kind)) return;
+  if (typeof fwd.id !== "string" || !fwd.id) return;
+  if (fwd.kind !== "answer" && (typeof fwd.from !== "string" || typeof fwd.to !== "string")) return;
   if (fwd.kind === "question") {
     if (messages.has(fwd.id)) return; // idempotent re-forward
     const msg = {
@@ -556,7 +603,7 @@ function linkSend(sp, event, data) {
 function broadcastRoster() {
   if (FED.role !== "hub") return;
   const nodes = {};
-  nodes[FED.node] = activeSessions();
+  nodes[FED.node] = linkSessions();
   for (const [node, sp] of spokes) {
     if (sp.res) nodes[node] = sp.sessions || [];
   }
@@ -588,7 +635,7 @@ setInterval(spokeSweep, SPOKE_SWEEP_MS);
 
 function spokeAdvertise() {
   if (FED.role !== "spoke") return Promise.resolve();
-  return hubPost("/link/register", { node: FED.node, sessions: activeSessions() }).then((r) => {
+  return hubPost("/link/register", { node: FED.node, sessions: linkSessions() }).then((r) => {
     if (r && Array.isArray(r.roster)) {
       remoteRoster = r.roster.filter((e) => e.node !== FED.node);
     }
@@ -866,6 +913,12 @@ const TOOLS = [
 async function executeTool(sseId, name, args) {
   const myName = getName(sseId);
 
+  // S6: rate-limit the message-CREATING tools per source (reads + register/reply
+  // are never limited). Bounds an accidental loop or a hostile local client.
+  if ((name === "ask" || name === "notify" || name === "broadcast") && !rateOk(`sse:${sseId}`)) {
+    return { error: `rate limit exceeded (max ${RATE_MAX} per ${Math.round(RATE_WINDOW_MS / 1000)}s) — slow down` };
+  }
+
   switch (name) {
     case "register": {
       const { name: sName, claude_session_id } = args;
@@ -955,24 +1008,24 @@ async function executeTool(sseId, name, args) {
       for (const msgId of threads.get(key) || []) {
         const m = messages.get(msgId);
         if (m?.answer && m.kind !== "notice" && norm(m.question) === norm(question)) {
-          console.log(`${ts()} ↩ dedup hit for "${question.slice(0, 50)}..."`);
+          console.log(`${ts()} ↩ dedup hit (${question.length} chars) → ${m.id}`);
           return { cached: true, message_id: m.id, question: m.question, answer: m.answer, note: "Already asked and answered. Previous answer returned." };
         }
       }
 
       // Queue locally (the poll loop watches this object regardless of where the
       // target lives — the answer lands on it via injectRemote for remote targets).
-      const id = crypto.randomUUID().slice(0, 8);
+      const id = crypto.randomUUID(); // full 122-bit id: unguessable, no pre-claim/collision vector (S3)
       const msg = { id, from: myName, to: target.name, question, answer: null, ts: Date.now(), answeredAt: null, origin: { node: FED.node } };
       messages.set(id, msg);
       pushThread(myName, target.name, id);
 
       if (target.kind === "remote") {
         // Relay toward the owning node; the answer routes home via relayAnswer.
-        console.log(`${ts()} ? ${myName} → ${target.name}@${target.node} (remote): "${question.slice(0, 80)}"`);
+        console.log(`${ts()} ? ${myName} → ${target.name}@${target.node} (remote, ${question.length} chars) ${id}`);
         relayForward(target.node, { kind: "question", id, from: myName, to: target.name, question, ts: msg.ts, originNode: FED.node });
       } else {
-        console.log(`${ts()} ? ${myName} → ${target.name}: "${question.slice(0, 80)}"`);
+        console.log(`${ts()} ? ${myName} → ${target.name} (${question.length} chars) ${id}`);
       }
 
       // Poll for answer
@@ -1022,20 +1075,20 @@ async function executeTool(sseId, name, args) {
         return { error: "notify requires { to: string, content: string }" };
       }
       const target = resolveTarget(to);
-      const id = crypto.randomUUID().slice(0, 8);
+      const id = crypto.randomUUID(); // full 122-bit id: unguessable, no pre-claim/collision vector (S3)
       // NO answer field — lesson #19.
       const msg = { id, from: myName, to: target.name ?? to, kind: "notice", content, delivered: false, ts: Date.now(), origin: { node: FED.node } };
       messages.set(id, msg);
       pushThread(myName, msg.to, id);
 
       if (target.kind === "remote") {
-        console.log(`${ts()} 📨 ${myName} → ${target.name}@${target.node} (remote notice): "${content.slice(0, 80)}"`);
+        console.log(`${ts()} 📨 ${myName} → ${target.name}@${target.node} (remote notice, ${content.length} chars) ${id}`);
         relayForward(target.node, { kind: "notice", id, from: myName, to: target.name, content, ts: msg.ts, originNode: FED.node });
         return { ok: true, message_id: id, to: `${target.name}@${target.node}`, target_online: true };
       }
 
       const online = target.kind === "local";
-      console.log(`${ts()} 📨 ${myName} → ${msg.to} (notice): "${content.slice(0, 80)}"`);
+      console.log(`${ts()} 📨 ${myName} → ${msg.to} (notice, ${content.length} chars) ${id}`);
       const result = { ok: true, message_id: id, to: msg.to, target_online: online };
       if (!online) {
         const roster = (FED.role === "standalone" ? activeSessions().map((s) => s.name)
@@ -1185,7 +1238,10 @@ async function handleLinkRequest(req, res, url) {
   // POST /link/* — JSON bodies
   if (req.method === "POST") {
     let body = "";
-    for await (const chunk of req) body += chunk;
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > MAX_BODY_BYTES) { res.writeHead(413, { "Content-Type": "application/json", "Connection": "close" }); res.end(JSON.stringify({ error: "payload too large" })); return; }
+    }
     let payload;
     try { payload = JSON.parse(body || "{}"); } catch { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "bad json" })); return; }
 
@@ -1195,8 +1251,18 @@ async function handleLinkRequest(req, res, url) {
         const node = sanitizeNode(payload.node || req.headers["x-bridge-node"] || "");
         if (!node) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "missing node" })); return; }
         const existing = spokes.get(node);
-        spokes.set(node, { res: existing?.res || null, sessions: Array.isArray(payload.sessions) ? payload.sessions : [], lastSeen: Date.now() });
-        console.log(`${ts()} ⇄ spoke "${node}" registered (${(payload.sessions || []).length} sessions)`);
+        // S4: bound the node count (reject NEW nodes past the cap) and the
+        // advertised-sessions-per-node, so a hostile/buggy peer can't bloat the
+        // roster + memory. A node already known can always re-advertise.
+        if (!existing && spokes.size >= MAX_SPOKE_NODES) {
+          res.writeHead(429, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `too many federated nodes (max ${MAX_SPOKE_NODES})` }));
+          return;
+        }
+        let sess = Array.isArray(payload.sessions) ? payload.sessions : [];
+        if (sess.length > MAX_SESSIONS_PER_NODE) sess = sess.slice(0, MAX_SESSIONS_PER_NODE);
+        spokes.set(node, { res: existing?.res || null, sessions: sess, lastSeen: Date.now() });
+        console.log(`${ts()} ⇄ spoke "${node}" registered (${sess.length} sessions)`);
         broadcastRoster();
         // Re-sync now that this node's session list is known — covers the race
         // where /link/register lands AFTER /link/stream connected (so the
@@ -1211,6 +1277,10 @@ async function handleLinkRequest(req, res, url) {
         const node = sanitizeNode(payload.originNode || req.headers["x-bridge-node"] || "");
         const sp = spokes.get(node);
         if (sp) sp.lastSeen = Date.now();
+        // S6: bound a hostile/looping spoke flooding the hub with forwards. Legit
+        // traffic is already bounded by the source session's executeTool limit; a
+        // reconnect flush stays well under the cap.
+        if (!rateOk(`node:${node}`)) { res.writeHead(429, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "rate limit exceeded" })); return; }
         routeForward(payload);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
@@ -1330,7 +1400,10 @@ const server = http.createServer(async (req, res) => {
     if (!sid) { res.writeHead(400); res.end("missing session"); return; }
 
     let body = "";
-    for await (const chunk of req) body += chunk;
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > MAX_BODY_BYTES) { res.writeHead(413, { "Connection": "close" }); res.end("payload too large"); return; }
+    }
     let rpc;
     try { rpc = JSON.parse(body); } catch { res.writeHead(400); res.end("bad json"); return; }
 
