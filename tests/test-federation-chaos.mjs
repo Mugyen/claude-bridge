@@ -249,6 +249,13 @@ try {
   // an auto-target reply would be ambiguous. Reply to the which-bob id explicitly.
   if (localBobSaw) {
     const q = (localBobSaw.questions || []).find((x) => (x.question || "").includes("which-bob-are-you"));
+    // reply input validation: a non-string answer must be rejected BEFORE it mutates
+    // msg.answer (else it un-pends the question with a non-null junk value).
+    const badReply = await bobLocal.call("reply", { message_id: q.id, answer: 42 });
+    assert("reply rejects a non-string answer", typeof badReply.error === "string", JSON.stringify(badReply));
+    const stillPending = await bobLocal.call("check_inbox");
+    assert("rejected reply left the question still pending (not un-pended by junk)",
+      (stillPending.questions || []).some((x) => x.id === q.id), JSON.stringify(stillPending));
     await bobLocal.call("reply", { message_id: q.id, answer: "hub-local-bob" });
   }
   const localAskR = await localAskP;

@@ -86,6 +86,13 @@ let remoteRoster = []; // [{name, description, node}] last snapshot pushed by th
 let spokeReconnectTimer = null;
 let spokeReconnectDelay = 1000; // backoff: 1s → 2s → 5s → … → 30s max
 let spokeGen = 0; // bumped on each (re)connect attempt to invalidate stale callbacks
+let spokeHeartbeatTimer = null; // periodic POST /link/heartbeat to keep the hub's lastSeen fresh
+// Defaults: 25s heartbeat (sub-100s Cloudflare keepalive AND < the 45s stale-sweep),
+// 45s stale cutoff, 15s sweep tick. Env-overridable so tests can drive the
+// stale-prune timing deterministically; production never sets these.
+const SPOKE_HEARTBEAT_MS = Number(process.env.CC_BRIDGE_HEARTBEAT_MS) || 25000;
+const SPOKE_STALE_MS = Number(process.env.CC_BRIDGE_SPOKE_STALE_MS) || 45000;
+const SPOKE_SWEEP_MS = Number(process.env.CC_BRIDGE_SPOKE_SWEEP_MS) || 15000;
 
 function loadFedConfig() {
   const token = readFileTrim(TOKEN_FILE);
@@ -534,7 +541,7 @@ function spokeSweep() {
   const now = Date.now();
   for (const [node, sp] of spokes) {
     const dead = !sp.res || sp.res.destroyed;
-    const stale = now - (sp.lastSeen || 0) > 45000;
+    const stale = now - (sp.lastSeen || 0) > SPOKE_STALE_MS;
     if (dead && stale) {
       spokes.delete(node);
       pendingRelay.delete(node);
@@ -544,7 +551,7 @@ function spokeSweep() {
   }
   if (changed) broadcastRoster();
 }
-setInterval(spokeSweep, 15000);
+setInterval(spokeSweep, SPOKE_SWEEP_MS);
 
 // ── Spoke outbound link client ───────────────────────────────────────────────
 
@@ -587,6 +594,7 @@ function teardownHubStream() {
   hubStream = null;
   hubStreamReq = null;
   if (spokeReconnectTimer) { clearTimeout(spokeReconnectTimer); spokeReconnectTimer = null; }
+  if (spokeHeartbeatTimer) { clearInterval(spokeHeartbeatTimer); spokeHeartbeatTimer = null; }
 }
 
 function connectToHub() {
@@ -620,6 +628,18 @@ function connectToHub() {
 
       // Re-advertise + re-flush any unrelayed local outbound messages on (re)connect.
       flushSpokeOutbound();
+
+      // Periodic heartbeat keeps the hub's lastSeen for this spoke fresh. Without
+      // it, lastSeen only advances on message traffic, so an IDLE spoke is already
+      // stale when it disconnects and the hub's 45s stale-sweep deletes its relay
+      // queue within one 15s tick — dropping queued messages (the lossless-reconnect
+      // guarantee). With a 25s heartbeat the sweep window counts from real
+      // disconnect. Also doubles as the sub-100s SSE keepalive for the link path.
+      if (spokeHeartbeatTimer) clearInterval(spokeHeartbeatTimer);
+      spokeHeartbeatTimer = setInterval(() => {
+        if (myGen !== spokeGen) { clearInterval(spokeHeartbeatTimer); spokeHeartbeatTimer = null; return; }
+        hubPost("/link/heartbeat", { node: FED.node });
+      }, SPOKE_HEARTBEAT_MS);
 
       let buf = "";
       let event = null;
@@ -817,7 +837,15 @@ async function executeTool(sseId, name, args) {
 
   switch (name) {
     case "register": {
-      const { name: sName, description = "", claude_session_id } = args;
+      const { name: sName, claude_session_id } = args;
+      // Validate the name before it pollutes nameToSSE / the roster / the .name
+      // file (the broadcast({content:undefined}) crash-class lesson).
+      if (typeof sName !== "string" || !sName.trim()) {
+        return { error: "register requires a non-empty string 'name'." };
+      }
+      // Coerce a non-string description to "" so it can't break roster JSON or
+      // propagate a junk value across the federation roster.
+      const description = typeof args.description === "string" ? args.description : "";
       const existing = nameToSSE.get(sName);
       if (existing && existing !== sseId && sseClients.has(existing)) {
         return { error: `Name "${sName}" is taken by another active session.` };
@@ -941,6 +969,11 @@ async function executeTool(sseId, name, args) {
         msg = pending[0];
       }
       if (msg.answer !== null) return { error: "Already answered.", existing: msg.answer };
+      // Validate BEFORE mutating: a non-string answer assigned here would set
+      // answer to a non-null, non-string value — un-pending the question (it's no
+      // longer === null) and shipping garbage to the asker while the length-log
+      // below throws. Guard up front.
+      if (typeof args.answer !== "string") return { error: "reply requires a string 'answer'." };
       msg.answer = args.answer;
       msg.answeredAt = Date.now();
       console.log(`${ts()} ← reply to ${msg.id} (${args.answer.length} chars)`);

@@ -99,3 +99,8 @@ The *external* bar is met (§1). These matter only if a token-holder turns malic
 5. **G2 cloudflared supervisor** + USAGE docs; **info-leak** (roster description, log perms/rotation); **S4–S6** DoS hardening.
 
 None are release-blockers *given* the docs state the trusted-group framing honestly; G1, the `reply()` bug, and S1 are the ones worth doing before calling federation "robust" / "airtight."
+
+### Status (updated 2026-05-30)
+- ✅ **G1 (spoke heartbeat)** — DONE. Spoke POSTs `/link/heartbeat` every 25s; regression test `tests/test-federation-heartbeat.mjs`.
+- ✅ **`reply()`/`register()` arg validation** — DONE. Covered in `test-tools.mjs` + the chaos suite.
+- ⬜ G2 (cloudflared supervisor/docs), G3 (qualified-notify fallback), G4 (in-flight re-push), G5/G6, S1–S6, info-leak — open, not yet implemented (deferred to a follow-up pass).

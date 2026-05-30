@@ -12,6 +12,15 @@ try {
   const r = await bridge.call("register", { name: "alice", description: "test session" });
   assert("register returns ok", r.ok === true, JSON.stringify(r));
 
+  // register input validation (must not pollute nameToSSE / roster / .name file)
+  const rbad1 = await bridge.call("register", { name: 42 });
+  assert("register rejects non-string name", typeof rbad1.error === "string", JSON.stringify(rbad1));
+  const rbad2 = await bridge.call("register", { name: "   " });
+  assert("register rejects blank name", typeof rbad2.error === "string", JSON.stringify(rbad2));
+  // a non-string description is coerced to "" (not stored/broadcast as junk)
+  const rdesc = await bridge.call("register", { name: "alice", description: { junk: true } });
+  assert("register coerces non-string description", rdesc.ok === true, JSON.stringify(rdesc));
+
   // ── list_sessions ───────────────────────────────────────────────────────
   const ls = await bridge.call("list_sessions");
   assert("list_sessions includes us", ls.sessions?.some((s) => s.name === "alice"), JSON.stringify(ls));
