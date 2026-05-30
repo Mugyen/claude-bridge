@@ -31,6 +31,13 @@ const PORT = parseInt(
 // tunnel, so the ungated local routes (/sse, /message, /pending, /whoami) can
 // never be reached from the internet. See DEVELOPER.md (two-listener security).
 const FED_PORT = parseInt(process.env.CC_BRIDGE_FED_PORT ?? String(PORT + 1));
+// Fed-listener bind address. Default 127.0.0.1 — the secure norm, where ONLY a
+// local cloudflared (quick or named tunnel) exposes it. Set CC_BRIDGE_FED_BIND=
+// 0.0.0.0 to expose the fed port DIRECTLY on the host's network (e.g. a cloud VM
+// with a public IP, no tunnel). Direct mode is still token-gated, but the token
+// + traffic travel in cleartext over plain HTTP — put a TLS terminator (Caddy /
+// named tunnel) in front for anything beyond a trusted-LAN / one-off test.
+const FED_BIND = process.env.CC_BRIDGE_FED_BIND ?? "127.0.0.1";
 
 // ─── Federation config (cross-network hub-and-spoke linking) ─────────────────
 //
@@ -1083,7 +1090,7 @@ async function handleLinkRequest(req, res, url) {
     if (FED.role !== "hub") { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "not a hub" })); return; }
     const node = sanitizeNode(req.headers["x-bridge-node"] || "");
     if (!node) { res.writeHead(400); res.end("missing X-Bridge-Node"); return; }
-    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
     try { req.socket.setKeepAlive(true, 15000); } catch {}
     const existing = spokes.get(node);
     // Close a stale stream for the same node (ghost avoidance, lesson #9).
@@ -1199,8 +1206,8 @@ function startFedListener() {
     process.exit(1);
   });
   fedServer = srv;
-  srv.listen(FED_PORT, "127.0.0.1", () => {
-    console.log(`${ts()} ⇄ fed listener up on http://127.0.0.1:${FED_PORT} (link surface; tunnel points here)`);
+  srv.listen(FED_PORT, FED_BIND, () => {
+    console.log(`${ts()} ⇄ fed listener up on http://${FED_BIND}:${FED_PORT} (link surface${FED_BIND === "127.0.0.1" ? "; tunnel points here" : "; DIRECT/exposed — token-gated, cleartext unless TLS-fronted"})`);
   });
 }
 
@@ -1225,7 +1232,7 @@ const server = http.createServer(async (req, res) => {
   // ── SSE endpoint (MCP transport) ──────────────────────────────────────
   if (req.method === "GET" && url.pathname === "/sse") {
     const sid = crypto.randomUUID().slice(0, 12);
-    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
     res.write(`event: endpoint\ndata: http://localhost:${PORT}/message?session=${sid}\n\n`);
     // TCP keepalive tightens ghost de-merge: a dead client's socket errors faster
     // than the 30d TTL, so its name frees up within tens of seconds (lesson #9).
