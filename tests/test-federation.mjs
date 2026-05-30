@@ -37,9 +37,14 @@ try {
   const rb = await spoke.call("register", { name: "bob", description: "spoke session" });
   assert("bob registers on spoke", rb.ok === true, JSON.stringify(rb));
 
-  // Spoke must re-advertise bob now that it registered after the initial link.
-  await spoke.reloadFed({ token: TOKEN, role: "spoke", node: "spoke", hub: `http://localhost:${HUB_FED_PORT}` });
-  await sleep(1200);
+  // REGRESSION (roster propagation on post-link registration): bob (spoke) and
+  // alice (hub) both registered AFTER the initial link. The fix — onLocalRosterChange()
+  // — makes a spoke auto-advertise and a hub auto-broadcast on every local register,
+  // so NO manual re-advertise is needed here. Before the fix a post-link registration
+  // never reached the merged roster (caught by the live Mac↔VM test; the unit test
+  // previously hid it with a reloadFed() workaround). The roster-merge asserts below
+  // (bob@spoke on the hub, alice@hub on the spoke) are now the regression guard.
+  await sleep(1500);
 
   // ── 1. Link auth reject in two-bridge context ────────────────────────────
   const badAuth = await hub.raw("POST", "/link/register", { token: "wrong", node: "x", json: { node: "x", sessions: [] } });

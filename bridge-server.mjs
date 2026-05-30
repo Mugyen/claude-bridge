@@ -551,6 +551,17 @@ function spokeAdvertise() {
   });
 }
 
+// Propagate a LOCAL session-set change (a register or a disconnect) to peers so
+// the merged roster stays fresh: a spoke re-advertises to its hub; a hub
+// re-broadcasts to its spokes. Without this, a session that joins or leaves
+// AFTER the link is established never reaches the cross-network roster — so a
+// message addressed to it can't route. (Found by the live Mac↔VM test: the
+// initial advertise only fired on link connect.)
+function onLocalRosterChange() {
+  if (FED.role === "spoke") spokeAdvertise().catch(() => {});
+  else if (FED.role === "hub") broadcastRoster();
+}
+
 function scheduleSpokeReconnect() {
   if (FED.role !== "spoke") return;
   if (spokeReconnectTimer) return;
@@ -856,6 +867,7 @@ async function executeTool(sseId, name, args) {
       }
 
       console.log(`${ts()} ✓ registered: ${sName} — ${description}${claude_session_id ? ` (cid:${claude_session_id.slice(0, 8)})` : ""}`);
+      onLocalRosterChange();
       return { ok: true, your_name: sName, active_sessions: activeSessions() };
     }
 
@@ -1231,6 +1243,7 @@ const server = http.createServer(async (req, res) => {
       sseClients.delete(sid);
       const info = sessions.get(sid);
       if (info) console.log(`${ts()} ✗ disconnected: ${info.name}`);
+      onLocalRosterChange();
     });
     console.log(`${ts()} ⚡ SSE connected: ${sid}`);
     return;
