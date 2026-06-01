@@ -61,6 +61,19 @@ fi
 # logs command tails without error
 SH logs >/dev/null 2>&1 && ok "logs → exit 0" || bad "logs command"
 
+# server/hub-only install: no `claude` on PATH → install still succeeds (warns,
+# skips hooks/MCP/skill/Desktop) and still symlinks the CLI. Build a PATH with
+# node/jq/curl/git/bash but NO claude.
+FB="$TMP/srvbin"; mkdir -p "$FB"
+for c in node jq curl git bash sed grep mkdir chmod ln readlink dirname basename cat rm stat date cut tr; do
+  p=$(command -v "$c" 2>/dev/null) && ln -sf "$p" "$FB/$c"
+done
+SRV_HOME="$TMP/srvhome"; mkdir -p "$SRV_HOME/.claude"
+OUT=$(HOME="$SRV_HOME" PATH="$FB" bash "$REPO_DIR/claude-bridge" install 2>&1); RC=$?
+if [ $RC -eq 0 ] && echo "$OUT" | grep -qi "server/hub-only" && [ -L "$SRV_HOME/.local/bin/claude-bridge" ]; then
+  ok "server/hub-only install (no claude CLI) → succeeds, skips wiring, still symlinks CLI"
+else bad "server-only install (rc=$RC, symlink=$([ -L "$SRV_HOME/.local/bin/claude-bridge" ] && echo yes || echo no)): $(echo "$OUT" | tail -3)"; fi
+
 echo ""
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

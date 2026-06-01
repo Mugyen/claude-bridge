@@ -163,11 +163,17 @@ check_prereqs() {
     all_ok=false
   fi
 
+  # The Claude Code CLI is REQUIRED for a normal workstation install (hooks, MCP,
+  # skill, Desktop all wire into it). It is NOT required on a headless hub/server
+  # node that only runs the bridge process — there `claude-bridge` still installs
+  # the CLI-on-PATH + lifecycle/federation control, just skips the claude wiring.
   if command -v claude &>/dev/null; then
     ok "Claude Code CLI available"
+    HAS_CLAUDE=1
   else
-    fail "Claude Code CLI not found (install from https://docs.anthropic.com/en/docs/claude-code)"
-    all_ok=false
+    warn "Claude Code CLI not found — server/hub-only install (skipping hooks, MCP, skill, Desktop)"
+    warn "  Install it for a full workstation setup: https://docs.anthropic.com/en/docs/claude-code"
+    HAS_CLAUDE=0
   fi
 
   $all_ok
@@ -1020,8 +1026,15 @@ run_install_steps() {
   manifest_init
   write_version
   manifest_add FILE "$TOKEN_FILE"; manifest_add FILE "$ROLE_FILE"; manifest_add FILE "$HUB_FILE"; manifest_add FILE "$NODE_FILE"
-  install_hooks; install_mcp; install_skill; remove_claude_md_legacy
-  install_desktop
+  # The hooks/MCP/skill/Desktop steps all wire into the Claude Code CLI — skip
+  # them on a headless hub/server node (no `claude`), but still install the
+  # CLI-on-PATH so the box can be driven with `claude-bridge start/share/doctor`.
+  if [ "${HAS_CLAUDE:-1}" = 1 ]; then
+    install_hooks; install_mcp; install_skill; remove_claude_md_legacy
+    install_desktop
+  else
+    ok "Server/hub-only: skipped hooks, MCP, skill, Desktop (no Claude Code CLI here)"
+  fi
   symlink_cli
 }
 

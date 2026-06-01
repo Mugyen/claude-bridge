@@ -11,6 +11,9 @@ _Add entries here as you work on the next version. Move them under a dated
 heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
+### Changed
+- **`claude-bridge install` now works on a headless hub/server node without the Claude Code CLI.** `claude` was a hard prereq (the installer aborted), but a box that only runs the bridge process doesn't need it — hooks/MCP/skill/Desktop are workstation-only. Missing `claude` is now a warning: the install skips those steps but still puts `claude-bridge` on PATH so the server can be driven with `start`/`stop`/`share`/`doctor`. Regression test in `tests/test-cli.sh`.
+
 ### Fixed
 - **CLI invoked through its PATH symlink now resolves the real checkout.** `REPO_DIR` walked `dirname "$0"` without following symlinks, so `~/.local/bin/claude-bridge` pointed `REPO_DIR` at `~/.local/bin` — `version` showed `unknown` and `start` couldn't find `bridge-server.mjs`. Now resolves the symlink chain portably (macOS has no `readlink -f`). Regression test in `tests/test-cli.sh`.
 - **`symlink_cli` no longer hangs on a sudo password prompt when non-interactive** (`curl | bash`, CI, agents): uses `sudo -n` with no TTY and falls back to `~/.local/bin`; an interactive user still gets a normal prompt.
