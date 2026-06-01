@@ -56,7 +56,7 @@ export class TestBridge {
     this.fed = fed;
     this._fedEnv();
     // /link/reload is loopback-only AND token-gated when a token is configured —
-    // mirror install.sh's fed_reload by sending the token header when present.
+    // mirror claude-bridge's fed_reload by sending the token header when present.
     const headers = { "Content-Type": "application/json", "Content-Length": 2 };
     if (fed && fed.token) headers["X-Bridge-Token"] = fed.token;
     return new Promise((resolve, reject) => {

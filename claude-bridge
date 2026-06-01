@@ -69,7 +69,7 @@ case " $* " in *" --force "*) FORCE=1 ;; esac
 #
 # The manifest records every artifact this install touched, with its absolute
 # path. The uninstaller reads it back so future versions can clean up files
-# that an older install.sh wouldn't know about. Format: one path per line,
+# that an older claude-bridge wouldn't know about. Format: one path per line,
 # prefixed with a directive: FILE, DIR, or HOOK_PATH (for grep-based cleanup).
 
 manifest_init() {
@@ -542,13 +542,13 @@ check_bridge() {
       if [ -f "$TUNNEL_URL_FILE" ] && [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null; then
         ok "Tunnel open: $(cat "$TUNNEL_URL_FILE") → 127.0.0.1:${FED_PORT}"
       elif [ "$role" = "hub" ]; then
-        warn "Hub mode on but no tunnel running — run ./install.sh --share to open one"
+        warn "Hub mode on but no tunnel running — run ./claude-bridge --share to open one"
       fi
     else
       ok "Federation: standalone (local only)"
     fi
   else
-    warn "Bridge not running (start with: ./install.sh --start)"
+    warn "Bridge not running (start with: ./claude-bridge --start)"
   fi
 }
 
@@ -711,7 +711,7 @@ share_hub() {
       ok "Tunnel already open: $existing"
       echo ""
       echo "  Share this ONE command:"
-      echo "    ./install.sh --join '${existing}#${token}'"
+      echo "    ./claude-bridge --join '${existing}#${token}'"
       echo ""
       return
     fi
@@ -734,7 +734,7 @@ share_hub() {
     ok "Named tunnel started ($named_tunnel)"
     echo ""
     echo "  Share this ONE command:"
-    echo "    ./install.sh --join 'https://${named_tunnel}#${token}'"
+    echo "    ./claude-bridge --join 'https://${named_tunnel}#${token}'"
     echo ""
   else
     # Quick tunnel: ephemeral *.trycloudflare.com URL, zero setup.
@@ -758,10 +758,10 @@ share_hub() {
     ok "Secure tunnel open (Cloudflare): $url"
     echo ""
     echo "  Share this ONE command:"
-    echo "    ./install.sh --join '${url}#${token}'"
+    echo "    ./claude-bridge --join '${url}#${token}'"
     echo ""
     echo "  Note: quick-tunnel URLs are ephemeral. If cloudflared restarts the URL"
-    echo "  rotates — re-run ./install.sh --share to reprint the new join link, and"
+    echo "  rotates — re-run ./claude-bridge --share to reprint the new join link, and"
     echo "  spokes must re-join. For an always-on URL, use --named-tunnel <hostname>."
     echo ""
   fi
@@ -771,7 +771,7 @@ share_hub() {
 join_hub() {
   local link="$1"
   if [ -z "$link" ]; then
-    fail "Usage: ./install.sh --join 'https://<host>#<token>'"
+    fail "Usage: ./claude-bridge --join 'https://<host>#<token>'"
     exit 1
   fi
   # Split on the '#' fragment locally — the token never travels to a server.
@@ -972,7 +972,7 @@ print_help() {
 claude-bridge v$VERSION — multi-session bridge for Claude Code
 
 USAGE
-  claude-bridge <command> [options]      (or ./install.sh <command>)
+  claude-bridge <command> [options]      (or ./claude-bridge <command>)
 
 SETUP & MAINTENANCE
   install                 Install hooks, MCP, skill, Desktop config + the CLI on PATH
@@ -1093,7 +1093,7 @@ case "$ACTION" in
     ok "Temp files cleaned (/tmp/{claude,cc}-bridge-* incl. tunnel pid/url)"
     rm -f "$VERSION_FILE"
     echo ""
-    echo "Done. Stop any running bridge server: ./install.sh --stop"
+    echo "Done. Stop any running bridge server: ./claude-bridge --stop"
     echo "Relaunch Claude Desktop app if it was configured."
     echo ""
     ;;

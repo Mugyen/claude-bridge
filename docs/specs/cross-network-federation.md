@@ -81,18 +81,18 @@ Bridge-to-bridge link mirrors the existing MCP-over-SSE shape, so no new transpo
 
 | Action | Command | Sessions reconfigure? |
 |---|---|---|
-| Be the hub | `./install.sh --share` → starts bridge, generates token, opens tunnel, prints a join link | **No** |
-| Join a hub | `./install.sh --join '<join-link>'` → links *your local bridge* upstream | **No** — sessions stay on localhost |
+| Be the hub | `./claude-bridge --share` → starts bridge, generates token, opens tunnel, prints a join link | **No** |
+| Join a hub | `./claude-bridge --join '<join-link>'` → links *your local bridge* upstream | **No** — sessions stay on localhost |
 | Drop happens | (nothing) | Local keeps working; cross-network auto-resumes |
-| Leave / stop | `./install.sh --unlink` (spoke) · `--stop-share` or Ctrl-C (hub) | No |
+| Leave / stop | `./claude-bridge --unlink` (spoke) · `--stop-share` or Ctrl-C (hub) | No |
 
 Sample host output:
 
 ```
-$ ./install.sh --share
+$ ./claude-bridge --share
   ✓ Bridge running   ✓ Generated access token   ✓ Secure tunnel open (Cloudflare)
   Share this ONE command:
-    ./install.sh --join 'https://calm-river-1234.trycloudflare.com#<token>'
+    ./claude-bridge --join 'https://calm-river-1234.trycloudflare.com#<token>'
   Keep this terminal open (or run as a service). Ctrl-C to close the channel.
 ```
 
@@ -111,7 +111,7 @@ Additive routing/relay layer + roster federation. Touch points:
   - Modified (small): `activeSessions()` / `list_sessions` to include the global roster; target resolution in `ask`/`reply`/`notify`/`get_thread` to branch local-vs-remote; token gate on link + `/health`.
   - Unchanged: the entire local delivery machinery (`/pending`, `getPendingFor`, `check_inbox`, the kind/notice logic, migration) — remote messages flow through it untouched.
 - **`hooks/*.sh`:** **unchanged** — sessions and hooks stay on `localhost`. (This is the big simplification vs. the rejected "URL-aware hooks" sketch.)
-- **`install.sh`:** `--share`, `--join`, `--unlink`, `--stop-share`; token file management; `cloudflared` detection/launch; print/parse the join link.
+- **`claude-bridge`:** `--share`, `--join`, `--unlink`, `--stop-share`; token file management; `cloudflared` detection/launch; print/parse the join link.
 - **Docs:** USAGE (the cross-network section + the security/honesty notes), README ("what this is" — cross-network), SKILL/BRIDGE (qualified names `name@node`, that remote talk is transparent), DEVELOPER (new lessons on federation + token file + link liveness), CHANGELOG.
 - **Tests:** a two-bridge link harness in `tests/` — spoke registers, roster merges, a cross-link `ask`/`reply` round-trips, a `notify` relays, link drop pauses cross-network but local still works, link reconnect flushes queued messages, token rejected/accepted on the link endpoint.
 

@@ -5,7 +5,7 @@
 #   curl -fsSL https://vijay2411.github.io/claude-bridge/install.sh | bash
 #
 # Clones the repo to ~/.local/share/claude-bridge (override with
-# CLAUDE_BRIDGE_HOME), then runs the in-repo install.sh.
+# CLAUDE_BRIDGE_HOME), then runs the in-repo `claude-bridge install`.
 set -euo pipefail
 
 INSTALL_DIR="${CLAUDE_BRIDGE_HOME:-$HOME/.local/share/claude-bridge}"
@@ -45,7 +45,7 @@ if ! command -v claude >/dev/null 2>&1; then
   echo ""
   warn "Claude Code CLI (\`claude\`) not found."
   warn "Install from https://docs.anthropic.com/en/docs/claude-code first."
-  warn "Continuing anyway — install.sh will recheck."
+  warn "Continuing anyway — claude-bridge will recheck."
 fi
 
 # ── Clone or update ────────────────────────────────────────────────────────
@@ -65,12 +65,12 @@ fi
 
 # ── Run repo installer ─────────────────────────────────────────────────────
 echo ""
-"$INSTALL_DIR/install.sh"
+"$INSTALL_DIR/claude-bridge" install
 
 # ── Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo "Installed to: $INSTALL_DIR"
 echo ""
 echo "Start the bridge:"
-echo "  $INSTALL_DIR/install.sh --start"
+echo "  $INSTALL_DIR/claude-bridge start    (or add it to PATH — the installer symlinks 'claude-bridge')"
 echo ""

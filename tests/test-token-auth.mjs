@@ -3,7 +3,7 @@
 // When a token is configured (sharing on), /health and all /link/* require the
 // X-Bridge-Token header. /health/ping stays UNGATED so liveness probes survive.
 // When standalone (no token), /health stays open — the regression guard that
-// install.sh --check and the existing tests keep working.
+// claude-bridge --check and the existing tests keep working.
 
 import { TestBridge, assert, reportAndExit } from "./lib.mjs";
 

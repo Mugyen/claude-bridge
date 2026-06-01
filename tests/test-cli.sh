@@ -12,7 +12,7 @@ PASS=0; FAIL=0
 ok()  { echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 trap "rm -rf $TMP" EXIT
-SH() { bash "$REPO_DIR/install.sh" "$@" 2>&1; }
+SH() { bash "$REPO_DIR/claude-bridge" "$@" 2>&1; }
 
 # help → exit 0, grouped, mentions key verbs
 OUT=$(SH help); RC=$?

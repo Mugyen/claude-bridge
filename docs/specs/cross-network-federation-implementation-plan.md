@@ -1,6 +1,6 @@
 # Implementation Plan: Cross-Network Federation (hub-and-spoke bridge linking)
 
-**Status:** Planning only. No code written. Reviewed against `bridge-server.mjs`, all five hooks, `install.sh`, `bridge-stdio.mjs`, the test suite, and DEVELOPER.md lessons #1–#23.
+**Status:** Planning only. No code written. Reviewed against `bridge-server.mjs`, all five hooks, `claude-bridge`, `bridge-stdio.mjs`, the test suite, and DEVELOPER.md lessons #1–#23.
 **Source of truth for the design:** `docs/specs/cross-network-federation.md`. This document does NOT redesign it — it specifies *how* to build it. Genuine concerns with the spec are flagged in §13 "Issues with the spec," not silently changed.
 **Target baseline:** v2.6.2 (single file `bridge-server.mjs`, zero deps, in-memory + 30d TTL).
 
@@ -65,7 +65,7 @@ The cardinal rule of this feature (from the spec and the locked decisions): **fe
 | `:603` `/health` | **MODIFIED** — token gate when sharing is on |
 | `:633` `shutdown` | **MODIFIED** — also close link SSE streams / stop link client |
 | `:656` `server.on("error")` | unchanged |
-| `install.sh` | **NEW** flags `--share`/`--join`/`--unlink`/`--stop-share` |
+| `claude-bridge` | **NEW** flags `--share`/`--join`/`--unlink`/`--stop-share` |
 
 ---
 
@@ -155,7 +155,7 @@ answer:   { kind:"answer",   id, answer, ts }   // id is the original question i
 ### 3.1 Token file
 
 - Path: `~/.claude/.cc-bridge-token` (hardcoded in the spec). Format: single line, the raw token, no trailing newline dependence (read + `.trim()`).
-- Generation (`--share`): `crypto.randomUUID()` doubled or `openssl rand -hex 32` in shell — a high-entropy hex string. Bridge never generates it; `install.sh --share` writes it (so the file exists before the server reads it). The server **reads** the file at startup and on a refresh signal.
+- Generation (`--share`): `crypto.randomUUID()` doubled or `openssl rand -hex 32` in shell — a high-entropy hex string. Bridge never generates it; `claude-bridge --share` writes it (so the file exists before the server reads it). The server **reads** the file at startup and on a refresh signal.
 - The bridge reads the token at startup. If present → "sharing on" mode (gate active). If absent → standalone (no gate). The spoke's `--join` writes the *hub's* token into the same file so the spoke's outbound POSTs can authenticate.
 
 ### 3.2 Which endpoints are gated, and the loopback insight
@@ -168,16 +168,16 @@ answer:   { kind:"answer",   id, answer, ts }   // id is the original question i
 |---|---|---|
 | `/sse`, `/message` (local MCP) | **No** (never tunneled) | **No token** — local sessions/hooks stay token-free. Safe *only because these paths are not exposed*. |
 | `/pending`, `/whoami` (hooks) | No | No token — local hooks stay unchanged. |
-| `/health` | **Yes-ish** (could be probed) | **Token required when sharing is on** (don't leak session names/descriptions). When standalone, `/health` stays open (preserves today's `install.sh --check`/test behaviour). |
+| `/health` | **Yes-ish** (could be probed) | **Token required when sharing is on** (don't leak session names/descriptions). When standalone, `/health` stays open (preserves today's `claude-bridge --check`/test behaviour). |
 | `/link/*` (incl. `/link/stream`) | **Yes** | **Always token-required.** |
 
 **Concrete rule:** `if (FED.token)` (sharing on) → require `X-Bridge-Token === FED.token` on `/health` and all `/link/*`. `/sse`, `/message`, `/pending`, `/whoami` are never gated (they are not tunneled; gating them would force the hooks to carry the token, which the spec explicitly avoids).
 
-**Problem this creates for local tooling when sharing is on:** `install.sh --check` and `tests/lib.mjs health()` hit `/health` without a token. Resolution (decide in §10, but recommended): `--check` reads the token file and sends the header when present; tests run standalone (no token) so `/health` stays open in tests. Document that a token-gated `/health` returns `401` to unauthenticated callers.
+**Problem this creates for local tooling when sharing is on:** `claude-bridge --check` and `tests/lib.mjs health()` hit `/health` without a token. Resolution (decide in §10, but recommended): `--check` reads the token file and sends the header when present; tests run standalone (no token) so `/health` stays open in tests. Document that a token-gated `/health` returns `401` to unauthenticated callers.
 
 ### 3.3 No-token guardrail
 
-`install.sh --share` refuses to launch the tunnel if no token can be written/read. The server itself refuses to serve `/link/*` (returns 503 "federation disabled: no token") unless `FED.token` is set — i.e. **you cannot become a hub without a token**. This is the spec's hard guardrail.
+`claude-bridge --share` refuses to launch the tunnel if no token can be written/read. The server itself refuses to serve `/link/*` (returns 503 "federation disabled: no token") unless `FED.token` is set — i.e. **you cannot become a hub without a token**. This is the spec's hard guardrail.
 
 ### 3.4 Auth failure response
 
@@ -294,7 +294,7 @@ Same as `ask` minus the poll loop. `resolveTarget` → remote → relay `kind:"n
 
 ---
 
-## 6. install.sh helpers
+## 6. claude-bridge helpers
 
 ### 6.1 `--share` (become a hub)
 
@@ -303,7 +303,7 @@ Same as `ask` minus the poll loop. `resolveTarget` → remote → relay `kind:"n
 3. Ensure/derive node id → `~/.claude/.cc-bridge-node` (default hostname).
 4. Start the bridge if not running (`start_bridge`) — but the server must read the token + node + role=hub. **Mechanism (decide in §10):** simplest is env vars at spawn (`CC_BRIDGE_TOKEN_FILE`, `CC_BRIDGE_ROLE=hub`, `CC_BRIDGE_NODE`) OR the server always reads the token file on boot and infers hub-mode from "token file present." Recommended: server reads `~/.claude/.cc-bridge-token` on boot; presence ⇒ gate on. A `~/.claude/.cc-bridge-role` file (or env) flips hub vs standalone-with-token. If the bridge is already running (common — sessions are attached), it must learn the new token **without a restart** (restart kills attached sessions, lesson #23a) — so add a `POST /link/reload` localhost-only endpoint (no token needed; localhost, not tunneled) that re-reads the config files. `--share` calls it after writing the files.
 5. Launch `cloudflared tunnel --url http://localhost:7400` in the background; capture its stdout to parse the `https://<sub>.trycloudflare.com` URL. Store the tunnel PID (`/tmp/claude-bridge-tunnel.pid`) and URL (`/tmp/claude-bridge-tunnel.url`).
-6. Print the join command: `./install.sh --join 'https://<sub>.trycloudflare.com#<token>'`.
+6. Print the join command: `./claude-bridge --join 'https://<sub>.trycloudflare.com#<token>'`.
 7. **URL rotation (spec §11):** if `cloudflared` restarts, the URL changes. `--share` writes the URL to a file; a `--share --status` (or re-running `--share`) detects a running tunnel and reprints the current join link. Document that quick-tunnel URLs are ephemeral; the always-on path is a named tunnel.
 
 **Self-restart hazard (lesson #23a):** `--share` must NOT stop/restart a running bridge that has attached sessions. The `/link/reload` endpoint exists precisely so `--share` can enable hub mode on a live bridge without dropping SSE clients. If the bridge is NOT running, a plain `start_bridge` is safe.
@@ -340,7 +340,7 @@ New artifacts to register (`manifest_add FILE …`) and remove on uninstall:
 | File | NEW/MOD | Change |
 |---|---|---|
 | `bridge-server.mjs` | MOD | Federation state (§2.3); `globalRoster()`; `resolveTarget()`; `injectRemote()`; `relayAnswer()`; spoke outbound link client (SSE + POST helpers); hub `/link/*` routes + `/link/stream` SSE; token gate on `/health` + `/link/*`; `POST /link/reload` (localhost) to hot-load config; modify `ask`/`reply`/`notify`/`list_sessions`; extend `shutdown()` to tear down link; liveness sweep interval. **Keep zero deps — `http`, `crypto`, `fs`, `os` only.** Outbound HTTPS to the tunnel uses `node:https` (stdlib). |
-| `install.sh` | MOD | `--share`/`--join`/`--unlink`/`--stop-share`/`--share --status`; `cloudflared` detect/launch; token+node+hub+role file management; join-link print/parse; tunnel PID tracking; `manifest_add` for new files; uninstall removes them + kills tunnel; extend `--check` (Phase 2) to show spokes/hub status. |
+| `claude-bridge` | MOD | `--share`/`--join`/`--unlink`/`--stop-share`/`--share --status`; `cloudflared` detect/launch; token+node+hub+role file management; join-link print/parse; tunnel PID tracking; `manifest_add` for new files; uninstall removes them + kills tunnel; extend `--check` (Phase 2) to show spokes/hub status. |
 | `bridge-server.mjs` banner | MOD | version bump string. |
 | `package.json` | MOD | version bump (minor — new feature). |
 | `hooks/*.sh` | **UNCHANGED** | Sessions stay on localhost. (Spec §7, big simplification.) |
@@ -384,7 +384,7 @@ Assertions:
 9. **Idempotent inject** — replaying the same `forward` id does not duplicate (assert `messages` count / no double-delivery).
 
 ### 8.3 Harness notes
-- Use `node:https`? No — tests run over `http` on localhost; the tunnel/TLS is out of scope for the unit harness (cloudflared is not invoked in tests). The link in tests is plain HTTP between two local ports. **This means the link transport must work over plain HTTP too** (it does — the tunnel just wraps it). The `--share`/cloudflared path is smoke-tested manually, not in CI (spec/DEVELOPER pattern: shell `install.sh` flags get a `test-*.sh`, but external tools like cloudflared are detect-and-instruct, so the test asserts detection/branching, not a real tunnel).
+- Use `node:https`? No — tests run over `http` on localhost; the tunnel/TLS is out of scope for the unit harness (cloudflared is not invoked in tests). The link in tests is plain HTTP between two local ports. **This means the link transport must work over plain HTTP too** (it does — the tunnel just wraps it). The `--share`/cloudflared path is smoke-tested manually, not in CI (spec/DEVELOPER pattern: shell `claude-bridge` flags get a `test-*.sh`, but external tools like cloudflared are detect-and-instruct, so the test asserts detection/branching, not a real tunnel).
 - `tests/test-share-flags.sh` (optional, NEW): assert `--share` without `cloudflared` prints install instructions and exits non-zero; `--share` without writable token dir fails the guardrail; `--join` parses a link into the right files. Use a fake `cloudflared` on PATH that prints a canned URL to test parsing. Port 7404-family.
 
 ---
@@ -396,7 +396,7 @@ Assertions:
 3. **Link establishment + roster sync.** `/link/register`, `/link/stream` (hub→spoke SSE), `/link/heartbeat`, `/link/unregister`; spoke outbound client; `globalRoster()`; `list_sessions` merge. Assertions 1–2, 6, 8.
 4. **Message relay.** `resolveTarget`, `injectRemote`, `relayAnswer`; branch `ask`/`reply`/`notify`. Assertions 3, 4, 5, 9.
 5. **Lossless reconnect.** `pendingRelay`/`relayedAt` re-forward on reconnect; idempotent inject. Assertion 7.
-6. **install.sh helpers.** `--share`/`--join`/`--unlink`/`--stop-share`; cloudflared detect/launch; join-link; manifest+uninstall. `tests/test-share-flags.sh`.
+6. **claude-bridge helpers.** `--share`/`--join`/`--unlink`/`--stop-share`; cloudflared detect/launch; join-link; manifest+uninstall. `tests/test-share-flags.sh`.
 7. **Docs + release.** §12.
 
 Phase 2 (separate effort): `name@node` qualification + collision UX; `get_thread` across the link; named-tunnel/self-host recipes; `--check` shows spokes/hub; decide scratchpad federation.
@@ -411,7 +411,7 @@ Phase 2 (separate effort): `name@node` qualification + collision UX; `get_thread
 2. **Name-collision policy for Phase 1.** Spec assumes unique bare names. If `frontend` exists on two nodes, does `ask(to="frontend")` pick the local one, the first in roster, or error? Recommended: **local wins**, remote ambiguity errors and tells the user to use `name@node` (forces Phase 2 early only if it bites).
 3. **How the running bridge learns hub/spoke config without a restart.** Recommended: a localhost-only `POST /link/reload` that re-reads the config files (avoids lesson #23a self-restart kill). Confirm this approach vs. env-at-spawn (which would force a restart and drop attached sessions).
 4. **Do `broadcast`/`read_scratchpad` (scratchpads) federate in Phase 1?** Spec §11 leaves it open. Recommended: **local-only in Phase 1** (scratchpads are pull-based, no delivery machinery to reuse; federating them means roster-wide replication — Phase 2 or never). Document the non-goal.
-5. **`/health` gating vs. existing tooling when sharing is on.** Gating `/health` breaks `install.sh --check` and any unauthenticated probe. Confirm: `--check` reads the token file and sends the header; tests run standalone. Is a separate unauthenticated `/health/ping` (status only, no session names) wanted so liveness checks survive without the token? (Recommended: yes — a minimal `{status:"ok"}` with no roster, ungated; full `/health` gated.)
+5. **`/health` gating vs. existing tooling when sharing is on.** Gating `/health` breaks `claude-bridge --check` and any unauthenticated probe. Confirm: `--check` reads the token file and sends the header; tests run standalone. Is a separate unauthenticated `/health/ping` (status only, no session names) wanted so liveness checks survive without the token? (Recommended: yes — a minimal `{status:"ok"}` with no roster, ungated; full `/health` gated.)
 6. **Token rotation / multiple hubs.** One token file path means a machine can be a spoke of exactly one hub at a time. Confirm that's acceptable for Phase 1 (it matches hub-and-spoke).
 7. **Desktop's role.** A Desktop session is just another local session on its machine's bridge; federation is transparent (its remote-origin messages arrive via the same local store; `check_inbox` reads them). **But Desktop has no hooks and no Monitor (lesson #16)** — so a Desktop user must manually `check_inbox` to see remote messages, same as today for local ones. Confirm: no Desktop-specific work in Phase 1; document the manual-poll limitation extends to remote messages.
 8. **Quick-tunnel URL rotation.** Confirm `--share` re-print behaviour on tunnel restart, and that spokes must be re-`--join`'d with the new URL (a quick tunnel can't keep a stable URL). Named-tunnel is the documented always-on fix (Phase 2).
@@ -440,7 +440,7 @@ Phase 2 (separate effort): `name@node` qualification + collision UX; `get_thread
 Per the repo rule "every code change touches ≥1 MD file + ships a test":
 
 - [ ] `CHANGELOG.md` — `[Unreleased] → Added` entry per build step (token-auth, liveness, link, relay, reconnect, install flags).
-- [ ] `USAGE.md` — cross-network section (`--share`/`--join`/`--unlink`/`--stop-share`), `cloudflared` prereq, security honesty note, token file, "What install.sh modifies" additions, troubleshooting (link won't connect, URL rotated, 401).
+- [ ] `USAGE.md` — cross-network section (`--share`/`--join`/`--unlink`/`--stop-share`), `cloudflared` prereq, security honesty note, token file, "What claude-bridge modifies" additions, troubleshooting (link won't connect, URL rotated, 401).
 - [ ] `README.md` — one "what this is" bullet (cross-network), one "what this isn't" (not a VPN, not E2E).
 - [ ] `skill/SKILL.md` + `BRIDGE.md` — kept in sync; note remote talk is transparent, Phase 2 `name@node`.
 - [ ] `DEVELOPER.md` — new lessons (link reconnect backoff; `/link/reload` to avoid self-restart; loopback-looks-local token insight; idempotent inject; scratchpads local-only); update architecture diagram, tool/endpoint inventory; move federation from "Planned" to "Implemented (Phase 1)."
@@ -456,6 +456,6 @@ Per the repo rule "every code change touches ≥1 MD file + ships a test":
 
 1. **Hub as a single point of failure / single hub per spoke.** The token file is one path → a spoke joins exactly one hub. The spec's hub-and-spoke accepts this; just confirm (open question #6). No deviation.
 2. **`/link/reload` is not in the spec but is required by lesson #23a.** The spec says `--share`/`--join` "links the local bridge" but doesn't say *how* a running bridge picks up the new role without a restart. A naive implementation would restart the bridge and kill attached sessions (lesson #23a). **I am introducing `POST /link/reload` (localhost-only)** as the mechanism. This is an addition the spec implies but doesn't spell out — flag for human sign-off (open question #3).
-3. **Gating `/health` fully breaks `install.sh --check` and the test `health()` helper when sharing is on.** The spec says "gate `/health`" but the existing tooling reads it unauthenticated. I recommend a split: ungated `/health/ping` (status only, no names) + gated full `/health` (open question #5). Minor deviation in service of the spec's intent (don't leak names) without breaking local tooling.
+3. **Gating `/health` fully breaks `claude-bridge --check` and the test `health()` helper when sharing is on.** The spec says "gate `/health`" but the existing tooling reads it unauthenticated. I recommend a split: ungated `/health/ping` (status only, no names) + gated full `/health` (open question #5). Minor deviation in service of the spec's intent (don't leak names) without breaking local tooling.
 4. **Blocking `ask` over the link inherits the 5-min timeout.** The spec's "lossless on reconnect" applies to the durable store (notices, queued questions), but a *blocking* `ask` whose link is down longer than 5 min returns a timeout (today's behaviour). This is correct and acceptable, but should be documented so users don't expect a blocking ask to survive an arbitrarily long partition.
 5. **The link transport must work over plain HTTP (tests) and HTTPS (tunnel).** The bridge speaks HTTP on localhost; cloudflared provides the HTTPS edge. The spoke's outbound client must therefore use `http` or `https` depending on the hub URL scheme. Use `node:https` for `https://` hub URLs (stdlib, still zero-dep). No deviation, just an implementation note.

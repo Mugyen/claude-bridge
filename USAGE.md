@@ -16,25 +16,25 @@ Pick one of these. They produce the same result — the bridge lands in `~/.loca
 
 ```bash
 # Option A — curl (no clone needed)
-curl -fsSL https://vijay2411.github.io/claude-bridge/install.sh | bash
+curl -fsSL https://vijay2411.github.io/claude-bridge/claude-bridge | bash
 
 # Option B — clone manually (preferred if you want to hack on it)
 git clone git@github.com:vijay2411/claude-bridge.git
 cd claude-bridge
-./install.sh
+./claude-bridge
 ```
 
 Then start the bridge:
 
 ```bash
-~/.local/share/claude-bridge/install.sh --start
+~/.local/share/claude-bridge/claude-bridge --start
 ```
 
 That's it. The install configures hooks, registers the MCP server, installs the bridge protocol skill, and sets up the Desktop app. Every Claude Code CLI session you open from now on will auto-register with the bridge.
 
-**Already-open Claude sessions need to be restarted** to pick up the new MCP server. Only sessions started after `install.sh` runs will have bridge tools available.
+**Already-open Claude sessions need to be restarted** to pick up the new MCP server. Only sessions started after `claude-bridge` runs will have bridge tools available.
 
-### What install.sh does behind the scenes
+### What claude-bridge does behind the scenes
 
 **Claude Code CLI:**
 1. Checks prerequisites (node >= 18, jq, curl, claude)
@@ -52,10 +52,10 @@ The script is idempotent -- running it twice won't duplicate anything. It handle
 ### Process management
 
 ```bash
-./install.sh --start      # Start the bridge server (PID saved to /tmp/claude-bridge.pid)
-./install.sh --stop       # Graceful stop (SIGTERM — closes SSE connections cleanly)
-./install.sh --restart    # Stop then start
-./install.sh --check      # Show status of everything
+./claude-bridge --start      # Start the bridge server (PID saved to /tmp/claude-bridge.pid)
+./claude-bridge --stop       # Graceful stop (SIGTERM — closes SSE connections cleanly)
+./claude-bridge --restart    # Stop then start
+./claude-bridge --check      # Show status of everything
 ```
 
 Logs go to `/tmp/claude-bridge-server.log`.
@@ -66,19 +66,19 @@ Logs go to `/tmp/claude-bridge-server.log`.
 
 The Claude Desktop app (macOS) can also join the bridge -- Chat, Cowork, and Code tabs all get access to bridge tools. Desktop sessions connect through a stdio adapter (`bridge-stdio.mjs`) since the app only supports stdio MCP transport (not SSE).
 
-### If you ran install.sh (recommended)
+### If you ran claude-bridge (recommended)
 
-`install.sh` already configured the Desktop app for you. Just:
+`claude-bridge` already configured the Desktop app for you. Just:
 
 1. **Quit and relaunch Claude Desktop** -- the app reads its config on launch
-2. **Start the bridge server** if not already running: `./install.sh --start`
+2. **Start the bridge server** if not already running: `./claude-bridge --start`
 3. Open any Chat, Cowork, or Code conversation and tell it:
 
 > "Register on the bridge as 'desktop' and list who's online"
 
 That's it. The agent now has all 8 bridge tools available.
 
-### Manual setup (if you didn't use install.sh)
+### Manual setup (if you didn't use claude-bridge)
 
 **Step 1:** Make sure the bridge server is running (from Part 1 setup).
 
@@ -209,12 +209,12 @@ By default the bridge is localhost-only. **Federation** links bridges on differe
 
 | Action | Command | Notes |
 |---|---|---|
-| **Be the hub** | `./install.sh --share` | Generates a token, opens a Cloudflare quick tunnel, prints a one-line join command. Run from a **separate terminal** (not a Claude session bound to the bridge). |
-| Stable URL (optional) | `./install.sh --share --named-tunnel <hostname>` | Uses a pre-configured cloudflared *named* tunnel on your own domain (stable URL that survives restarts). You set up the tunnel + DNS route once with cloudflared. |
-| **Join a hub** | `./install.sh --join 'https://<host>#<token>'` | Paste the exact join command the hub printed. Your local bridge links upstream; your sessions stay on localhost. |
-| Spoke leaves | `./install.sh --unlink` | Drops the link, back to local-only. Local sessions unaffected. |
-| Hub stops sharing | `./install.sh --stop-share` | Closes the tunnel, keeps the token (fast re-share). The bridge keeps running. |
-| Check status | `./install.sh --check` | Shows role (hub/spoke/standalone), node id, the loopback **fed port** the tunnel points at, and the tunnel URL if open. |
+| **Be the hub** | `./claude-bridge --share` | Generates a token, opens a Cloudflare quick tunnel, prints a one-line join command. Run from a **separate terminal** (not a Claude session bound to the bridge). |
+| Stable URL (optional) | `./claude-bridge --share --named-tunnel <hostname>` | Uses a pre-configured cloudflared *named* tunnel on your own domain (stable URL that survives restarts). You set up the tunnel + DNS route once with cloudflared. |
+| **Join a hub** | `./claude-bridge --join 'https://<host>#<token>'` | Paste the exact join command the hub printed. Your local bridge links upstream; your sessions stay on localhost. |
+| Spoke leaves | `./claude-bridge --unlink` | Drops the link, back to local-only. Local sessions unaffected. |
+| Hub stops sharing | `./claude-bridge --stop-share` | Closes the tunnel, keeps the token (fast re-share). The bridge keeps running. |
+| Check status | `./claude-bridge --check` | Shows role (hub/spoke/standalone), node id, the loopback **fed port** the tunnel points at, and the tunnel URL if open. |
 
 `--share`/`--join` flip a **running** bridge into hub/spoke mode without a restart, so attached sessions are never dropped.
 
@@ -230,16 +230,16 @@ Once linked, it's transparent: agents talk **by name**, same as local. `list_ses
 
 ### Quick-tunnel URLs rotate
 
-A Cloudflare quick tunnel's URL is **ephemeral** -- if `cloudflared` restarts, the URL changes and the old join link stops working. Re-run `./install.sh --share` to reprint the current join link, and spokes must re-`--join` with the new one. For a URL that survives restarts, use `--named-tunnel` (your own domain).
+A Cloudflare quick tunnel's URL is **ephemeral** -- if `cloudflared` restarts, the URL changes and the old join link stops working. Re-run `./claude-bridge --share` to reprint the current join link, and spokes must re-`--join` with the new one. For a URL that survives restarts, use `--named-tunnel` (your own domain).
 
 ### Keeping an always-on hub up (supervise cloudflared)
 
-`cloudflared` is a child process, not a service -- it can exit or silently lose its edge connection on a network blip (you'll see `bridge.houserbot.com` return a Cloudflare `530`/`1033` even though the bridge is fine). `install.sh` does not babysit it. For an **always-on hub**, run cloudflared under a supervisor so it restarts itself: a `launchd` plist (macOS) or a `systemd` unit (Linux) with `Restart=always`, running `cloudflared tunnel run <named-tunnel>` against `http://localhost:$FED_PORT`. Don't trust `pgrep` for liveness -- cloudflared can stay running but disconnected; poll its metrics `--metrics 127.0.0.1:<port>` `/ready` endpoint (200 = at least one edge connection) instead. For an ad-hoc session this isn't needed -- just re-launch cloudflared if the tunnel drops.
+`cloudflared` is a child process, not a service -- it can exit or silently lose its edge connection on a network blip (you'll see `bridge.houserbot.com` return a Cloudflare `530`/`1033` even though the bridge is fine). `claude-bridge` does not babysit it. For an **always-on hub**, run cloudflared under a supervisor so it restarts itself: a `launchd` plist (macOS) or a `systemd` unit (Linux) with `Restart=always`, running `cloudflared tunnel run <named-tunnel>` against `http://localhost:$FED_PORT`. Don't trust `pgrep` for liveness -- cloudflared can stay running but disconnected; poll its metrics `--metrics 127.0.0.1:<port>` `/ready` endpoint (200 = at least one edge connection) instead. For an ad-hoc session this isn't needed -- just re-launch cloudflared if the tunnel drops.
 
 ### Security, honestly
 
 - **TLS in transit, not strict end-to-end.** The Cloudflare tunnel encrypts the wire, but Cloudflare terminates TLS at its edge -- it is not E2E. For a **trusted group** plus a shared token, this is the accepted bar. The closest no-VPN path to "no third party sees plaintext" is a self-hosted tunnel with your own cert (out of scope here).
-- **One shared token per hub = a trusted group.** Anyone with the join link (token + URL) is a fully trusted member: they can see the roster and message any session, and within the group node ids and session names are self-asserted (a member could claim another's name or node id). This is a deliberate design choice -- per-node tokens/identity were considered and **declined** to keep joining a one-paste operation. Treat the join link like a password. **To revoke the group, rotate the token** (`./install.sh --stop-share` then `--share` mints a fresh one; every spoke must re-`--join`). Give each machine a **distinct** `--node <id>` (defaults to the hostname) so the roster and `name@node` addressing stay unambiguous.
+- **One shared token per hub = a trusted group.** Anyone with the join link (token + URL) is a fully trusted member: they can see the roster and message any session, and within the group node ids and session names are self-asserted (a member could claim another's name or node id). This is a deliberate design choice -- per-node tokens/identity were considered and **declined** to keep joining a one-paste operation. Treat the join link like a password. **To revoke the group, rotate the token** (`./claude-bridge --stop-share` then `--share` mints a fresh one; every spoke must re-`--join`). Give each machine a **distinct** `--node <id>` (defaults to the hostname) so the roster and `name@node` addressing stay unambiguous.
 - **Only the link surface is exposed -- by construction, not just by a token.** The bridge runs two listeners: the **main** one (`127.0.0.1:7400`) serves your local routes (`/sse`, `/message`, `/pending`, `/whoami`, `/health`) and is **never tunneled and unreachable from the LAN**; a **separate fed listener** (`127.0.0.1:7401` in hub mode) serves ONLY the token-gated `/link/*` plus the content-free `/health/ping`, and that fed port is the **only** thing the tunnel exposes. So `/sse`/`/pending`/etc. simply don't exist on the public surface -- a remote caller cannot register, ask, or read pending messages even without a token. When sharing is on, every internet-reachable path requires the token except `/health/ping` (which leaks no session names). `/link/reload` (config hot-reload) is loopback-only and token-gated.
 
 ### `notify` to an offline remote name
@@ -250,11 +250,11 @@ A NOTICE to a remote session that's currently offline queues on the hub and deli
 
 ## Manual installation
 
-### CLI (without install.sh)
+### CLI (without claude-bridge)
 
 Tell your agent:
 
-> "Clone https://github.com/vijay2411/claude-bridge, make the hook scripts executable, add the 5 hooks (SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd) from the hooks/ directory to my ~/.claude/settings.json, run `claude mcp add --transport sse --scope user bridge http://localhost:7400/sse`, copy skill/SKILL.md to ~/.claude/skills/claude-bridge/SKILL.md, and start the server with `./install.sh --start`"
+> "Clone https://github.com/vijay2411/claude-bridge, make the hook scripts executable, add the 5 hooks (SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd) from the hooks/ directory to my ~/.claude/settings.json, run `claude mcp add --transport sse --scope user bridge http://localhost:7400/sse`, copy skill/SKILL.md to ~/.claude/skills/claude-bridge/SKILL.md, and start the server with `./claude-bridge --start`"
 
 Or do it yourself -- see the [hook configuration JSON](#hook-configuration-reference) below.
 
@@ -363,9 +363,9 @@ The bridge serves on **two loopback listeners**: the **main** port (default `740
 | `POST /link/reload` | main (loopback) | Hot-reload federation config (used by `--share`/`--join`/`--unlink`/`--stop-share` to flip role without a restart). **Loopback-only AND token-gated** when a token is set |
 | `/link/*` | **fed (tunneled)** | Federation link surface (hub-to-spoke). Token-gated; 503 if no token configured. Served ONLY on the fed listener -- the main port 404s these |
 
-## What install.sh modifies
+## What claude-bridge modifies
 
-The installer touches these files and locations. All changes are fully reversible via `./install.sh --uninstall`.
+The installer touches these files and locations. All changes are fully reversible via `./claude-bridge --uninstall`.
 
 | What | Path | Change |
 |---|---|---|
@@ -389,15 +389,15 @@ The installer touches these files and locations. All changes are fully reversibl
 | Question stuck, no reply (Desktop) | Tell the Desktop agent "check your inbox and reply" |
 | "Name taken" error | "Register with a different name on the bridge" |
 | Bridge restarted, sessions lost | CLI: auto re-registers. Desktop: tell it to register again |
-| Sessions died after bridge restart | Expected — all CLI sessions have a persistent SSE connection. Use `./install.sh --stop` (SIGTERM) instead of `kill -9` so the bridge closes connections gracefully. You may need to resume affected sessions |
+| Sessions died after bridge restart | Expected — all CLI sessions have a persistent SSE connection. Use `./claude-bridge --stop` (SIGTERM) instead of `kill -9` so the bridge closes connections gracefully. You may need to resume affected sessions |
 | Desktop can't see bridge tools | Quit and relaunch the Desktop app (reads config on launch) |
 | Hooks fire but agent can't call bridge tools | Session was open before install — restart the session to load MCP tools |
 | `--share` says "cloudflared not found" | Install it: `brew install cloudflared` (no account needed for a quick tunnel) |
-| Spoke can't reach the hub / join link stopped working | Quick-tunnel URLs rotate when cloudflared restarts. Re-run `./install.sh --share` on the hub to reprint the link, then re-`--join` on the spoke |
-| `/health` returns 401 | Expected when sharing is on — it's token-gated. Use `./install.sh --check` (it probes the ungated `/health/ping`) |
+| Spoke can't reach the hub / join link stopped working | Quick-tunnel URLs rotate when cloudflared restarts. Re-run `./claude-bridge --share` on the hub to reprint the link, then re-`--join` on the spoke |
+| `/health` returns 401 | Expected when sharing is on — it's token-gated. Use `./claude-bridge --check` (it probes the ungated `/health/ping`) |
 | Remote session doesn't appear in `list_sessions` | Confirm the link is up (`--check` on both ends shows role/tunnel). The spoke re-advertises on (re)connect; give it a few seconds |
 | Two machines have the same session name | Bare-name `ask` resolves **local-first**; reach the remote one explicitly as `name@node` (see `list_sessions` for the node) |
-| Something seems wrong | Run `./install.sh --check` in the repo directory |
+| Something seems wrong | Run `./claude-bridge --check` in the repo directory |
 
 ## Hook configuration reference
 
@@ -432,7 +432,7 @@ Replace `/path/to/claude-bridge` with the actual repo path.
 ### Automated (CLI + Desktop)
 
 ```bash
-./install.sh --uninstall
+./claude-bridge --uninstall
 ```
 
 Removes:
@@ -443,7 +443,7 @@ Removes:
 - Desktop app config entry from `claude_desktop_config.json`
 - All temp files (`/tmp/claude-bridge-*`)
 
-Relaunch the Desktop app after uninstalling. Stop the bridge server separately: `./install.sh --stop`.
+Relaunch the Desktop app after uninstalling. Stop the bridge server separately: `./claude-bridge --stop`.
 
 ### Or tell your agent
 

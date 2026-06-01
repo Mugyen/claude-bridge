@@ -18,5 +18,5 @@ global `~/.claude/CLAUDE.md`.
 
 For end-user protocol docs (how agents talk to the bridge at runtime), the
 canonical source is `skill/SKILL.md` — installed to
-`~/.claude/skills/claude-bridge/SKILL.md` by `./install.sh`. Do NOT inline that
+`~/.claude/skills/claude-bridge/SKILL.md` by `./claude-bridge`. Do NOT inline that
 content here.

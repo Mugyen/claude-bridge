@@ -1,17 +1,17 @@
 # `claude-bridge` CLI — design spec
 
-Turn `install.sh` into a proper subcommand CLI, symlinked onto PATH as
-`claude-bridge`. Approved decisions: **bash (evolve install.sh, zero-dep)**,
+Turn `claude-bridge` into a proper subcommand CLI, symlinked onto PATH as
+`claude-bridge`. Approved decisions: **bash (evolve claude-bridge, zero-dep)**,
 **auto PATH install (sudo `/usr/local/bin`, fallback `~/.local/bin`)**,
 **foundation + the 4 lifecycle bug fixes first**.
 
-Honors the owner's vision: all UX stays in `install.sh` (now reachable as
+Honors the owner's vision: all UX stays in `claude-bridge` (now reachable as
 `claude-bridge`), zero runtime dependency, not chatty by default (verbose output
 is opt-in via `status`/`doctor`; everything is logged to a file).
 
 ## Invocation
 - `claude-bridge <command> [args]` once installed on PATH.
-- `./install.sh <command>` keeps working (same script).
+- `./claude-bridge <command>` keeps working (same script).
 - **Back-compat:** every old `--flag` (`--start`, `--stop`, `--restart`, `--check`,
   `--share`, `--join`, `--unlink`, `--stop-share`, `--uninstall`) stays as a hidden
   alias mapping to the corresponding verb. Nothing breaks.

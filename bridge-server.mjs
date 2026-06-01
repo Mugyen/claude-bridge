@@ -277,7 +277,7 @@ function getPendingFor(name) {
 function tokenOk(req) {
   // Gate is active only when a token is configured (sharing on). When standalone
   // (no token), endpoints stay open — preserving the pre-federation behaviour so
-  // install.sh --check and the existing tests keep working. The loopback tunnel
+  // claude-bridge --check and the existing tests keep working. The loopback tunnel
   // makes remote requests look local, so we MUST require the token here and never
   // trust 127.0.0.1 (DEVELOPER.md: cross-network token insight).
   if (!FED.token) return true;
@@ -291,7 +291,7 @@ function tokenOk(req) {
 
 /** True if the request's peer is the loopback interface. Used to lock down
  *  /link/reload on the main server (it must only be driven by a local caller —
- *  install.sh, tests — never through a tunnel). The main server is already bound
+ *  claude-bridge, tests — never through a tunnel). The main server is already bound
  *  to 127.0.0.1, so this is belt-and-suspenders, but it makes the intent explicit
  *  and survives a future rebind mistake. */
 function isLoopback(req) {
@@ -1530,7 +1530,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── GET /health/ping — UNGATED liveness (no session names) ─────────────
-  // Always open, even when sharing is on, so install.sh --check and the test
+  // Always open, even when sharing is on, so claude-bridge --check and the test
   // health() helper can probe liveness without the token. Leaks no roster.
   if (req.method === "GET" && url.pathname === "/health/ping") {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -1574,7 +1574,7 @@ const server = http.createServer(async (req, res) => {
   // ── GET /health ───────────────────────────────────────────────────────
   if (req.method === "GET" && url.pathname === "/health") {
     // Gated when sharing is on (don't leak session names through the tunnel).
-    // Standalone keeps it open — preserves install.sh --check + existing tests.
+    // Standalone keeps it open — preserves claude-bridge --check + existing tests.
     if (FED.token && !tokenOk(req)) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));

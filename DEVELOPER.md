@@ -95,7 +95,7 @@ Spoke bridge ◀──SSE /link/stream (roster + forward events)─────�
    (token in X-Bridge-Token header; cloudflared tunnel → Hub FED_PORT ONLY; /link/* token-gated, /health/ping ungated/content-free)
 ```
 
-install.sh: `--share [--named-tunnel <h>] [--node <id>]`, `--join '<link>'`, `--unlink`, `--stop-share` — all flip a *running* bridge via `POST /link/reload` (no restart). `cloudflared` is **auto-installed/updated by `--share`** via `ensure_cloudflared()` (brew on macOS; static-binary download on Linux; best-effort update if present) — opt out with `CC_BRIDGE_NO_AUTOINSTALL=1`. The bridge *server* is still zero-dependency: cloudflared only touches the hub path. (CI never installs it — `test-share-flags.sh` uses a fake cloudflared on PATH + `CC_BRIDGE_NO_AUTOINSTALL=1`.)
+claude-bridge: `--share [--named-tunnel <h>] [--node <id>]`, `--join '<link>'`, `--unlink`, `--stop-share` — all flip a *running* bridge via `POST /link/reload` (no restart). `cloudflared` is **auto-installed/updated by `--share`** via `ensure_cloudflared()` (brew on macOS; static-binary download on Linux; best-effort update if present) — opt out with `CC_BRIDGE_NO_AUTOINSTALL=1`. The bridge *server* is still zero-dependency: cloudflared only touches the hub path. (CI never installs it — `test-share-flags.sh` uses a fake cloudflared on PATH + `CC_BRIDGE_NO_AUTOINSTALL=1`.)
 
 ### The 5 hooks (CLI only)
 
@@ -116,7 +116,7 @@ install.sh: `--share [--named-tunnel <h>] [--node <id>]`, `--join '<link>'`, `--
 ## Hard-learned lessons (DO NOT redo these)
 
 ### 1. `os.tmpdir()` on macOS returns a per-user directory, NOT `/tmp`
-`/var/folders/.../T/` — so if the bridge writes its PID there but install.sh reads `/tmp/claude-bridge.pid`, the file is invisible to the script. **Always hardcode `/tmp/claude-bridge.pid`** (and other shared files) so the server, hooks, and install.sh agree.
+`/var/folders/.../T/` — so if the bridge writes its PID there but claude-bridge reads `/tmp/claude-bridge.pid`, the file is invisible to the script. **Always hardcode `/tmp/claude-bridge.pid`** (and other shared files) so the server, hooks, and claude-bridge agree.
 
 ### 2. SSE has only one connection that receives JSON-RPC responses
 If you connect to `/sse` twice, only one connection gets the responses. Tests that open multiple SSE connections will hang on tool calls. Keep one persistent SSE connection per logical client.
@@ -137,7 +137,7 @@ Hooks may execute with any working directory. Use absolute paths or read `cwd` f
 Every tool handler in `executeTool()` runs inside the request handler. If a handler throws, it propagates up unless we wrap the call site. `executeTool` must be called inside `try/catch`. Also: `process.on("uncaughtException")` and `process.on("unhandledRejection")` as final safety nets. We learned this from the `broadcast({content: undefined})` crash.
 
 ### 8. SSE drops kill connected Claude sessions
-When the server process dies, all SSE connections terminate abruptly. Claude Code's MCP client doesn't always recover gracefully — sessions may die. **Always do graceful shutdown**: catch SIGTERM/SIGINT, send `event: close` to every SSE client, then exit. `./install.sh --stop` does this correctly. `kill -9` does not.
+When the server process dies, all SSE connections terminate abruptly. Claude Code's MCP client doesn't always recover gracefully — sessions may die. **Always do graceful shutdown**: catch SIGTERM/SIGINT, send `event: close` to every SSE client, then exit. `./claude-bridge --stop` does this correctly. `kill -9` does not.
 
 ### 9. Multiple SSE connections per session is a footgun
 If the same Claude session reconnects (bridge restarted, SSE dropped, settings hot-reload), the old SSE connection may still appear "alive" because of keepalive pings. New questions get queued for the new connection's name; the old one is a ghost. The `register()` handler detects this via `claude_session_id` and explicitly closes the old SSE. Don't remove that code.
@@ -149,7 +149,7 @@ When a session re-registers under a new name (rename or reconnect), pending ques
 Claude Code reads `description` from SKILL.md frontmatter to decide when to auto-invoke. Keep it specific and keyword-rich — list the actual tool names, the triggers ("bridge question", "another agent", "register"). Avoid generic phrases.
 
 ### 12. CLAUDE.md edits are PERMANENT until --uninstall
-A user reported that appending ~70 lines of protocol docs to their global `~/.claude/CLAUDE.md` was invasive — every Claude session everywhere paid the token cost. Switched to the skill model. **Never append to CLAUDE.md again.** The legacy cleanup function (`remove_claude_md_legacy`) stays in install.sh to fix older installs.
+A user reported that appending ~70 lines of protocol docs to their global `~/.claude/CLAUDE.md` was invasive — every Claude session everywhere paid the token cost. Switched to the skill model. **Never append to CLAUDE.md again.** The legacy cleanup function (`remove_claude_md_legacy`) stays in claude-bridge to fix older installs.
 
 ### 13. The bridge MCP isn't loaded in pre-install sessions
 If you install cc-bridge mid-session, hooks fire (settings.json is hot-loaded) but MCP tools aren't available (MCP connects at session start). Hooks now check `/tmp/claude-bridge-${SESSION_ID}.mcp` written by SessionStart — if MCP isn't registered, they exit silently. Otherwise they'd spam every tool call telling the agent to call `register()` when the tool doesn't exist.
@@ -158,7 +158,7 @@ If you install cc-bridge mid-session, hooks fire (settings.json is hot-loaded) b
 Run it ONCE per session in SessionStart and cache the result. Other hooks just read the cache.
 
 ### 15. Uninstall does NOT stop the bridge server
-Intentional — the server may have active sessions from other users/contexts. Uninstall removes config files and the PID file, but the running process stays. Users must `./install.sh --stop` explicitly (or `lsof -ti:7400 | xargs kill`). The reinstall path handles this gracefully: `--start` reports failure if port is busy, and you can investigate with `--check`.
+Intentional — the server may have active sessions from other users/contexts. Uninstall removes config files and the PID file, but the running process stays. Users must `./claude-bridge --stop` explicitly (or `lsof -ti:7400 | xargs kill`). The reinstall path handles this gracefully: `--start` reports failure if port is busy, and you can investigate with `--check`.
 
 ### 16. The `Monitor` tool is the ONLY way to wake a dormant agent — and the repo can't call it
 Hooks fire during active work (PostToolUse/Stop) but nothing fires while a session is truly idle, waiting on the user. A hook that spawns a detached background poller can't help: a detached process has no channel back into the model. The only primitive that re-invokes a dormant agent is a background `Monitor` task **the agent itself armed** (its stdout lines become harness notifications). So the bridge can't "auto-run" a monitor — it can only *instruct the agent* to arm one. The idle-listener does exactly that: `bridge-hook.sh` nudges the agent (once, on first ask/reply) with a ready-made Monitor command. This is Claude Code CLI only (Desktop has neither hooks nor Monitor).
@@ -190,7 +190,7 @@ The Monitor command embedded in `bridge-hook.sh` greps `'Question from|NEW QUEST
 ### 23. NEVER `--stop`/`--restart` the bridge from a session connected to it — and the server must die on a bind failure
 Two related failures, both diagnosed from a real incident (a live session was SIGKILLed, exit 137, mid-`--restart`):
 
-**(a) The self-restart hazard.** `--stop`/`--restart` tears down every SSE connection — including the MCP transport of the session running the command. When that session loses its tool provider, the Claude Code harness kills it (the in-flight Bash child takes the SIGKILL). Graceful shutdown (`event: close`) does NOT save it: it makes the disconnect *tidy*, but you cannot keep a tool provider alive while it restarts itself. There is no server-side fix. The mitigation is procedural: **run lifecycle commands from a separate terminal**, never from a Claude session bound to the bridge. `install.sh` now prints a loud warning on `--stop`/`--restart`. A plain `--start` is safe (it never stops anything). It was NOT an OOM and NOT install.sh killing the parent — `stop_bridge` only ever `kill`s the bridge PID.
+**(a) The self-restart hazard.** `--stop`/`--restart` tears down every SSE connection — including the MCP transport of the session running the command. When that session loses its tool provider, the Claude Code harness kills it (the in-flight Bash child takes the SIGKILL). Graceful shutdown (`event: close`) does NOT save it: it makes the disconnect *tidy*, but you cannot keep a tool provider alive while it restarts itself. There is no server-side fix. The mitigation is procedural: **run lifecycle commands from a separate terminal**, never from a Claude session bound to the bridge. `claude-bridge` now prints a loud warning on `--stop`/`--restart`. A plain `--start` is safe (it never stops anything). It was NOT an OOM and NOT claude-bridge killing the parent — `stop_bridge` only ever `kill`s the bridge PID.
 
 **(b) The orphan-process leak.** `bridge-server.mjs` had no `server.on("error")` handler, so a startup `EADDRINUSE` was swallowed by the catch-all `uncaughtException` (lesson #7) — the process never bound a port and never exited, kept alive forever by the keepalive + gc `setInterval`s. Result: headless zombie servers (we found three ~17 days old). Fixed: `server.on("error")` now `process.exit(1)` on bind failure. And `start_bridge` no longer trusts the PID file alone (it's written only *after* a successful bind) — it polls `/health/ping` (the ungated liveness probe; the full `/health` is token-gated when sharing is on — see lesson #26) and reaps the child if the server never serves. Regression-tested in `test-process-mgmt.sh` (a second server on a busy port must exit, not orphan).
 
@@ -201,23 +201,23 @@ The whole reason cross-network is small: a remote `ask`/`notify` is forwarded to
 `resolveTarget(to)` resolves a **bare** name to a LOCAL session if one exists (local-name-wins), else a remote one; `name@node` targets a specific remote session. **Subtlety:** `globalRoster()` only lists spokes whose stream is currently live (so `list_sessions` doesn't show ghosts). But for **lossless reconnect** the hub must still *route* a message to a spoke whose stream just dropped (its `spokes` entry persists until the 45s sweep). So `resolveTarget` has a hub-side fallback that scans `spokes` (incl. offline) for the name and returns `{kind:"remote", node}` — `relayForward` then queues it (`markPendingRelay`) and `flushPendingForwards` re-pushes on reconnect. If you "simplify" routing to use `globalRoster` alone, you reintroduce message loss across a brief link blip. The split is deliberate: **roster = live (display); routing-for-queue = known (durability).**
 
 ### 26. The `/health` split: ungated `/health/ping` + token-gated `/health`
-A localhost-forwarding tunnel makes remote requests arrive from `127.0.0.1` — you **cannot** trust loopback to skip the token on anything tunneled. So when sharing is on, `/health` (which lists session names) and all `/link/*` require `X-Bridge-Token`. But `install.sh --check`, `start_bridge`'s liveness poll, and the test `health()` helper hit `/health` unauthenticated — gating it fully would break them. Fix: a separate **ungated** `/health/ping` returning only `{status, role, node, sharing}` (NO session names). `--check` and `start_bridge` use the ping; the full `/health` stays gated. `/sse`, `/message`, `/pending`, `/whoami` are never gated (never tunneled — gating them would force the token into the hooks, which we refuse). Standalone (no token) leaves `/health` open, so existing tests are unchanged.
+A localhost-forwarding tunnel makes remote requests arrive from `127.0.0.1` — you **cannot** trust loopback to skip the token on anything tunneled. So when sharing is on, `/health` (which lists session names) and all `/link/*` require `X-Bridge-Token`. But `claude-bridge --check`, `start_bridge`'s liveness poll, and the test `health()` helper hit `/health` unauthenticated — gating it fully would break them. Fix: a separate **ungated** `/health/ping` returning only `{status, role, node, sharing}` (NO session names). `--check` and `start_bridge` use the ping; the full `/health` stays gated. `/sse`, `/message`, `/pending`, `/whoami` are never gated (never tunneled — gating them would force the token into the hooks, which we refuse). Standalone (no token) leaves `/health` open, so existing tests are unchanged.
 
 **The hooks MUST follow this split too (BUG-5, fixed).** The hooks are token-free by design, so for **liveness** they must probe `/health/ping`, and for **"is this session registered"** they must use `/whoami?session_id=` — NEVER `curl -sf .../health` (which `401`s once a token is present). The original hooks used `-sf /health` for liveness and parsed `/health`'s `.sessions`; that worked only while standalone. The moment a machine became a hub/spoke (token set), every hook saw `401`, concluded "bridge down", and bailed silently → **new sessions stopped auto-registering and stopped getting the idle-listener nudge** (reported in the field). If you add a new hook or a new liveness/registration check in a hook, use `/health/ping` + `/whoami`, never `/health`. Regression: `tests/test-hook-token-liveness.sh` starts a token-bearing bridge and asserts all three hooks still emit.
 
 ### 27. `POST /link/reload` exists so `--share`/`--join` never restart a running bridge (lesson #23a)
-A restart drops every SSE client and can kill the calling session. So federation config lives in dotfiles (`.cc-bridge-{token,role,hub,node}`) and `--share`/`--join`/`--unlink`/`--stop-share` write them, then `curl -X POST localhost:7400/link/reload` makes the **running** bridge re-read them and bring up/tear down the link in place. `/link/reload` lives on the **main (loopback-only) server**, never the tunneled fed listener, and is **token-gated (when a token is configured) AND restricted to a loopback peer** (`req.socket.remoteAddress`) — defense-in-depth from the v2.7.0 hardening (lesson #29). `install.sh fed_reload` and `tests/lib.mjs reloadFed` therefore send `X-Bridge-Token` when a token is present. Never go back to "restart the bridge to enable sharing," and never make `/link/reload` token-free again.
+A restart drops every SSE client and can kill the calling session. So federation config lives in dotfiles (`.cc-bridge-{token,role,hub,node}`) and `--share`/`--join`/`--unlink`/`--stop-share` write them, then `curl -X POST localhost:7400/link/reload` makes the **running** bridge re-read them and bring up/tear down the link in place. `/link/reload` lives on the **main (loopback-only) server**, never the tunneled fed listener, and is **token-gated (when a token is configured) AND restricted to a loopback peer** (`req.socket.remoteAddress`) — defense-in-depth from the v2.7.0 hardening (lesson #29). `claude-bridge fed_reload` and `tests/lib.mjs reloadFed` therefore send `X-Bridge-Token` when a token is present. Never go back to "restart the bridge to enable sharing," and never make `/link/reload` token-free again.
 
 ### 28. The spoke outbound link needs reconnect backoff; the hub prunes on write-error + sweep
 The spoke opens `GET /link/stream` to the hub with `node:https` (or `http` for tests). On any drop it reconnects with exponential backoff (1s→2s→5s→…→30s, reset on success) — **do not hot-loop** a reconnect (lesson #8/#23 cascade risk). The hub prunes a spoke on stream close, on SSE write-error (`linkSend` nulls `res`), and via a 15s liveness sweep (45s stale cutoff), rebroadcasting the roster each time — the link version of lesson #9 ghost de-merge.
 
-**Spoke heartbeat (keeps the lossless-reconnect window honest).** The sweep prunes a spoke (and deletes its `pendingRelay` queue) when it is `dead && now-lastSeen > SPOKE_STALE_MS`. `lastSeen` advances only on inbound spoke→hub traffic (`/link/register|forward|heartbeat`); the 25s `ka` ping is hub→spoke and does NOT touch it. So **the spoke POSTs `/link/heartbeat` every `SPOKE_HEARTBEAT_MS` (25s)** — without it an *idle* spoke is already stale when it disconnects and the next sweep tick wipes its queue within seconds, silently dropping messages queued during the outage (found by the real Mac↔VM tunnel chaos: an idle-spoke crash lost a queued notice; a freshly-active one kept it). Start the heartbeat in `connectToHub`'s 200 block, clear it in `teardownHubStream` and on gen-change. The three timings are env-overridable (`CC_BRIDGE_HEARTBEAT_MS`/`CC_BRIDGE_SPOKE_STALE_MS`/`CC_BRIDGE_SPOKE_SWEEP_MS`) so `test-federation-heartbeat.mjs` can drive the stale-prune deterministically; production never sets them (25s/45s/15s). This also serves as the sub-100s Cloudflare SSE keepalive on the link path. A `spokeGen` counter invalidates stale stream callbacks after a teardown so a late `data` event from an old connection can't corrupt `remoteRoster`. **On link-drop the spoke also CLEARS `remoteRoster`** (in `scheduleSpokeReconnect` — covering all drop paths — and `teardownHubStream`): otherwise a downed hub's sessions linger as ghosts, `resolveTarget` keeps treating them as routable, and a blocking `ask` to one hangs the full 5-min deadline instead of failing fast with "not connected" (G7). It repopulates from the `/link/register` response + roster broadcast on reconnect. Tunnel/cloudflared is never invoked in CI — the link transport is plain HTTP between two local ports in tests; cloudflared is detect-and-instruct (`test-share-flags.sh` uses a fake cloudflared on PATH). **Gotcha:** install.sh runs under `set -euo pipefail`, so an empty `grep ... | head -1` in a command substitution aborts the script — guard tunnel-URL parsing with `|| true`.
+**Spoke heartbeat (keeps the lossless-reconnect window honest).** The sweep prunes a spoke (and deletes its `pendingRelay` queue) when it is `dead && now-lastSeen > SPOKE_STALE_MS`. `lastSeen` advances only on inbound spoke→hub traffic (`/link/register|forward|heartbeat`); the 25s `ka` ping is hub→spoke and does NOT touch it. So **the spoke POSTs `/link/heartbeat` every `SPOKE_HEARTBEAT_MS` (25s)** — without it an *idle* spoke is already stale when it disconnects and the next sweep tick wipes its queue within seconds, silently dropping messages queued during the outage (found by the real Mac↔VM tunnel chaos: an idle-spoke crash lost a queued notice; a freshly-active one kept it). Start the heartbeat in `connectToHub`'s 200 block, clear it in `teardownHubStream` and on gen-change. The three timings are env-overridable (`CC_BRIDGE_HEARTBEAT_MS`/`CC_BRIDGE_SPOKE_STALE_MS`/`CC_BRIDGE_SPOKE_SWEEP_MS`) so `test-federation-heartbeat.mjs` can drive the stale-prune deterministically; production never sets them (25s/45s/15s). This also serves as the sub-100s Cloudflare SSE keepalive on the link path. A `spokeGen` counter invalidates stale stream callbacks after a teardown so a late `data` event from an old connection can't corrupt `remoteRoster`. **On link-drop the spoke also CLEARS `remoteRoster`** (in `scheduleSpokeReconnect` — covering all drop paths — and `teardownHubStream`): otherwise a downed hub's sessions linger as ghosts, `resolveTarget` keeps treating them as routable, and a blocking `ask` to one hangs the full 5-min deadline instead of failing fast with "not connected" (G7). It repopulates from the `/link/register` response + roster broadcast on reconnect. Tunnel/cloudflared is never invoked in CI — the link transport is plain HTTP between two local ports in tests; cloudflared is detect-and-instruct (`test-share-flags.sh` uses a fake cloudflared on PATH). **Gotcha:** claude-bridge runs under `set -euo pipefail`, so an empty `grep ... | head -1` in a command substitution aborts the script — guard tunnel-URL parsing with `|| true`.
 
 ### 29. NEVER tunnel the main bridge port — there are TWO listeners, and only the loopback fed port is exposed (v2.7.0 hardening)
 The original Phase-1 federation tunneled the whole bridge (`cloudflared tunnel --url http://localhost:7400`). But `/sse`, `/message`, `/pending`, `/whoami` are intentionally token-free ("local only, never tunneled" — lesson #26). With the whole port tunneled, anyone with the URL could register a session, ask/notify, and read any session's pending messages **with no token**. The fix is structural, not just gating:
 
 - **Two listeners, both loopback.** The **main** `http.createServer` binds `127.0.0.1:PORT` (was all-interfaces — also LAN-exposed; fixed) and serves ALL local routes. It is NEVER tunneled. In **hub mode** a **second** server binds `127.0.0.1:FED_PORT` (`CC_BRIDGE_FED_PORT`, default `PORT+1`) and serves ONLY the token-gated `/link/*` surface + the content-free `/health/ping`; **every other path 404s** (`handleLinkRequest`). The fed listener shares the process's in-memory state (same module scope).
-- **The tunnel points at `FED_PORT`, not `PORT`.** Both the quick-tunnel and named-tunnel `cloudflared` invocations in `install.sh` use `$FED_PORT`. So `/sse`/`/message`/`/pending`/`/whoami`/full-`/health` simply do not exist on the tunneled surface — the hole is closed by construction, not just by a token check.
+- **The tunnel points at `FED_PORT`, not `PORT`.** Both the quick-tunnel and named-tunnel `cloudflared` invocations in `claude-bridge` use `$FED_PORT`. So `/sse`/`/message`/`/pending`/`/whoami`/full-`/health` simply do not exist on the tunneled surface — the hole is closed by construction, not just by a token check.
 - **Lifecycle:** `applyFedConfig()` calls `startFedListener()` when this node becomes a hub and `stopFedListener()` when it leaves hub mode. A **spoke** makes only OUTBOUND connections to the hub and **never binds the fed port** (verify this if you touch `applyFedConfig`). Standalone never binds it either, so standalone is byte-for-byte unchanged. Both listeners get the EADDRINUSE-fatal `server.on("error")` treatment (lesson #23b) and are closed in `shutdown()`.
 - **Why a separate port instead of path-filtering one port?** A single port can't be "tunneled for `/link/*` but not for `/sse`" — cloudflared forwards the whole origin. Two ports is the only way to expose the link surface without exposing the local routes.
 - **Tests:** `tests/lib.mjs` knows the fed port (`port+1` default, third constructor arg to override); `raw()` routes `/link/*` to the fed port automatically (`onMain`/`onFed` overrides force a port). The federation tests point the spoke's `hub` URL at the HUB's fed port. `test-token-auth.mjs` has the regression assertions: main port 404s `/link/*`; fed port 404s the local routes + full `/health`; fed `/link/*` needs the token; fed `/health/ping` leaks no names; `/link/reload` rejects a wrong token. **Do not collapse back to one port.**
@@ -238,13 +238,13 @@ Added bounds so a flood / hostile-but-authenticated peer can't exhaust the hub, 
 - **Rate limiting** is on the message-CREATING tools only (`ask`/`notify`/`broadcast`) keyed by `sse:<sseId>`, plus `/link/forward` keyed by `node:<node>`. **Never** rate-limit reads (`check_inbox`/`list_sessions`/`get_thread`/`/pending`), `register`, or `reply` — that would break the blocking-`ask` round-trip and reconnect flushes. The bucket map is GC-pruned (idle buckets refill fully → deleted).
 - **Descriptions don't cross the link** by default — `linkSessions()` (name-only) is what `broadcastRoster`/`spokeAdvertise` send, NOT `activeSessions()` (which keeps descriptions for LOCAL `list_sessions`). If you add a new link-crossing roster path, use `linkSessions()`.
 - **The 413 keep-alive gotcha (cost me a test):** on an over-cap body, do **not** `req.destroy()` mid-read and keep the connection — Node ≥19 pools keep-alive sockets by default, so the half-read socket gets reused and the NEXT request on it ECONNRESETs. Respond `413` with **`Connection: close`** and `res.end()` so the agent discards the socket. Same rule for any early-abort response that hasn't drained the request body.
-- **Don't log message content.** `ask`/`notify` log lines carry only `id` + char-count, never the question/notice text (the log is world-readable until install.sh's `0600`). Keep it that way.
+- **Don't log message content.** `ask`/`notify` log lines carry only `id` + char-count, never the question/notice text (the log is world-readable until claude-bridge's `0600`). Keep it that way.
 
 ---
 
 ## Versioning + manifest approach
 
-`install.sh` reads `VERSION` from `package.json` and writes:
+`claude-bridge` reads `VERSION` from `package.json` and writes:
 - `~/.claude/.cc-bridge-version` — single line, version string
 - `~/.claude/.cc-bridge-manifest` — list of paths the installer created/touched
 
@@ -289,8 +289,8 @@ Before tagging a release:
 2. [ ] Bump `package.json` `version`
 3. [ ] Bump version string in `bridge-server.mjs` startup banner
 4. [ ] `npm test` — all green, zero failures
-5. [ ] `./install.sh --uninstall` then `./install.sh` then `./install.sh --check` — all green
-6. [ ] Restart bridge with `./install.sh --restart`, verify health endpoint
+5. [ ] `./claude-bridge --uninstall` then `./claude-bridge` then `./claude-bridge --check` — all green
+6. [ ] Restart bridge with `./claude-bridge --restart`, verify health endpoint
 7. [ ] Update README "Status" section if non-trivial new features
 8. [ ] Update USAGE.md if any user-facing flag/command changed
 9. [ ] Update this DEVELOPER.md if you learned anything new
@@ -319,12 +319,12 @@ tests/
 ├── test-tools.mjs                # MCP tools: register, broadcast, list_sessions, check_inbox, ...
 ├── test-graceful-shutdown.mjs    # SIGTERM emits `event: close` before exit
 ├── test-hook-mcp-check.sh        # hooks silent when MCP=no, runs clean when MCP=yes
-├── test-process-mgmt.sh          # install.sh --start / --stop / --restart, PID file, idempotency
+├── test-process-mgmt.sh          # claude-bridge --start / --stop / --restart, PID file, idempotency
 ├── test-token-auth.mjs           # federation token gate accept/reject; ungated /health/ping; no-token guardrail
 ├── test-federation.mjs           # two-bridge link: roster merge, cross-link ask/reply, notify relay, invariants, gated health, drop-prune
 ├── test-federation-reconnect.mjs # lossless reconnect: queued message flushes idempotently after the link returns
 ├── test-federation-chaos.mjs     # hub+2 spokes: crash/restart/churn, spoke→hub→spoke routing, name@node, auth-under-chaos (lesson #30)
-└── test-share-flags.sh           # install.sh --share/--join/--unlink/--stop-share parsing (fake cloudflared on PATH)
+└── test-share-flags.sh           # claude-bridge --share/--join/--unlink/--stop-share parsing (fake cloudflared on PATH)
 ```
 
 `lib.mjs`'s `TestBridge(port, fed)` takes an optional `fed = {token, role, hub, node}` that writes per-bridge temp config files and points the server at them (env `CC_BRIDGE_{TOKEN,ROLE,HUB,NODE}_FILE`) — so federation tests never touch the developer's real `~/.claude` dotfiles. `reloadFed()` rewrites them + hits `/link/reload`; `raw()`, `healthPing()`, and `health(token)` cover the gated endpoints.
@@ -336,7 +336,7 @@ test in `tests/`. The discovery is automatic — any file matching
 `tests/test-*.{mjs,sh}` is picked up.
 
 - New MCP tool? Add assertions to `tests/test-tools.mjs` using the `bridge.call(...)` helper.
-- New install.sh flag? Add a `tests/test-<name>.sh` script that exits 0 on
+- New claude-bridge flag? Add a `tests/test-<name>.sh` script that exits 0 on
   success and non-zero on failure. Use port 7404 (or a fresh one) so it
   doesn't collide with other tests.
 - New server-level behaviour (shutdown, GC, reconnect)? New `tests/test-<name>.mjs`
@@ -345,8 +345,8 @@ test in `tests/`. The discovery is automatic — any file matching
 ### Manual smoke (after any change)
 
 ```bash
-./install.sh --restart
-./install.sh --check
+./claude-bridge --restart
+./claude-bridge --check
 npm test
 ```
 
@@ -369,7 +369,7 @@ npm test
 ## When you add a new hook
 
 1. Add the script to `hooks/`
-2. Add an entry to `HOOK_MAP` in `install.sh`
+2. Add an entry to `HOOK_MAP` in `claude-bridge`
 3. The script MUST exit 0 on bridge-down (the install assumes hooks are resilient)
 4. The script MUST check `/tmp/claude-bridge-${SESSION_ID}.mcp` and exit silently if "no" — this is the anti-spam pattern
 5. Update the hook count in `check_hooks()` (currently expects 5)
@@ -379,13 +379,13 @@ npm test
 
 ---
 
-## When you change install.sh
+## When you change claude-bridge
 
 1. **Test the full round-trip** — uninstall (with whatever was there), reinstall, check. All steps must succeed cleanly.
 2. **Test from a clean state** — `rm -rf` the relevant artifacts, then install.
 3. **Test idempotency** — run install twice, verify nothing duplicates.
 4. If you create a new file or directory, register it in the manifest (`manifest_add`).
-5. Update the "What install.sh modifies" table in USAGE.md.
+5. Update the "What claude-bridge modifies" table in USAGE.md.
 6. Add or extend `tests/test-process-mgmt.sh` if you change a flag's behaviour.
 7. Add a line to `CHANGELOG.md` under `[Unreleased]`.
 
@@ -412,10 +412,10 @@ These are not blockers. Each is a one-or-two-evening project. None are urgent �
 
 - **Don't** add features without the user explicitly asking. The user has rejected several "nice to have" suggestions (auto-scratchpad-read, push notifications, etc.). Stick to user-requested work.
 - **Don't** add MCP transports beyond SSE + stdio. We considered WebSocket; it's not worth the complexity.
-- **Don't** add CLI commands to the bridge server itself. All UX lives in `install.sh`.
+- **Don't** add CLI commands to the bridge server itself. All UX lives in `claude-bridge`.
 - **Don't** persist state to disk by default. The in-memory + 30d TTL design is intentional. Add persistence only as opt-in.
 - **Don't** make the install script chatty by default. `--check` is for verbose status; `install` should be ~10 lines of output.
-- **Don't** rename or move files in `hooks/` without updating settings.json migration logic in install.sh.
+- **Don't** rename or move files in `hooks/` without updating settings.json migration logic in claude-bridge.
 - **Don't** edit the user's `~/.claude/CLAUDE.md` for any reason. We learned that lesson.
 - **Don't** use external dependencies in `bridge-server.mjs`. Zero deps is a feature.
 
@@ -426,7 +426,7 @@ These are not blockers. Each is a one-or-two-evening project. None are urgent �
 | File | Frequency | Notes |
 |---|---|---|
 | `bridge-server.mjs` | High | Most logic lives here. ~600 lines, single file by design. |
-| `install.sh` | Medium | Every new file/dir/hook needs a line here. |
+| `claude-bridge` | Medium | Every new file/dir/hook needs a line here. |
 | `USAGE.md` | Medium | Update with every user-facing change. |
 | `CHANGELOG.md` | Medium | Update WHILE you work, not after. One line per change under `[Unreleased]`. |
 | `DEVELOPER.md` | Medium | Update when you learn something. THAT'S THIS FILE. |
@@ -442,12 +442,12 @@ These are not blockers. Each is a one-or-two-evening project. None are urgent �
 ## Quick command reference
 
 ```bash
-./install.sh                      # Install / re-install (idempotent)
-./install.sh --uninstall          # Remove everything (manifest + hardcoded fallback)
-./install.sh --check              # Status of all components
-./install.sh --start              # Start bridge server (writes PID)
-./install.sh --stop               # Graceful stop (SIGTERM, sends SSE close event)
-./install.sh --restart            # Stop + start
+./claude-bridge                      # Install / re-install (idempotent)
+./claude-bridge --uninstall          # Remove everything (manifest + hardcoded fallback)
+./claude-bridge --check              # Status of all components
+./claude-bridge --start              # Start bridge server (writes PID)
+./claude-bridge --stop               # Graceful stop (SIGTERM, sends SSE close event)
+./claude-bridge --restart            # Stop + start
 
 curl -sf localhost:7400/health    # Server health + active session count
 tail -f /tmp/claude-bridge-server.log # Server logs

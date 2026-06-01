@@ -9,7 +9,7 @@ move items to "Fixed" (with the commit) when landed.
 
 ---
 
-## ✅ FIXED — install.sh / lifecycle (BUG-1–4)
+## ✅ FIXED — claude-bridge / lifecycle (BUG-1–4)
 All four landed with the `claude-bridge` CLI work (`docs/specs/claude-bridge-cli.md`):
 `start`/`stop`/`restart` act on the actual `:7400` listener (BUG-1/2, `restart --force`
 to replace a foreign/stale one; no more silent `cat $PID_FILE` abort); `join` restarts
@@ -20,9 +20,9 @@ on a token change (BUG-3); `share --named-tunnel` closes a mismatched tunnel fir
 
 
 ### BUG-1 — `--start` silently does nothing when a *foreign* server holds the port
-- **Symptom:** `./install.sh --start` prints nothing and the new bridge isn't running; an unrelated/older bridge is still on `:7400`.
+- **Symptom:** `./claude-bridge --start` prints nothing and the new bridge isn't running; an unrelated/older bridge is still on `:7400`.
 - **Root cause:** the old bridge has **no install-written PID file**, so `--start` skips its "already running" check, tries to start a new bridge → `EADDRINUSE` → the new process `exit(1)`s (lesson #23b). `start_bridge` then health-polls `:7400`, the *old* bridge answers `200`, so it "thinks" it's up and runs the success line `ok "Bridge started (PID $(cat $PID_FILE))"` — but `$PID_FILE` doesn't exist, so `cat` fails under `set -euo pipefail` → the script **aborts with no output**.
-- **Workaround:** `lsof -ti:7400 -sTCP:LISTEN | xargs kill` (LISTENER only — *not* `lsof -ti:7400`, which also returns connected client PIDs and would kill your Claude sessions), then `./install.sh --start`.
+- **Workaround:** `lsof -ti:7400 -sTCP:LISTEN | xargs kill` (LISTENER only — *not* `lsof -ti:7400`, which also returns connected client PIDs and would kill your Claude sessions), then `./claude-bridge --start`.
 - **Fix:** (a) guard the success `cat $PID_FILE` (`|| echo "?"`); (b) before starting, detect "port busy but not our PID" and print a clear message instead of dying.
 
 ### BUG-2 — lifecycle commands can't manage a bridge that lacks the install PID file
@@ -33,14 +33,14 @@ on a token change (BUG-3); `share --named-tunnel` closes a mismatched tunnel fir
 
 ### BUG-3 — token-changing `--join`/`--share` can't hot-reload a running bridge (chicken-and-egg)
 - **Symptom:** after `--join`/`--share` that changes the token, the dotfiles say one thing (e.g. `role=spoke`, new token) but the **running process** keeps its old role + old token. The hub then rejects the *correct* (new) token with `401`; a spoke never actually links.
-- **Root cause:** `--share`/`--join` write the dotfiles then `POST /link/reload` to hot-reload the running bridge. But `/link/reload` is **token-gated by the OLD token** (and `install.sh` sends the NEW token) → `401` → the reload is silently dropped → the process never re-reads the new config. (lesson #27's "no restart needed" only holds when the token is unchanged — true for `--stop-share`/`--unlink`, false for `--join` and token-minting `--share`.)
-- **Workaround:** `./install.sh --restart` after any token-changing `--join`/`--share`.
-- **Fix:** drop the token gate on `/link/reload` — it's already **loopback-only**, and the main port's local routes (`/sse`,`/message`,`/pending`) are token-free anyway, so the token adds nothing there — *or* have `install.sh` `--restart` instead of `--reload` when the token changes. (DEVELOPER lesson #27 says "never make `/link/reload` token-free" for defense-in-depth; revisit that, since loopback-only is the real boundary.)
+- **Root cause:** `--share`/`--join` write the dotfiles then `POST /link/reload` to hot-reload the running bridge. But `/link/reload` is **token-gated by the OLD token** (and `claude-bridge` sends the NEW token) → `401` → the reload is silently dropped → the process never re-reads the new config. (lesson #27's "no restart needed" only holds when the token is unchanged — true for `--stop-share`/`--unlink`, false for `--join` and token-minting `--share`.)
+- **Workaround:** `./claude-bridge --restart` after any token-changing `--join`/`--share`.
+- **Fix:** drop the token gate on `/link/reload` — it's already **loopback-only**, and the main port's local routes (`/sse`,`/message`,`/pending`) are token-free anyway, so the token adds nothing there — *or* have `claude-bridge` `--restart` instead of `--reload` when the token changes. (DEVELOPER lesson #27 says "never make `/link/reload` token-free" for defense-in-depth; revisit that, since loopback-only is the real boundary.)
 
 ### BUG-4 — `--share --named-tunnel <h>` is ignored if any tunnel is already open
-- **Symptom:** `./install.sh --share --named-tunnel bridge.houserbot.com` prints `Tunnel already open: https://<old-quick>.trycloudflare.com` and a join link with the **quick** URL — the named tunnel never starts.
-- **Root cause:** the "tunnel already open" guard (`share_bridge()`, ~install.sh:632) runs **before** the `--named-tunnel` branch and `return`s without ever reading `$named_tunnel`. It reuses *any* running tunnel, even when a different (named) one was explicitly requested.
-- **Workaround:** `./install.sh --stop-share` (closes the running tunnel + clears the PID/URL files), then `./install.sh --share --named-tunnel <h>`.
+- **Symptom:** `./claude-bridge --share --named-tunnel bridge.houserbot.com` prints `Tunnel already open: https://<old-quick>.trycloudflare.com` and a join link with the **quick** URL — the named tunnel never starts.
+- **Root cause:** the "tunnel already open" guard (`share_bridge()`, ~claude-bridge:632) runs **before** the `--named-tunnel` branch and `return`s without ever reading `$named_tunnel`. It reuses *any* running tunnel, even when a different (named) one was explicitly requested.
+- **Workaround:** `./claude-bridge --stop-share` (closes the running tunnel + clears the PID/URL files), then `./claude-bridge --share --named-tunnel <h>`.
 - **Fix:** only reuse the running tunnel if it matches the request — no `--named-tunnel` → reuse (current behavior); `--named-tunnel <h>` and the running URL is already `https://<h>` → reuse; otherwise **close the old tunnel and start the requested one**.
 
 ---
@@ -57,10 +57,10 @@ on a token change (BUG-3); `share --named-tunnel` closes a mismatched tunnel fir
 ### OPS-4 — `git pull` doesn't update a running bridge (stale-server roster anomaly)
 - **Symptom:** after pulling code on a node, the bridge still behaves like the old version. Concretely (real incident): a hub bridge started before the description-strip + roster commits kept broadcasting the **old roster** even after `git pull` — so on the *spoke* side, that hub's remote sessions showed `node:"local"` **and** carried descriptions (which the current code strips from the cross-node roster). The proof was the asymmetry: the current side advertised with empty descriptions, the stale side broadcast them.
 - **Root cause:** the server loads `bridge-server.mjs` **once at startup**; `git pull` updates the file on disk but not the running process. (Hooks differ — they're re-exec'd per invocation, so hook fixes go live on pull alone.)
-- **Fix / habit:** after pulling a *server* change, **restart the bridge on that node** (`./install.sh --restart`, or kill the listener `lsof -ti:PORT -sTCP:LISTEN | xargs kill` / `pkill -f '[b]ridge-server.mjs'` then `--start`). A stale node ALSO silently lacks every server-side fix since it started (heartbeat, lossless reconnect, hardening), so this isn't just cosmetic. Note: `./install.sh --start` over ssh after a kill proved flaky (BUG-1/2 + ssh-detach) — the robust manual start is `setsid -f node bridge-server.mjs >> /tmp/claude-bridge-server.log 2>&1 </dev/null`.
+- **Fix / habit:** after pulling a *server* change, **restart the bridge on that node** (`./claude-bridge --restart`, or kill the listener `lsof -ti:PORT -sTCP:LISTEN | xargs kill` / `pkill -f '[b]ridge-server.mjs'` then `--start`). A stale node ALSO silently lacks every server-side fix since it started (heartbeat, lossless reconnect, hardening), so this isn't just cosmetic. Note: `./claude-bridge --start` over ssh after a kill proved flaky (BUG-1/2 + ssh-detach) — the robust manual start is `setsid -f node bridge-server.mjs >> /tmp/claude-bridge-server.log 2>&1 </dev/null`.
 
 ### OPS-3 — cloudflared can die / silently lose its edge connection
-- `bridge.houserbot.com` returning Cloudflare `530`/`1033` while the bridge is fine = cloudflared exited or disconnected. It is not supervised by `install.sh`. Relaunch it; for always-on, run under systemd/launchd `Restart=always` and poll its metrics `/ready` (don't trust `pgrep`). (G2 in the findings doc.)
+- `bridge.houserbot.com` returning Cloudflare `530`/`1033` while the bridge is fine = cloudflared exited or disconnected. It is not supervised by `claude-bridge`. Relaunch it; for always-on, run under systemd/launchd `Restart=always` and poll its metrics `/ready` (don't trust `pgrep`). (G2 in the findings doc.)
 
 ---
 

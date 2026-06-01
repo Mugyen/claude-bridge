@@ -1,5 +1,5 @@
 #!/bin/bash
-# Tests ./install.sh --start | --stop | --restart on a non-default port so we
+# Tests ./claude-bridge --start | --stop | --restart on a non-default port so we
 # don't disturb the real bridge.
 
 set -u
@@ -18,7 +18,7 @@ trap cleanup EXIT
 cleanup
 
 # Start
-OUT=$("$REPO_DIR/install.sh" --start 2>&1)
+OUT=$("$REPO_DIR/claude-bridge" --start 2>&1)
 sleep 1
 if echo "$OUT" | grep -q "Bridge started"; then
   pass "--start launches the bridge"
@@ -39,7 +39,7 @@ else
 fi
 
 # Start again (idempotent — should detect already-running)
-OUT=$("$REPO_DIR/install.sh" --start 2>&1)
+OUT=$("$REPO_DIR/claude-bridge" --start 2>&1)
 if echo "$OUT" | grep -q "already running"; then
   pass "--start is idempotent (detects already-running)"
 else
@@ -60,7 +60,7 @@ wait "$dup_pid" 2>/dev/null
 rm -f /tmp/claude-bridge-eaddr-test.log
 
 # Stop
-OUT=$("$REPO_DIR/install.sh" --stop 2>&1)
+OUT=$("$REPO_DIR/claude-bridge" --stop 2>&1)
 sleep 1
 if echo "$OUT" | grep -q "Bridge stopped"; then
   pass "--stop reports success"
@@ -75,7 +75,7 @@ else
 fi
 
 # Restart on a clean state
-OUT=$("$REPO_DIR/install.sh" --restart 2>&1)
+OUT=$("$REPO_DIR/claude-bridge" --restart 2>&1)
 sleep 1
 if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
   pass "--restart leaves the bridge running"
@@ -85,15 +85,15 @@ fi
 
 # ── BUG-2: lifecycle manages a bridge with NO install PID file (foreign/unmanaged) ──
 # Uses the ungated /health/ping for liveness so it's robust even when a token is set.
-"$REPO_DIR/install.sh" --start >/dev/null 2>&1; sleep 1
+"$REPO_DIR/claude-bridge" --start >/dev/null 2>&1; sleep 1
 rm -f /tmp/claude-bridge.pid   # simulate an unmanaged bridge the installer doesn't track
-OUT=$("$REPO_DIR/install.sh" start 2>&1)
+OUT=$("$REPO_DIR/claude-bridge" start 2>&1)
 if echo "$OUT" | grep -qi "already running"; then
   pass "start detects a live unmanaged bridge (no PID file) → already running, no silent abort"
 else
   fail "start vs unmanaged bridge: $OUT"
 fi
-"$REPO_DIR/install.sh" restart --force >/dev/null 2>&1; sleep 1
+"$REPO_DIR/claude-bridge" restart --force >/dev/null 2>&1; sleep 1
 if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
   pass "restart --force replaces an unmanaged listener (BUG-2)"
 else
@@ -101,7 +101,7 @@ else
 fi
 
 # Final stop for cleanup
-"$REPO_DIR/install.sh" --stop >/dev/null 2>&1
+"$REPO_DIR/claude-bridge" --stop >/dev/null 2>&1
 
 echo ""
 echo "$PASS passed, $FAIL failed"
