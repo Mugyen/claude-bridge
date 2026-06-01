@@ -31,8 +31,12 @@ if [ "$(cat "$MCP_FILE")" = "no" ]; then
   exit 0
 fi
 
-HEALTH=$(curl -sf --max-time 1 "http://localhost:${PORT}/health" 2>/dev/null)
-[ -z "$HEALTH" ] && exit 0
+# Liveness via the UNGATED ping. The full /health is token-gated when sharing is
+# on (hub/spoke), so a -sf /health would 401 and wrongly suppress this hook —
+# which is what stopped sessions auto-registering once a token was present
+# (lesson #26). Registration state comes from /whoami (also ungated, keyed on
+# session_id), not from scanning /health's session list.
+curl -sf --max-time 1 "http://localhost:${PORT}/health/ping" >/dev/null 2>&1 || exit 0
 
 STAMP="/tmp/claude-bridge-${SESSION_ID}.confirmed"
 
@@ -40,30 +44,20 @@ WHOAMI=$(curl -sf --max-time 1 "http://localhost:${PORT}/whoami?session_id=${SES
 NAME=$(echo "$WHOAMI" | jq -r '.name // empty' 2>/dev/null)
 
 if [ -n "$NAME" ]; then
-  IS_ACTIVE=$(echo "$HEALTH" | jq -r --arg n "$NAME" '.sessions | map(select(.name == $n)) | length' 2>/dev/null)
-  if [ "$IS_ACTIVE" != "0" ]; then
-    # We're registered and active. Have we already confirmed?
-    if [ -f "$STAMP" ]; then
-      exit 0  # silent: already confirmed
-    fi
-
-    # First confirmation — list peers (other active sessions)
-    PEERS=$(echo "$HEALTH" | jq -r --arg me "$NAME" \
-      '[.sessions[] | select(.name != $me) | "\"\(.name)\"" + (if .description != "" then " (\(.description))" else "" end)] | if length == 0 then "(none yet)" else join(", ") end' 2>/dev/null)
-
-    MSG="🔗 claude-bridge: You're registered as \"${NAME}\".
-Other sessions online: ${PEERS}.
-Use list_sessions(), get_thread(with_session=...), or ask(to=...) to interact. This message will not appear again unless your registration is lost."
-
-    touch "$STAMP"
-    jq -n --arg m "$MSG" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $m}}'
-    exit 0
-  else
-    # Registration was lost (bridge restart, SSE drop, etc.) — drop stamp so
-    # the next confirmation fires after re-registration.
-    rm -f "$STAMP"
+  # Registered (the bridge knows this session_id). Confirm once.
+  if [ -f "$STAMP" ]; then
+    exit 0  # silent: already confirmed
   fi
+  MSG="🔗 claude-bridge: You're registered as \"${NAME}\".
+Use list_sessions() to see who else is online, get_thread(with_session=...), or ask(to=...) to interact. This message will not appear again unless your registration is lost."
+  touch "$STAMP"
+  jq -n --arg m "$MSG" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $m}}'
+  exit 0
 fi
+
+# Not registered (the bridge doesn't know this session_id) — drop any stale stamp
+# so the confirmation fires again after re-registration.
+rm -f "$STAMP"
 
 # Not registered → inject "register first" instruction
 NAME_FILE="/tmp/claude-bridge-${SESSION_ID}.name"

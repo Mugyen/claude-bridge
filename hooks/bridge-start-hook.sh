@@ -35,8 +35,12 @@ if [ "$(cat "$MONITOR_FILE" 2>/dev/null)" = "on" ]; then
   echo "rearm" > "$MONITOR_FILE"
 fi
 
-# Check if bridge is running — if not, skip silently
-if ! curl -sf --max-time 1 "http://localhost:${PORT}/health" > /dev/null 2>&1; then
+# Check if bridge is running — if not, skip silently. Use the UNGATED /health/ping:
+# the full /health is TOKEN-GATED when sharing is on (hub OR spoke), so a `-sf`
+# probe of /health returns 401 and would make this hook wrongly conclude "bridge
+# down" and skip the registration nudge — which is exactly what stops sessions
+# auto-registering once a token is present (lesson #26).
+if ! curl -sf --max-time 1 "http://localhost:${PORT}/health/ping" > /dev/null 2>&1; then
   exit 0
 fi
 

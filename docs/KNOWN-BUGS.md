@@ -58,5 +58,10 @@ move items to "Fixed" (with the commit) when landed.
 
 ---
 
+## Fixed — BUG-5: hooks used the token-gated `/health` for liveness → sessions stopped auto-registering/auto-arming
+- **Symptom (field-reported):** once the local bridge had a token (sharing on — hub OR spoke), new Claude sessions **no longer auto-registered** on the bridge, and **no longer got nudged to arm the idle-listener (Monitor)**.
+- **Root cause:** `bridge-start-hook.sh`, `bridge-prompt-hook.sh`, and `bridge-hook.sh` probed liveness with `curl -sf .../health`. The full `/health` is **token-gated when sharing is on**, so `-sf` saw `401` → the hooks concluded "bridge down" and exited silently. SessionStart skipped the register nudge (→ no auto-register), and PostToolUse never reached the Monitor nudge (it only fires for a registered session). Two hooks also parsed `/health`'s `.sessions` list, which is unavailable token-free. Pre-federation (standalone, no token) `/health` was open, so it only broke after a token was introduced. This is lesson #26 (liveness must use the ungated `/health/ping`) which the hooks were never updated to follow.
+- **Fix:** all hook liveness checks now use the ungated **`/health/ping`**; registration state comes from the ungated **`/whoami?session_id=`** (keyed on session_id) instead of scanning `/health`'s session list — so hooks stay token-free (they must never carry the token). Regression test: `tests/test-hook-token-liveness.sh` (starts a token-bearing bridge, asserts all three hooks still emit). Verified live against the running spoke bridge.
+
 ## Fixed (this branch)
 - G1 spoke heartbeat, G3 qualified-notify lossless, G4 in-flight re-push, G6 `@node` case-insensitivity, S3/S4/S6 (rate limit / body cap / node+session caps / full-UUID ids / `injectRemote` allowlist), info-leak (description-strip, log `0600`+rotate, no content in log), `reply()`/`register()` arg validation. See CHANGELOG `[Unreleased]`.

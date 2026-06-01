@@ -41,6 +41,10 @@ emit_context() {
 # Resolve canonical name. Bridge is the source of truth.
 WHOAMI=$(curl -sf --max-time 1 "http://localhost:${PORT}/whoami?session_id=${SESSION_ID}" 2>/dev/null)
 SESSION=$(echo "$WHOAMI" | jq -r '.name // empty' 2>/dev/null)
+# Did the BRIDGE know us (vs only the local .name file)? /whoami is ungated and
+# keyed on session_id — the token-free signal for "registered on this live bridge
+# instance" — used below instead of scanning the token-gated /health (lesson #26).
+WHOAMI_OK=0; [ -n "$SESSION" ] && WHOAMI_OK=1
 
 if [ -z "$SESSION" ]; then
   NAME_FILE="/tmp/claude-bridge-${SESSION_ID}.name"
@@ -49,10 +53,11 @@ if [ -z "$SESSION" ]; then
   fi
 fi
 
-# Not registered yet — prompt registration with claude_session_id.
+# Not registered yet — prompt registration with claude_session_id. Liveness via
+# the UNGATED ping (a -sf /health would 401 when sharing is on and wrongly
+# suppress this prompt → no auto-register).
 if [ -z "$SESSION" ]; then
-  HEALTH=$(curl -sf --max-time 1 "http://localhost:${PORT}/health" 2>/dev/null)
-  if [ -n "$HEALTH" ]; then
+  if curl -sf --max-time 1 "http://localhost:${PORT}/health/ping" >/dev/null 2>&1; then
     DIR_NAME=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
     SUFFIX=$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 4)
     SUGGESTED="${DIR_NAME}-${SUFFIX}"
@@ -66,16 +71,14 @@ IMPORTANT: pass claude_session_id exactly as shown so the bridge can find you la
   exit 0
 fi
 
-# Self-heal: if bridge no longer lists us, re-register.
-HEALTH=$(curl -sf --max-time 1 "http://localhost:${PORT}/health" 2>/dev/null)
-if [ -n "$HEALTH" ]; then
-  IS_REGISTERED=$(echo "$HEALTH" | jq -r --arg n "$SESSION" '.sessions | map(select(.name == $n)) | length' 2>/dev/null)
-  if [ "$IS_REGISTERED" = "0" ]; then
-    MSG="🔗 claude-bridge: Your registration was lost (likely an SSE reconnect or bridge restart).
+# Self-heal: we have a name from the local .name file but the BRIDGE doesn't know
+# us (/whoami returned empty → likely a bridge restart or SSE drop). Re-register.
+# Uses /whoami + the ungated /health/ping — never the token-gated /health.
+if [ "$WHOAMI_OK" = 0 ] && curl -sf --max-time 1 "http://localhost:${PORT}/health/ping" >/dev/null 2>&1; then
+  MSG="🔗 claude-bridge: Your registration was lost (likely an SSE reconnect or bridge restart).
 → Call register(name=\"${SESSION}\", description=\"...\", claude_session_id=\"${SESSION_ID}\") to reconnect."
-    emit_context "$MSG"
-    exit 0
-  fi
+  emit_context "$MSG"
+  exit 0
 fi
 
 # ── Assemble the context to inject: pending questions, plus a one-time nudge to
