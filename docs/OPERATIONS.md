@@ -14,6 +14,7 @@ real deploys. For the conceptual docs see `USAGE.md`; for open issues see
 - **Kill a bridge by its LISTENER only:** `lsof -ti:PORT -sTCP:LISTEN | xargs kill`. Never `lsof -ti:PORT | xargs kill` — that also returns connected Claude-session PIDs (OPS-2).
 - **The fixed code lives on `feature/cross-network-federation`.** `git checkout` it on every machine before installing, or you'll run the old code.
 - After any **token-changing** `--join`/`--share`, you currently must `--restart` (BUG-3).
+- **`git pull` does NOT update a running bridge.** The server loads `bridge-server.mjs` once at startup — after pulling a *server* change, **restart the bridge on that node** (`./install.sh --restart`, or kill the listener + `--start`). Hooks are the exception: they're re-read on every invocation, so hook fixes go live on pull alone. Each machine has its own checkout, so `git pull` on **every** node, then restart its bridge. Symptom of a stale server: it broadcasts an old roster — cross-node **descriptions leak** and remote sessions are **mis-tagged `local`** (OPS-4).
 
 ---
 
@@ -116,3 +117,4 @@ curl -s -H "X-Bridge-Token: <TOKEN>" -X POST -d '{"node":"x"}' https://<host>/li
 | messages reach the hub but not back to a spoke | quick-tunnel SSE buffering | use a named tunnel (§4) |
 | daemon won't stay up over ssh | plain `&`/`nohup` doesn't detach (OPS-1) | `setsid -f … </dev/null >log 2>&1` |
 | killing `:7400` killed a Claude session | used `lsof -ti:7400` (incl. clients) (OPS-2) | add `-sTCP:LISTEN` |
+| remote sessions show as `node:"local"` and/or carry descriptions | that node's bridge is running **stale code** (pulled but never restarted) — broadcasts the old roster format (OPS-4) | restart the bridge on that node so it loads the pulled `bridge-server.mjs` |

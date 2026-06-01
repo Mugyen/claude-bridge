@@ -46,6 +46,11 @@ move items to "Fixed" (with the commit) when landed.
 ### OPS-2 — `lsof -ti:7400 | xargs kill` kills your Claude sessions
 - `lsof -ti:PORT` returns the listener **and every connected client** (Claude MCP sockets). Always add `-sTCP:LISTEN` to target only the server. Same self-foot-gun family as the `pkill -f bridge-server.mjs` self-match (use the `[b]racket` trick / kill by PID).
 
+### OPS-4 — `git pull` doesn't update a running bridge (stale-server roster anomaly)
+- **Symptom:** after pulling code on a node, the bridge still behaves like the old version. Concretely (real incident): a hub bridge started before the description-strip + roster commits kept broadcasting the **old roster** even after `git pull` — so on the *spoke* side, that hub's remote sessions showed `node:"local"` **and** carried descriptions (which the current code strips from the cross-node roster). The proof was the asymmetry: the current side advertised with empty descriptions, the stale side broadcast them.
+- **Root cause:** the server loads `bridge-server.mjs` **once at startup**; `git pull` updates the file on disk but not the running process. (Hooks differ — they're re-exec'd per invocation, so hook fixes go live on pull alone.)
+- **Fix / habit:** after pulling a *server* change, **restart the bridge on that node** (`./install.sh --restart`, or kill the listener `lsof -ti:PORT -sTCP:LISTEN | xargs kill` / `pkill -f '[b]ridge-server.mjs'` then `--start`). A stale node ALSO silently lacks every server-side fix since it started (heartbeat, lossless reconnect, hardening), so this isn't just cosmetic. Note: `./install.sh --start` over ssh after a kill proved flaky (BUG-1/2 + ssh-detach) — the robust manual start is `setsid -f node bridge-server.mjs >> /tmp/claude-bridge-server.log 2>&1 </dev/null`.
+
 ### OPS-3 — cloudflared can die / silently lose its edge connection
 - `bridge.houserbot.com` returning Cloudflare `530`/`1033` while the bridge is fine = cloudflared exited or disconnected. It is not supervised by `install.sh`. Relaunch it; for always-on, run under systemd/launchd `Restart=always` and poll its metrics `/ready` (don't trust `pgrep`). (G2 in the findings doc.)
 
