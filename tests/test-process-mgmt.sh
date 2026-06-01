@@ -26,7 +26,7 @@ else
   fail "--start did not report success (got: $OUT)"
 fi
 
-if curl -sf --max-time 1 "http://localhost:$PORT/health" >/dev/null 2>&1; then
+if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
   pass "health endpoint responds after --start"
 else
   fail "health endpoint did not respond after --start"
@@ -68,7 +68,7 @@ else
   fail "--stop did not report success (got: $OUT)"
 fi
 
-if curl -sf --max-time 1 "http://localhost:$PORT/health" >/dev/null 2>&1; then
+if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
   fail "health endpoint still responds after --stop"
 else
   pass "health endpoint stops responding after --stop"
@@ -77,7 +77,7 @@ fi
 # Restart on a clean state
 OUT=$("$REPO_DIR/install.sh" --restart 2>&1)
 sleep 1
-if curl -sf --max-time 1 "http://localhost:$PORT/health" >/dev/null 2>&1; then
+if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
   pass "--restart leaves the bridge running"
 else
   fail "--restart did not leave the bridge running (got: $OUT)"
