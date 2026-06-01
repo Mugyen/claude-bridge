@@ -41,11 +41,54 @@ if [ -z "$SESSION" ]; then
 fi
 [ -z "$SESSION" ] && exit 0
 
-# Any pending questions?
+# Any pending questions? If so, block and feed them back (highest priority).
 PENDING=$(curl -sf --max-time 1 "http://localhost:${PORT}/pending?session=${SESSION}" 2>/dev/null)
-[ -z "$PENDING" ] && exit 0
+if [ -n "$PENDING" ]; then
+  # `decision: block` is the documented way to keep the model running with `reason`
+  # as additional context.
+  jq -n --arg r "$PENDING" '{decision: "block", reason: $r}'
+  exit 0
+fi
 
-# Block stop and feed the question to Claude. The JSON `decision: block` form is
-# the documented way to keep the model running with `reason` as additional context.
-jq -n --arg r "$PENDING" '{decision: "block", reason: $r}'
+# ── Arm-enforcement (lesson #18, now enforced not just nudged) ────────────────
+# An ENGAGED session (it asked or replied) that has NOT armed its idle-listener
+# would silently miss any question arriving while it sits idle. The advisory
+# PostToolUse nudge is reliably skipped by ASKERS — it arrives bundled with the
+# answer they were waiting on, so the model treats it as FYI. At Stop the answer
+# is already delivered, so this lands cleanly, and `decision: block` MAKES the
+# agent act. Loop-safe: block at most ONCE per engagement episode (.armblocked
+# marker, set here, cleared by the PostToolUse hook on the next ask/reply).
+# Respects the .monitor stamp: "on" = already armed, "off" = user-disabled.
+ENGAGED_FILE="/tmp/claude-bridge-${SESSION_ID}.engaged"
+MONITOR_FILE="/tmp/claude-bridge-${SESSION_ID}.monitor"
+ARMBLOCK_FILE="/tmp/claude-bridge-${SESSION_ID}.armblocked"
+MONITOR_STATE=$(cat "$MONITOR_FILE" 2>/dev/null)
+if [ -f "$ENGAGED_FILE" ] && [ "$MONITOR_STATE" != "on" ] && [ "$MONITOR_STATE" != "off" ] && [ ! -f "$ARMBLOCK_FILE" ]; then
+  touch "$ARMBLOCK_FILE"
+  INTERVAL="${CC_BRIDGE_MONITOR_INTERVAL:-25}"
+  REASON="🔗 claude-bridge: You engaged on the bridge (asked or replied) but have NOT armed your idle-listener — so any question that arrives while you sit idle will be MISSED until the user pokes you. Arm it NOW before finishing:
+
+→ Call the Monitor tool with persistent: true, description: \"incoming bridge messages for ${SESSION}\", and this exact command:
+
+prev=\"\"
+while true; do
+  out=\$(curl -sf \"http://localhost:${PORT}/pending?session=${SESSION}&peek=1\" 2>/dev/null || true)
+  if [ -n \"\$out\" ]; then
+    ids=\$(printf '%s' \"\$out\" | grep -o 'id: [a-z0-9-]*' | sort)
+    if [ \"\$ids\" != \"\$prev\" ]; then
+      printf '%s\\n' \"\$out\" | grep -E 'Question from|NEW QUESTION|NOTICE from|id:'
+      prev=\"\$ids\"
+    fi
+  fi
+  sleep ${INTERVAL}
+done
+
+This costs ZERO tokens while your inbox is empty — the loop only wakes you when a NEW message id appears; then call check_inbox().
+The instant the Monitor is running, run:  echo on > ${MONITOR_FILE}
+Then tell the user one line, e.g. \"Armed bridge idle-listener (polling ${INTERVAL}s).\"
+(If you genuinely don't want it:  echo off > ${MONITOR_FILE}  to disable auto-arm for this session.)"
+  jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
+  exit 0
+fi
+
 exit 0

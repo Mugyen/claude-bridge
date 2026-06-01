@@ -170,6 +170,52 @@ else
 fi
 rm -rf "$START_STUB"
 
+# ── Stop-hook arm-enforcement (lesson #18 enforced) ──────────────────────────
+# An engaged-but-unarmed session is blocked ONCE per engagement at turn-end so an
+# asker can't silently skip arming. Runs without a live bridge (name from .name,
+# /pending empty); enforcement keys purely on the marker files.
+STOP_HOOK="$REPO_DIR/hooks/bridge-stop-hook.sh"
+ENGAGED_FILE="/tmp/claude-bridge-${FAKE_ID}.engaged"
+ARMBLOCK_FILE="/tmp/claude-bridge-${FAKE_ID}.armblocked"
+stop_run() { printf '{"session_id":"%s"}' "$FAKE_ID" | "$STOP_HOOK" 2>&1; }
+
+# Case 13: engaged + unarmed + no prior block → blocks to arm + marks .armblocked
+rm -f "$MONITOR_FILE" "$ARMBLOCK_FILE"; touch "$ENGAGED_FILE"
+OUT=$(stop_run)
+if echo "$OUT" | grep -q '"decision"' && echo "$OUT" | grep -q "idle-listener" && [ -f "$ARMBLOCK_FILE" ]; then
+  pass "Stop: engaged + unarmed → blocks turn-end to arm + sets .armblocked"
+else
+  fail "Stop should block engaged+unarmed: output='$OUT' armblock=$([ -f "$ARMBLOCK_FILE" ] && echo y || echo n)"
+fi
+
+# Case 14: second Stop in the SAME episode (.armblocked present) → no re-block (loop-safe)
+OUT=$(stop_run)
+[ -z "$OUT" ] && pass "Stop: second stop same episode → no re-block (loop-safe)" || fail "Stop should not re-block same episode: '$OUT'"
+
+# Case 15: armed (on) → no block
+rm -f "$ARMBLOCK_FILE"; echo on > "$MONITOR_FILE"
+OUT=$(stop_run)
+[ -z "$OUT" ] && pass "Stop: engaged but armed (on) → no block" || fail "Stop should not block when armed: '$OUT'"
+
+# Case 16: disabled (off) → no block
+echo off > "$MONITOR_FILE"
+OUT=$(stop_run)
+[ -z "$OUT" ] && pass "Stop: engaged but disabled (off) → no block" || fail "Stop should not block when off: '$OUT'"
+
+# Case 17: not engaged → no block
+rm -f "$MONITOR_FILE" "$ENGAGED_FILE" "$ARMBLOCK_FILE"
+OUT=$(stop_run)
+[ -z "$OUT" ] && pass "Stop: not engaged → no block" || fail "Stop should not block an unengaged session: '$OUT'"
+
+# Case 18: PostToolUse ask/reply sets .engaged + clears .armblocked (re-enables enforcement)
+rm -f "$MONITOR_FILE" "$ENGAGED_FILE"; touch "$ARMBLOCK_FILE"
+run "mcp__bridge__reply" >/dev/null 2>&1
+if [ -f "$ENGAGED_FILE" ] && [ ! -f "$ARMBLOCK_FILE" ]; then
+  pass "PostToolUse ask/reply marks .engaged + clears .armblocked (re-arms Stop enforcement)"
+else
+  fail "reply should set engaged + clear armblock: engaged=$([ -f "$ENGAGED_FILE" ] && echo y || echo n) armblock=$([ -f "$ARMBLOCK_FILE" ] && echo y || echo n)"
+fi
+
 echo ""
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

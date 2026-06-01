@@ -110,6 +110,17 @@ case "$MONITOR_STATE" in
   rearm)  NUDGE_MONITOR=1 ;;                   # resumed while armed → re-arm on any tool
   *) case "$TOOL" in mcp__bridge__ask|mcp__bridge__reply) NUDGE_MONITOR=1 ;; esac ;;
 esac
+
+# Mark engagement on ask/reply so the Stop hook can ENFORCE arming at turn-end —
+# askers reliably skip this advisory nudge (it arrives bundled with the answer
+# they were waiting on), so the Stop hook blocks once per engagement until armed.
+# Clearing .armblocked on each fresh engagement re-enables that one-shot block.
+case "$TOOL" in
+  mcp__bridge__ask|mcp__bridge__reply)
+    touch "/tmp/claude-bridge-${SESSION_ID}.engaged"
+    rm -f "/tmp/claude-bridge-${SESSION_ID}.armblocked"
+    ;;
+esac
 if [ "$NUDGE_MONITOR" = 1 ]; then
       INTERVAL="${CC_BRIDGE_MONITOR_INTERVAL:-25}"
       NUDGE="🔗 claude-bridge: You're now active on the bridge. Arm your idle-listener so you can answer questions that arrive while you sit idle — without it, a dormant session never sees new questions until the user pokes it. (This reminder repeats on every ask/reply until you actually arm it.)
