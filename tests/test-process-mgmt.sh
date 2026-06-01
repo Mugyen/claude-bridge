@@ -83,6 +83,23 @@ else
   fail "--restart did not leave the bridge running (got: $OUT)"
 fi
 
+# ── BUG-2: lifecycle manages a bridge with NO install PID file (foreign/unmanaged) ──
+# Uses the ungated /health/ping for liveness so it's robust even when a token is set.
+"$REPO_DIR/install.sh" --start >/dev/null 2>&1; sleep 1
+rm -f /tmp/claude-bridge.pid   # simulate an unmanaged bridge the installer doesn't track
+OUT=$("$REPO_DIR/install.sh" start 2>&1)
+if echo "$OUT" | grep -qi "already running"; then
+  pass "start detects a live unmanaged bridge (no PID file) → already running, no silent abort"
+else
+  fail "start vs unmanaged bridge: $OUT"
+fi
+"$REPO_DIR/install.sh" restart --force >/dev/null 2>&1; sleep 1
+if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
+  pass "restart --force replaces an unmanaged listener (BUG-2)"
+else
+  fail "restart --force did not leave a bridge running"
+fi
+
 # Final stop for cleanup
 "$REPO_DIR/install.sh" --stop >/dev/null 2>&1
 

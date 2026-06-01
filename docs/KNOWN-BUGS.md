@@ -9,7 +9,15 @@ move items to "Fixed" (with the commit) when landed.
 
 ---
 
-## Open — install.sh / lifecycle
+## ✅ FIXED — install.sh / lifecycle (BUG-1–4)
+All four landed with the `claude-bridge` CLI work (`docs/specs/claude-bridge-cli.md`):
+`start`/`stop`/`restart` act on the actual `:7400` listener (BUG-1/2, `restart --force`
+to replace a foreign/stale one; no more silent `cat $PID_FILE` abort); `join` restarts
+on a token change (BUG-3); `share --named-tunnel` closes a mismatched tunnel first
+(BUG-4). Regression: `test-process-mgmt.sh` (force/unmanaged), `test-share-flags.sh`,
+`test-cli.sh`. Detail of each below for reference.
+
+
 
 ### BUG-1 — `--start` silently does nothing when a *foreign* server holds the port
 - **Symptom:** `./install.sh --start` prints nothing and the new bridge isn't running; an unrelated/older bridge is still on `:7400`.

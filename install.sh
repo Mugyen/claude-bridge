@@ -40,38 +40,30 @@ warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 ACTION="install"
 ARG2="${2:-}"
 ARG3="${3:-}"
+# Accept BOTH the new verb form (claude-bridge <verb>) and the original --flags
+# (back-compat — nothing that scripts/docs used before breaks).
 case "${1:-}" in
-  --uninstall)   ACTION="uninstall" ;;
-  --check)       ACTION="check" ;;
-  --start)       ACTION="start" ;;
-  --stop)        ACTION="stop" ;;
-  --restart)     ACTION="restart" ;;
-  --share)       ACTION="share" ;;
-  --join)        ACTION="join" ;;
-  --unlink)      ACTION="unlink" ;;
-  --stop-share)  ACTION="stop-share" ;;
-  --help|-h)
-    echo "Usage: ./install.sh [command]"
-    echo ""
-    echo "  (no args)         Install hooks, MCP server, skill, and Desktop config"
-    echo "  --uninstall       Remove all claude-bridge configuration"
-    echo "  --check           Verify installation without changing anything"
-    echo "  --start           Start the bridge server (writes PID to $PID_FILE)"
-    echo "  --stop            Stop the bridge server (graceful SIGTERM)"
-    echo "  --restart         Stop then start the bridge server"
-    echo ""
-    echo "Cross-network federation (link bridges across machines):"
-    echo "  --share [--named-tunnel <hostname>] [--node <id>]"
-    echo "                    Become a hub: generate a token, open a tunnel, print a join link."
-    echo "                    Default tunnel = Cloudflare quick tunnel (ephemeral URL, zero setup)."
-    echo "                    --named-tunnel uses a pre-configured cloudflared named tunnel (stable URL)."
-    echo "  --join '<link>'   Become a spoke: link your local bridge to a hub via its join link"
-    echo "                    (https://host#token). Sessions stay on localhost."
-    echo "  --unlink          Spoke leaves its hub (local sessions unaffected)."
-    echo "  --stop-share      Hub stops sharing: closes the tunnel, keeps the bridge + token."
-    exit 0
-    ;;
+  ""|install)               ACTION="install" ;;
+  reinstall)                ACTION="install" ;;
+  --uninstall|uninstall)    ACTION="uninstall" ;;
+  --check|check|status)     ACTION="check" ;;
+  --start|start)            ACTION="start" ;;
+  --stop|stop)              ACTION="stop" ;;
+  --restart|restart)        ACTION="restart" ;;
+  --share|share)            ACTION="share" ;;
+  --join|join)              ACTION="join" ;;
+  --unlink|unlink)          ACTION="unlink" ;;
+  --stop-share|stop-share)  ACTION="stop-share" ;;
+  doctor)                   ACTION="doctor" ;;
+  update|upgrade)           ACTION="update" ;;
+  logs|log)                 ACTION="logs" ;;
+  version|--version|-v)     ACTION="version" ;;
+  help|--help|-h)           ACTION="help" ;;
+  *) echo "Unknown command: '${1:-}'. Run 'claude-bridge help'." >&2; exit 2 ;;
 esac
+# Global --force flag (start/stop/restart replace a foreign/stale listener).
+FORCE=0
+case " $* " in *" --force "*) FORCE=1 ;; esac
 
 # ── Version + manifest tracking ────────────────────────────────────────────
 #
@@ -850,8 +842,179 @@ stop_share() {
   fed_reload && ok "Hub mode disabled (token kept; bridge still running, sessions preserved)"
 }
 
+# ── CLI: logging, doctor, update, logs, version, help, PATH symlink ──────────
+
+CLI_LOG="${HOME}/.claude/claude-bridge.log"
+
+# Append one structured line per invocation (created 0600; rotated at ~5MB).
+log_action() {
+  local result="$1"
+  mkdir -p "$(dirname "$CLI_LOG")" 2>/dev/null || true
+  if [ -f "$CLI_LOG" ] && [ "$(wc -c < "$CLI_LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    mv -f "$CLI_LOG" "$CLI_LOG.1" 2>/dev/null || true
+  fi
+  touch "$CLI_LOG" 2>/dev/null && chmod 600 "$CLI_LOG" 2>/dev/null || true
+  printf '%s  %s  → %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$ACTION ${CLI_ARGS}" "$result" >> "$CLI_LOG" 2>/dev/null || true
+}
+
+# Cross-platform mtime in epoch seconds.
+_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+# Symlink this script onto PATH as `claude-bridge`. Auto: /usr/local/bin (sudo if
+# needed), else ~/.local/bin. Idempotent. Registered in the manifest for uninstall.
+symlink_cli() {
+  local self target
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  if command -v claude-bridge >/dev/null 2>&1 && [ "$(readlink "$(command -v claude-bridge)" 2>/dev/null)" = "$self" ]; then
+    ok "CLI on PATH: $(command -v claude-bridge) → claude-bridge"
+    return 0
+  fi
+  if [ -w /usr/local/bin ] 2>/dev/null; then target=/usr/local/bin/claude-bridge
+  elif command -v sudo >/dev/null 2>&1 && [ -d /usr/local/bin ]; then
+    if sudo ln -sf "$self" /usr/local/bin/claude-bridge 2>/dev/null; then
+      manifest_add FILE /usr/local/bin/claude-bridge; ok "CLI installed: /usr/local/bin/claude-bridge → run 'claude-bridge help'"; return 0
+    fi
+    target="$HOME/.local/bin/claude-bridge"   # sudo failed → fall back
+  else target="$HOME/.local/bin/claude-bridge"; fi
+  mkdir -p "$(dirname "$target")"
+  ln -sf "$self" "$target"
+  manifest_add FILE "$target"
+  ok "CLI installed: $target → run 'claude-bridge help'"
+  case ":$PATH:" in *":$(dirname "$target"):"*) ;; *) warn "Add $(dirname "$target") to your PATH to use 'claude-bridge' from anywhere";; esac
+}
+
+do_update() {
+  echo ""
+  echo "claude-bridge update (repo v$VERSION)"
+  echo "===================="
+  echo ""
+  if ! git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    fail "Not a git checkout ($REPO_DIR) — can't pull. Update manually."
+    return 1
+  fi
+  local branch; branch=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  ok "Pulling latest on '$branch'..."
+  git -C "$REPO_DIR" pull --ff-only 2>&1 | sed 's/^/    /' || { fail "git pull failed (local changes? resolve and retry)"; return 1; }
+  echo ""
+  # Reinstall hooks/MCP/skill/symlink, then restart so the SERVER picks up the new
+  # code — a pull updates files, NOT the running process (OPS-4).
+  ACTION="install" run_install_steps
+  echo ""
+  if fed_bridge_running; then
+    warn "Restarting the bridge to apply the new server code (pull ≠ restart)..."
+    stop_bridge; start_bridge
+  else
+    ok "Bridge not running — 'claude-bridge start' when ready."
+  fi
+}
+
+show_logs() {
+  if [ ! -f "$CLI_LOG" ]; then warn "No CLI log yet ($CLI_LOG)"; return; fi
+  case " $* " in *" -f "*|*" --follow "*) tail -f "$CLI_LOG" ;; *) tail -n 40 "$CLI_LOG" ;; esac
+}
+
+show_version() {
+  echo "claude-bridge v$VERSION (repo)"
+  if [ -f "$VERSION_FILE" ]; then echo "installed: v$(cat "$VERSION_FILE")"; fi
+  local ping; ping=$(curl -sf --max-time 1 "http://localhost:${PORT}/health/ping" 2>/dev/null || true)
+  if [ -n "$ping" ]; then echo "running:   $(echo "$ping" | jq -rc '{role,node,sharing}' 2>/dev/null)"; else echo "running:   (bridge not up)"; fi
+}
+
+doctor() {
+  echo ""
+  echo "claude-bridge doctor (repo v$VERSION)"
+  echo "===================="
+  echo ""
+  echo "Prerequisites:" ; check_prereqs || true
+  echo "" ; echo "Claude Code wiring:" ; check_hooks || true; check_mcp || true; check_skill || true
+  echo "" ; echo "Bridge server:"
+  local listener; listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+  if [ -n "$listener" ] && curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
+    ok "Running (PID $listener, port $PORT)"
+    # Stale-code check: code changed after the bridge started? (pull ≠ restart, OPS-4)
+    if [ -f "$PID_FILE" ] && [ "$(_mtime "$REPO_DIR/bridge-server.mjs")" -gt "$(_mtime "$PID_FILE")" ]; then
+      warn "Running bridge is OLDER than bridge-server.mjs — run 'claude-bridge restart' to apply the latest code"
+    fi
+  elif [ -n "$listener" ]; then
+    fail "Port $PORT held by PID $listener but not serving — 'claude-bridge restart --force' to replace"
+  else
+    warn "Not running — 'claude-bridge start'"
+  fi
+  echo "" ; echo "Federation:"
+  local ping role; ping=$(curl -sf --max-time 1 "http://localhost:${PORT}/health/ping" 2>/dev/null || true)
+  role=$(echo "$ping" | jq -r '.role // empty' 2>/dev/null)
+  local drole; drole=$(cat "$ROLE_FILE" 2>/dev/null || echo "standalone")
+  if [ -n "$role" ] && [ "$role" != "$drole" ]; then
+    fail "Drift: dotfile role='$drole' but the RUNNING bridge is '$role' — a config change didn't take. Run 'claude-bridge restart'."
+  else
+    ok "Role: ${role:-$drole}${ping:+ (live)}"
+  fi
+  if [ "$drole" = "spoke" ]; then
+    local hub; hub=$(cat "$HUB_FILE" 2>/dev/null)
+    if [ -n "$hub" ] && curl -sf --max-time 6 "${hub}/health/ping" >/dev/null 2>&1; then ok "Hub reachable: $hub"
+    elif [ -n "$hub" ]; then warn "Hub NOT reachable: $hub (outage, or tunnel down on the hub)"; fi
+  fi
+  if [ "$drole" = "hub" ]; then
+    if [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE" 2>/dev/null)" 2>/dev/null; then ok "Tunnel process up: $(cat "$TUNNEL_URL_FILE" 2>/dev/null)"
+    else warn "Hub mode but no tunnel process — 'claude-bridge share' to (re)open one"; fi
+  fi
+  echo "" ; echo "Ports:"
+  local n; n=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | sort -u | wc -l | tr -d ' ')
+  [ "$n" -le 1 ] && ok "Port $PORT: ${n} listener" || fail "Port $PORT: $n listeners (conflict!)"
+  echo "" ; echo "Recent CLI errors:"
+  if [ -f "$CLI_LOG" ]; then grep -E '→ (FAIL|error)' "$CLI_LOG" 2>/dev/null | tail -3 | sed 's/^/    /' || true; ok "log: $CLI_LOG"; else ok "no CLI log yet"; fi
+  echo ""
+}
+
+print_help() {
+  cat <<HELP
+
+claude-bridge v$VERSION — multi-session bridge for Claude Code
+
+USAGE
+  claude-bridge <command> [options]      (or ./install.sh <command>)
+
+SETUP & MAINTENANCE
+  install                 Install hooks, MCP, skill, Desktop config + the CLI on PATH
+  reinstall               Same as install (idempotent)
+  update                  git pull → reinstall → restart the bridge (pull alone won't reload the server)
+  uninstall               Remove skill, MCP, hooks, configs, dotfiles, PATH symlink (leaves a running bridge — stop it explicitly)
+  doctor                  Deep health check (prereqs, running bridge, version/role drift, tunnel, ports, log)
+  status                  Quick component status
+  version                 Repo / installed / running versions
+  logs [-f]               Show (or follow) the CLI action log
+
+BRIDGE LIFECYCLE  (run from a SEPARATE terminal — not a Claude session on the bridge)
+  start                   Start the bridge
+  stop [--force]          Graceful stop (SIGTERM). --force = SIGKILL the listener.
+  restart [--force]       Stop + start. --force replaces a foreign/stale listener on the port.
+
+FEDERATION (link bridges across machines)
+  share [--named-tunnel <host>] [--node <id>]   Become a hub (auto-installs cloudflared, opens a tunnel, prints a join link)
+  join 'https://<host>#<token>'                 Become a spoke (link to a hub; sessions stay local)
+  unlink                  Spoke leaves its hub → standalone
+  stop-share              Hub stops sharing (closes the tunnel, keeps the bridge + token)
+
+Every command is logged to ~/.claude/claude-bridge.log. Old --flags still work.
+HELP
+}
+
+# Apply the core install steps (used by `install` and `update`).
+run_install_steps() {
+  chmod +x "$REPO_DIR"/hooks/*.sh
+  manifest_init
+  write_version
+  manifest_add FILE "$TOKEN_FILE"; manifest_add FILE "$ROLE_FILE"; manifest_add FILE "$HUB_FILE"; manifest_add FILE "$NODE_FILE"
+  install_hooks; install_mcp; install_skill; remove_claude_md_legacy
+  install_desktop
+  symlink_cli
+}
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
+CLI_ARGS="${*:2}"
+# Log every invocation (success OR failure) to ~/.claude/claude-bridge.log.
+trap 'log_action "exit:$?"' EXIT
 case "$ACTION" in
   install)
     echo ""
@@ -866,34 +1029,16 @@ case "$ACTION" in
     fi
     echo ""
     echo "Installing..."
-    chmod +x "$REPO_DIR"/hooks/*.sh
-    manifest_init
-    write_version
-    # Register federation config files so --uninstall removes them even if they
-    # are created later by --share/--join. (DEVELOPER.md: every install artifact
-    # is in the manifest + the hardcoded cleanup fallback.)
-    manifest_add FILE "$TOKEN_FILE"
-    manifest_add FILE "$ROLE_FILE"
-    manifest_add FILE "$HUB_FILE"
-    manifest_add FILE "$NODE_FILE"
+    run_install_steps   # hooks, MCP, skill, Desktop, version/manifest, + the claude-bridge CLI on PATH
     echo ""
-    echo "Claude Code CLI:"
-    install_hooks
-    install_mcp
-    install_skill
-    remove_claude_md_legacy
+    echo "Done! Next:"
     echo ""
-    echo "Claude Desktop App:"
-    install_desktop
+    echo "  claude-bridge start      # start the bridge"
+    echo "  claude-bridge doctor     # full health check"
+    echo "  claude-bridge help       # all commands"
     echo ""
-    echo "Done! Start the bridge:"
-    echo ""
-    echo "  ./install.sh --start"
-    echo ""
-    echo "Already-open Claude sessions need to be restarted to pick up the new MCP server."
-    echo ""
-    echo "CLI sessions auto-register. Desktop app needs a relaunch,"
-    echo "then tell it: \"Register on the bridge as 'desktop'\""
+    echo "Already-open Claude sessions need a restart to pick up the MCP server."
+    echo "CLI sessions auto-register; Desktop needs a relaunch."
     echo ""
     ;;
 
@@ -936,6 +1081,14 @@ case "$ACTION" in
     fi
     # Federation config files (hardcoded fallback in case the manifest is missing).
     rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" && ok "Federation config removed (token, role, hub, node)"
+    # Remove the claude-bridge CLI symlink from PATH (manifest handles the tracked
+    # one; this hardcoded fallback covers both install locations).
+    for cli in /usr/local/bin/claude-bridge "$HOME/.local/bin/claude-bridge"; do
+      if [ -L "$cli" ] || [ -e "$cli" ]; then
+        rm -f "$cli" 2>/dev/null || { command -v sudo >/dev/null 2>&1 && sudo rm -f "$cli" 2>/dev/null; }
+        [ -e "$cli" ] || ok "Removed CLI symlink: $cli"
+      fi
+    done
     rm -f /tmp/claude-bridge-* /tmp/cc-bridge-* /tmp/claude-bridge.pid /tmp/cc-bridge.pid
     ok "Temp files cleaned (/tmp/{claude,cc}-bridge-* incl. tunnel pid/url)"
     rm -f "$VERSION_FILE"
@@ -1021,5 +1174,25 @@ case "$ACTION" in
 
   stop-share)
     stop_share
+    ;;
+
+  doctor)
+    doctor
+    ;;
+
+  update)
+    do_update
+    ;;
+
+  logs)
+    show_logs "$@"
+    ;;
+
+  version)
+    show_version
+    ;;
+
+  help)
+    print_help
     ;;
 esac
