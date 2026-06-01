@@ -108,5 +108,6 @@ None are release-blockers *given* the docs state the trusted-group framing hones
 - ✅ **G6 (`@node` case-insensitivity)** — DONE. The `@node` part is `sanitizeNode`-normalized before matching.
 - ✅ **S3 (kind allowlist + full UUIDs), S4 (node/session caps), S6 (body cap + rate limit)** — DONE (`test-hardening.mjs`).
 - ✅ **Info-leak** — DONE: descriptions no longer cross the link by default; message content removed from the log; log `0600` + rotated.
-- ⬜ **S1/S2/S5 (node identity)** — Tier 3, in progress (TOFU per-node secret).
-- ⬜ **G2 (cloudflared supervisor/docs)**, **G5 (orphan-adoption, low)** — open; G2 is ops/docs, will document in USAGE.
+- ➖ **S1/S2/S5 (node identity)** — ACCEPTED, not engineered against (owner decision: "one shared token per hub is fine"). Per-node identity (TOFU/per-node tokens) was considered and **declined** to keep joining a one-paste op. The model is now stated honestly in USAGE "Security, honestly": one shared token = a trusted group; node ids/names are self-asserted within it; rotate the token to revoke. External/unauthenticated attackers remain fully blocked (the real bar).
+- ✅ **G2 (cloudflared supervision)** — DONE (docs): USAGE "Keeping an always-on hub up" — run cloudflared under launchd/systemd `Restart=always`, poll its metrics `/ready` (don't trust `pgrep`). cloudflared is detect-and-instruct, so this is intentionally ops/docs not bridge code.
+- ⬜ **G5 (orphan-adoption, low)** — left as documented minor behavior (a stable-named session reclaiming a pending question is sometimes desirable; changing it risks the legit reconnect-migration path).
