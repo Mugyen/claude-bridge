@@ -192,7 +192,20 @@ try {
   // ── 5. Hub HARD crash + restart → spoke reconnects via backoff, re-merges ───
   await hub.stop({ signal: "SIGKILL" });
   alice.close();
-  await sleep(800);
+  await sleep(1500);  // let spokeA detect the dropped hub link
+  // G7: with the hub down, spokeA clears its remote roster (no ghosts), and an ask
+  // to a now-unreachable remote returns FAST with "not connected" — NOT a 5-min hang
+  // (the ghost used to keep resolveTarget returning remote → the blocking ask poll
+  // would wait the full deadline).
+  const ghostList = rosterNames(await bob.call("list_sessions"));
+  assert("G7: spoke clears its remote roster when the hub link drops (no ghosts)",
+    !ghostList.some((n) => n.includes("@hub") || n.includes("@spokeb")), JSON.stringify(ghostList));
+  const t0 = Date.now();
+  const ghostAsk = await bob.call("ask", { to: "alice@hub", question: "are you a ghost?" });
+  const dt = Date.now() - t0;
+  assert("G7: ask to a downed-hub remote fails FAST with an error (not a 5-min hang)",
+    typeof ghostAsk.error === "string" && /not connected/i.test(ghostAsk.error) && dt < 10000,
+    `${dt}ms ${JSON.stringify(ghostAsk)}`);
   await hub.start();           // fresh hub, empty state, fed listener rebinds
   alice = await register(HUB, "alice", "hub session v2");
   await sleep(1000);

@@ -656,6 +656,12 @@ function onLocalRosterChange() {
 
 function scheduleSpokeReconnect() {
   if (FED.role !== "spoke") return;
+  // The hub link is down: drop the remote roster so we don't advertise GHOST
+  // remote sessions (G7). Otherwise resolveTarget would still resolve a now-
+  // unreachable remote name, and a blocking ask to it would hang the full 5-min
+  // deadline instead of failing fast with "not connected". Repopulated from the
+  // /link/register response + roster broadcast on the next successful connect.
+  if (remoteRoster.length) { remoteRoster = []; console.log(`${ts()} ⇄ hub link down — cleared remote roster (no ghosts)`); }
   if (spokeReconnectTimer) return;
   const delay = spokeReconnectDelay;
   spokeReconnectDelay = Math.min(spokeReconnectDelay * 2, 30000);
@@ -671,6 +677,7 @@ function teardownHubStream() {
   try { if (hubStream) hubStream.destroy(); } catch {}
   hubStream = null;
   hubStreamReq = null;
+  remoteRoster = []; // link torn down → no ghosts (G7)
   if (spokeReconnectTimer) { clearTimeout(spokeReconnectTimer); spokeReconnectTimer = null; }
   if (spokeHeartbeatTimer) { clearInterval(spokeHeartbeatTimer); spokeHeartbeatTimer = null; }
 }
