@@ -58,6 +58,12 @@ move items to "Fixed" (with the commit) when landed.
 
 ## Open — federation (low priority)
 
+### G7 — spoke shows a stale remote roster during a hub outage (self-heals on reconnect)
+- **Symptom:** when the hub bridge goes down (crash or stop), the spoke's `list_sessions`/`/health` keeps showing the hub's remote sessions as if present — a ghost — until the spoke reconnects. Observed live: after the VM hub was SIGKILLed, the Mac still listed `dev/f97f@agent-sandbox` though they were gone.
+- **Root cause:** on link-drop the spoke schedules a reconnect but does **not** clear `remoteRoster`; it's only replaced on the next successful roster broadcast.
+- **Impact:** cosmetic/transient — local sessions are unaffected, and the roster **self-heals on reconnect** (verified: the ghost cleared once the spoke re-linked). An `ask`/`notify` to a ghost during the outage queues (`markPendingRelay`) or times out.
+- **Candidate fix (low priority):** clear/flag `remoteRoster` when the hub stream drops (e.g., empty it on `end`/`error`, or mark entries stale), so a downed hub's sessions don't linger in the spoke's roster.
+
 ### G5 — orphan-question adoption
 - An un-answered question keeps `to:"<name>"` for 30 days; a NEW *local* session later registering under that same name inherits it as pending. Rare for auto-generated names; surprising for stable `CC_BRIDGE_SESSION` names. Left documented, not changed (touching it risks the legit reconnect-migration path).
 
