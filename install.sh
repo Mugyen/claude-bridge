@@ -445,16 +445,27 @@ check_desktop() {
 # ── Bridge server process management ──────────────────────────────────────
 
 start_bridge() {
-  if [ -f "$PID_FILE" ]; then
-    local old_pid
-    old_pid=$(cat "$PID_FILE")
-    if kill -0 "$old_pid" 2>/dev/null; then
-      warn "Bridge already running (PID $old_pid, port $PORT)"
+  # Detect what's actually on the port by its LISTENER (not just the PID file) so
+  # a bridge started any other way — or a stale/foreign holder — is handled
+  # (BUG-1/2). lsof listener-only never returns connected-client PIDs.
+  local listener
+  listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+  if [ -n "$listener" ]; then
+    if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
+      warn "Bridge already running (PID $listener, port $PORT). Use 'claude-bridge restart' to replace it."
       return
+    fi
+    # Port held but not answering as a bridge → foreign/wedged holder.
+    if [ "${FORCE:-0}" = "1" ]; then
+      warn "Port $PORT held by PID $listener (not serving) — killing (--force)"
+      kill -9 "$listener" 2>/dev/null || true; sleep 1
     else
-      rm -f "$PID_FILE"
+      fail "Port $PORT is held by PID $listener but it's not serving the bridge."
+      echo "      Run 'claude-bridge restart --force' to replace it, or free the port."
+      return 1
     fi
   fi
+  rm -f "$PID_FILE"
 
   # Keep the server log private (it can hold session names + message metadata)
   # and bounded (it grows unbounded otherwise — rotate at ~10MB on start).
@@ -481,36 +492,41 @@ start_bridge() {
     sleep 0.3
   done
 
-  if [ -n "$up" ] && [ -f "$PID_FILE" ]; then
-    ok "Bridge started (PID $(cat "$PID_FILE"), port $PORT, log: /tmp/claude-bridge-server.log)"
+  if [ -n "$up" ]; then
+    # Guard the read: the PID file is written by the server after bind; if it's
+    # momentarily absent, fall back to the spawned child pid so a failing `cat`
+    # under `set -euo pipefail` can't silently abort the script (BUG-1).
+    local started; started=$(cat "$PID_FILE" 2>/dev/null || echo "$child")
+    ok "Bridge started (PID ${started}, port $PORT, log: /tmp/claude-bridge-server.log)"
   else
-    kill "$child" 2>/dev/null
+    kill "$child" 2>/dev/null || true
     fail "Bridge failed to start on port $PORT — check /tmp/claude-bridge-server.log"
+    return 1
   fi
 }
 
 stop_bridge() {
-  if [ -f "$PID_FILE" ]; then
-    local pid
-    pid=$(cat "$PID_FILE")
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid"
-      sleep 1
-      ok "Bridge stopped (PID $pid)"
-    else
-      rm -f "$PID_FILE"
-      warn "Bridge was not running (stale PID file cleaned)"
-    fi
+  # Target the actual LISTENER on the port (handles a foreign/unmanaged bridge —
+  # BUG-2), falling back to the PID file. NEVER `lsof -ti:PORT` without
+  # -sTCP:LISTEN — that also returns connected-client PIDs (Claude sessions!).
+  local listener pid target
+  listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+  [ -f "$PID_FILE" ] && pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+  target="${listener:-${pid:-}}"
+  if [ -z "$target" ] || ! kill -0 "$target" 2>/dev/null; then
+    rm -f "$PID_FILE"
+    warn "Bridge is not running"
+    return
+  fi
+  if [ "${FORCE:-0}" = "1" ]; then
+    kill -9 "$target" 2>/dev/null || true; sleep 1
+    rm -f "$PID_FILE"
+    ok "Bridge stopped (PID $target) [forced — SIGKILL]"
   else
-    local pids
-    pids=$(lsof -ti:"$PORT" 2>/dev/null || true)
-    if [ -n "$pids" ]; then
-      echo "$pids" | xargs kill 2>/dev/null
-      sleep 1
-      ok "Bridge stopped (found by port $PORT)"
-    else
-      warn "Bridge is not running"
-    fi
+    kill "$target" 2>/dev/null || true   # graceful SIGTERM → server sends event:close
+    sleep 1
+    rm -f "$PID_FILE"
+    ok "Bridge stopped (PID $target)"
   fi
 }
 
@@ -692,16 +708,25 @@ share_hub() {
   local token
   token=$(cat "$TOKEN_FILE")
 
-  # If a tunnel is already running, just reprint the current join link.
+  # If a tunnel is already running, reuse it ONLY if it matches the request
+  # (BUG-4): no --named-tunnel → reuse any; --named-tunnel H → reuse only if the
+  # running URL is already https://H, otherwise close it and start the requested
+  # one (the old guard reused any tunnel and silently ignored --named-tunnel).
   if [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
     local existing
     existing=$(cat "$TUNNEL_URL_FILE")
-    ok "Tunnel already open: $existing"
-    echo ""
-    echo "  Share this ONE command:"
-    echo "    ./install.sh --join '${existing}#${token}'"
-    echo ""
-    return
+    if [ -z "$named_tunnel" ] || [ "$existing" = "https://${named_tunnel}" ]; then
+      ok "Tunnel already open: $existing"
+      echo ""
+      echo "  Share this ONE command:"
+      echo "    ./install.sh --join '${existing}#${token}'"
+      echo ""
+      return
+    fi
+    warn "A different tunnel is open ($existing) — closing it to start the requested named tunnel ($named_tunnel)"
+    kill "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null || true
+    rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE"
+    sleep 1
   fi
 
   local tunnel_log="/tmp/claude-bridge-tunnel.log"
@@ -767,13 +792,22 @@ join_hub() {
   host="${host%/}"
 
   mkdir -p "$(dirname "$TOKEN_FILE")"
+  local old_token; old_token=$(cat "$TOKEN_FILE" 2>/dev/null || echo "")
   printf '%s' "$token" > "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
   printf '%s' "$host"  > "$HUB_FILE"
   printf '%s' "spoke"  > "$ROLE_FILE"
   ensure_node "${ARG3_NODE:-}"
 
   if fed_bridge_running; then
-    fed_reload && ok "Spoke mode enabled on the running bridge (no restart)"
+    if [ "$token" != "$old_token" ]; then
+      # The running bridge still holds the OLD token, so POST /link/reload would be
+      # rejected with 401 and silently keep the old config (BUG-3). A token change
+      # can't be hot-reloaded — restart so the new token takes effect.
+      warn "Token changed — restarting the bridge to apply it (hot-reload can't swap a token)"
+      stop_bridge; start_bridge
+    else
+      fed_reload && ok "Spoke mode enabled on the running bridge (no restart)"
+    fi
   else
     start_bridge
   fi
