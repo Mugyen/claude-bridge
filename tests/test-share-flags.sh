@@ -49,33 +49,43 @@ if [ -s "$NODE_FILE" ]; then ok "--join derives a node id"; else bad "--join nod
 OUT=$(CC_BRIDGE_PORT=$PORT bash "$REPO_DIR/install.sh" --join 'https://no-fragment.example.com' 2>&1 || true)
 if echo "$OUT" | grep -q "token fragment"; then ok "--join rejects a link with no token fragment"; else bad "--join no-fragment rejection"; fi
 
-# ── 3. --share without cloudflared prints install instructions + non-zero ───
-# Empty PATH-ish: a PATH with only coreutils-ish dirs but NO cloudflared.
+# ── 3. --share without cloudflared + auto-install OFF → instruct + non-zero ──
+# CC_BRIDGE_NO_AUTOINSTALL=1 keeps this hermetic (no real download/brew in CI) and
+# exercises the detect-and-instruct fallback. (The auto-install path itself uses
+# brew/curl — an external tool — and is verified live, not in CI.)
 rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE"
-OUT=$(CC_BRIDGE_PORT=$PORT PATH="$FAKEBIN:/usr/bin:/bin" bash "$REPO_DIR/install.sh" --share 2>&1; echo "RC=$?")
-if echo "$OUT" | grep -q "cloudflared not found"; then ok "--share without cloudflared prints not-found"; else bad "--share missing-cloudflared message"; fi
+OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:/usr/bin:/bin" bash "$REPO_DIR/install.sh" --share 2>&1; echo "RC=$?")
+if echo "$OUT" | grep -q "cloudflared not found"; then ok "--share without cloudflared (auto-install off) prints not-found"; else bad "--share missing-cloudflared message ($(echo "$OUT" | tail -3))"; fi
 if echo "$OUT" | grep -q "RC=1"; then ok "--share without cloudflared exits non-zero"; else bad "--share missing-cloudflared exit code"; fi
 
 # ── 4. --share with a FAKE cloudflared parses the quick-tunnel URL ──────────
-# Fake cloudflared prints a trycloudflare URL then sleeps (simulates a tunnel).
+# Fake cloudflared: branches on the subcommand so the auto-install/update probe
+# (`cloudflared update` / `--version`) returns fast instead of hanging on sleep.
+# Only `tunnel` simulates the long-lived tunnel.
 cat > "$FAKEBIN/cloudflared" <<'EOF'
 #!/bin/bash
-echo "2024-01-01 INF +-----------------------------+"
-echo "2024-01-01 INF |  https://fake-tunnel-9.trycloudflare.com  |"
-echo "2024-01-01 INF +-----------------------------+"
-sleep 30
+case "$1" in
+  update)    exit 0 ;;
+  --version) echo "cloudflared version 9999.0.0 (fake)"; exit 0 ;;
+  tunnel)
+    echo "2024-01-01 INF +-----------------------------+"
+    echo "2024-01-01 INF |  https://fake-tunnel-9.trycloudflare.com  |"
+    echo "2024-01-01 INF +-----------------------------+"
+    sleep 30 ;;
+  *) exit 0 ;;
+esac
 EOF
 chmod +x "$FAKEBIN/cloudflared"
 # Fake node/openssl already on real PATH; need jq + node + curl for start_bridge.
 # We DO start a real bridge here (on 7408) so fed_reload/start works.
-OUT=$(CC_BRIDGE_PORT=$PORT PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/install.sh" --share 2>&1; echo "RC=$?")
+OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/install.sh" --share 2>&1; echo "RC=$?")
 if echo "$OUT" | grep -q "fake-tunnel-9.trycloudflare.com"; then ok "--share parses the quick-tunnel URL from cloudflared output"; else bad "--share URL parse ($(echo "$OUT" | tail -3))"; fi
 if echo "$OUT" | grep -q "install.sh --join 'https://fake-tunnel-9.trycloudflare.com#"; then ok "--share prints the join link with token fragment"; else bad "--share join link print"; fi
 if [ -s "$TOKEN_FILE" ]; then ok "--share generated a token"; else bad "--share token generation"; fi
 if [ "$(cat "$ROLE_FILE" 2>/dev/null)" = "hub" ]; then ok "--share sets role=hub"; else bad "--share role (got: $(cat "$ROLE_FILE" 2>/dev/null))"; fi
 
 # ── 5. --stop-share closes the tunnel + drops to standalone ─────────────────
-OUT=$(CC_BRIDGE_PORT=$PORT PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/install.sh" --stop-share 2>&1 || true)
+OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/install.sh" --stop-share 2>&1 || true)
 if echo "$OUT" | grep -qi "tunnel closed"; then ok "--stop-share closes the tunnel"; else bad "--stop-share tunnel close ($OUT)"; fi
 if [ "$(cat "$ROLE_FILE" 2>/dev/null)" = "standalone" ]; then ok "--stop-share drops role to standalone"; else bad "--stop-share role reset"; fi
 if [ -s "$TOKEN_FILE" ]; then ok "--stop-share keeps the token (fast re-share)"; else bad "--stop-share kept token"; fi

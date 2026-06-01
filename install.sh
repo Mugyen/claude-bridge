@@ -592,6 +592,74 @@ ensure_node() {
   ok "Node id: $(cat "$NODE_FILE")"
 }
 
+# Install cloudflared for the current OS, or update it if already present. Called
+# only from --share (hub mode): the bridge SERVER stays zero-dependency; cloudflared
+# is the one optional tool a HUB needs to open its tunnel. Opt out with
+# CC_BRIDGE_NO_AUTOINSTALL=1 (reverts to detect-and-instruct).
+ensure_cloudflared() {
+  local os arch
+  os="$(uname -s)"; arch="$(uname -m)"
+
+  if command -v cloudflared &>/dev/null; then
+    [ "${CC_BRIDGE_NO_AUTOINSTALL:-}" = "1" ] && return 0
+    # Best-effort update (never fatal).
+    if [ "$os" = "Darwin" ] && command -v brew &>/dev/null && brew list cloudflared &>/dev/null 2>&1; then
+      brew upgrade cloudflared &>/dev/null && ok "cloudflared updated (brew)" || true
+    else
+      cloudflared update &>/dev/null && ok "cloudflared updated" || true  # no-op for package-manager installs
+    fi
+    return 0
+  fi
+
+  if [ "${CC_BRIDGE_NO_AUTOINSTALL:-}" = "1" ]; then
+    fail "cloudflared not found — required to open a tunnel (auto-install disabled)."
+    echo "      brew install cloudflared   # macOS — or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+    return 1
+  fi
+
+  warn "cloudflared not found — installing for ${os}/${arch}..."
+  if [ "$os" = "Darwin" ]; then
+    if command -v brew &>/dev/null; then
+      brew install cloudflared || { fail "brew install cloudflared failed"; return 1; }
+    else
+      fail "Homebrew not found. Install brew, or cloudflared manually: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+      return 1
+    fi
+  elif [ "$os" = "Linux" ]; then
+    local asset
+    case "$arch" in
+      x86_64|amd64)      asset="cloudflared-linux-amd64" ;;
+      aarch64|arm64)     asset="cloudflared-linux-arm64" ;;
+      armv7l|armv6l|arm) asset="cloudflared-linux-arm" ;;
+      *) fail "unsupported architecture: $arch — install cloudflared manually"; return 1 ;;
+    esac
+    local url="https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL "$url" -o "$tmp"; then fail "cloudflared download failed: $url"; rm -f "$tmp"; return 1; fi
+    chmod +x "$tmp"
+    if [ -w /usr/local/bin ]; then
+      mv "$tmp" /usr/local/bin/cloudflared
+    elif command -v sudo &>/dev/null; then
+      ok "installing cloudflared to /usr/local/bin (sudo)..."
+      sudo mv "$tmp" /usr/local/bin/cloudflared || { fail "could not install to /usr/local/bin"; rm -f "$tmp"; return 1; }
+    else
+      mkdir -p "$HOME/.local/bin"; mv "$tmp" "$HOME/.local/bin/cloudflared"
+      export PATH="$HOME/.local/bin:$PATH"
+      warn "installed to ~/.local/bin/cloudflared — ensure it's on your PATH for future shells"
+    fi
+  else
+    fail "unsupported OS: $os — install cloudflared manually"
+    return 1
+  fi
+
+  if command -v cloudflared &>/dev/null; then
+    ok "cloudflared installed ($(cloudflared --version 2>/dev/null | head -1))"
+    return 0
+  fi
+  fail "cloudflared still not on PATH after install"
+  return 1
+}
+
 share_hub() {
   # Parse optional flags: --named-tunnel <hostname>, --node <id>
   local named_tunnel="" node_override=""
@@ -605,13 +673,9 @@ share_hub() {
     i=$((i+1))
   done
 
-  if ! command -v cloudflared &>/dev/null; then
-    fail "cloudflared not found — required to open a tunnel."
-    echo "    Install it once (no account needed for a quick tunnel):"
-    echo "      brew install cloudflared       # macOS"
-    echo "      https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
-    exit 1
-  fi
+  # Install cloudflared for this OS (or update it if present). Hub-only; the
+  # bridge server itself stays zero-dependency. Opt out: CC_BRIDGE_NO_AUTOINSTALL=1.
+  ensure_cloudflared || exit 1
 
   ensure_token
   ensure_node "$node_override"

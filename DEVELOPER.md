@@ -95,7 +95,7 @@ Spoke bridge ◀──SSE /link/stream (roster + forward events)─────�
    (token in X-Bridge-Token header; cloudflared tunnel → Hub FED_PORT ONLY; /link/* token-gated, /health/ping ungated/content-free)
 ```
 
-install.sh: `--share [--named-tunnel <h>] [--node <id>]`, `--join '<link>'`, `--unlink`, `--stop-share` — all flip a *running* bridge via `POST /link/reload` (no restart). `cloudflared` is detect-and-instruct (bridge stays zero-dep).
+install.sh: `--share [--named-tunnel <h>] [--node <id>]`, `--join '<link>'`, `--unlink`, `--stop-share` — all flip a *running* bridge via `POST /link/reload` (no restart). `cloudflared` is **auto-installed/updated by `--share`** via `ensure_cloudflared()` (brew on macOS; static-binary download on Linux; best-effort update if present) — opt out with `CC_BRIDGE_NO_AUTOINSTALL=1`. The bridge *server* is still zero-dependency: cloudflared only touches the hub path. (CI never installs it — `test-share-flags.sh` uses a fake cloudflared on PATH + `CC_BRIDGE_NO_AUTOINSTALL=1`.)
 
 ### The 5 hooks (CLI only)
 

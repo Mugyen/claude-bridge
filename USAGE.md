@@ -205,7 +205,7 @@ By default the bridge is localhost-only. **Federation** links bridges on differe
 
 ### What you do
 
-**Prerequisite (hub only):** install `cloudflared` once -- `brew install cloudflared` (macOS) or see the [Cloudflare downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/). No account needed for the default quick tunnel. The bridge itself stays zero-dependency.
+**Prerequisite (hub only):** `cloudflared`. As of the federation release **`--share` auto-installs it** for your OS (Homebrew on macOS; the matching static binary on Linux) and best-effort **updates** it if already present — so usually you don't do anything. No account needed for the default quick tunnel. The bridge *server* stays zero-dependency; cloudflared is installed only on the hub path where a tunnel is opened. To manage it yourself instead, set `CC_BRIDGE_NO_AUTOINSTALL=1` and install via `brew install cloudflared` (macOS) or the [Cloudflare downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
 
 | Action | Command | Notes |
 |---|---|---|
