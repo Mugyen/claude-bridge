@@ -23,6 +23,15 @@ else bad "help (rc=$RC)"; fi
 # version → exit 0, prints repo version
 OUT=$(SH version); [ $? -eq 0 ] && echo "$OUT" | grep -q "claude-bridge v" && ok "version → exit 0" || bad "version"
 
+# invoked THROUGH a PATH symlink → REPO_DIR still resolves to the real checkout
+# (regression: a bare `dirname $0` pointed at the symlink dir → version "unknown"
+# and a broken bridge-server.mjs path).
+LN="$TMP/bin/claude-bridge"; mkdir -p "$TMP/bin"; ln -sf "$REPO_DIR/claude-bridge" "$LN"
+OUT=$(cd / && bash "$LN" version 2>&1); RC=$?
+if [ $RC -eq 0 ] && echo "$OUT" | grep -q "v2" && ! echo "$OUT" | grep -qi "unknown"; then
+  ok "invoked via PATH symlink → REPO_DIR resolves (version not 'unknown')"
+else bad "symlink invocation (rc=$RC: $OUT)"; fi
+
 # unknown command → exit 2 + hint
 OUT=$(SH frobnicate); RC=$?
 if [ $RC -eq 2 ] && echo "$OUT" | grep -q "Unknown command"; then ok "unknown command → exit 2 + hint"; else bad "unknown command (rc=$RC: $OUT)"; fi

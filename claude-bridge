@@ -1,7 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve through symlinks so REPO_DIR is the real checkout even when invoked as
+# the PATH symlink (~/.local/bin/claude-bridge → repo). macOS has no
+# `readlink -f`, so walk the symlink chain portably. Everything below — VERSION,
+# bridge-server.mjs, hooks/, skill/ — is REPO_DIR-relative, so this must be right.
+_src="$0"
+while [ -h "$_src" ]; do
+  _dir="$(cd "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  case "$_src" in /*) ;; *) _src="$_dir/$_src" ;; esac
+done
+REPO_DIR="$(cd "$(dirname "$_src")" && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
 SKILL_DIR="$HOME/.claude/skills/claude-bridge"
 LEGACY_SKILL_DIR="$HOME/.claude/skills/cc-bridge"
@@ -864,7 +874,7 @@ _mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0;
 # needed), else ~/.local/bin. Idempotent. Registered in the manifest for uninstall.
 symlink_cli() {
   local self target
-  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  self="$REPO_DIR/$(basename "$_src")"   # real script, resolved through any symlink
   if command -v claude-bridge >/dev/null 2>&1 && [ "$(readlink "$(command -v claude-bridge)" 2>/dev/null)" = "$self" ]; then
     ok "CLI on PATH: $(command -v claude-bridge) → claude-bridge"
     return 0
