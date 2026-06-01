@@ -869,12 +869,17 @@ symlink_cli() {
     ok "CLI on PATH: $(command -v claude-bridge) → claude-bridge"
     return 0
   fi
+  # Non-interactive (no TTY: curl|bash, CI, an agent) must NEVER hang on a sudo
+  # password prompt — use `sudo -n` there and fall back to ~/.local/bin if it'd
+  # prompt. An interactive user gets a normal `sudo` prompt (a global symlink is
+  # worth one password).
+  local SUDO="sudo"; [ -t 0 ] || SUDO="sudo -n"
   if [ -w /usr/local/bin ] 2>/dev/null; then target=/usr/local/bin/claude-bridge
   elif command -v sudo >/dev/null 2>&1 && [ -d /usr/local/bin ]; then
-    if sudo ln -sf "$self" /usr/local/bin/claude-bridge 2>/dev/null; then
+    if $SUDO ln -sf "$self" /usr/local/bin/claude-bridge 2>/dev/null; then
       manifest_add FILE /usr/local/bin/claude-bridge; ok "CLI installed: /usr/local/bin/claude-bridge → run 'claude-bridge help'"; return 0
     fi
-    target="$HOME/.local/bin/claude-bridge"   # sudo failed → fall back
+    target="$HOME/.local/bin/claude-bridge"   # no passwordless sudo → fall back
   else target="$HOME/.local/bin/claude-bridge"; fi
   mkdir -p "$(dirname "$target")"
   ln -sf "$self" "$target"
