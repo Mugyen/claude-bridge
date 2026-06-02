@@ -6,12 +6,11 @@ Working notes for whoever maintains claude-bridge next — including future-me. 
 
 ## First-time setup if you're a developer of this repo
 
-After cloning, **load this file into your Claude Code working context for every session inside this repo** so all the rules below are enforced automatically. There are two ways:
+If you are **developing/modifying** claude-bridge, **read this whole file before touching anything** so all the rules below are enforced.
 
-1. **Recommended — project-level CLAUDE.md (already exists).** This repo ships a `CLAUDE.md` at the root that `@`-references `DEVELOPER.md`. Claude Code auto-loads `CLAUDE.md` whenever it runs in this directory, so just `cd` here and you're done.
-2. **If you keep your own notes in a fork's CLAUDE.md**, either append the contents of this file or add the line `@DEVELOPER.md` to it. Do NOT inject anything from this file into the global `~/.claude/CLAUDE.md` — same rule as the user-facing protocol docs (see "Skills over CLAUDE.md injection" in the owner's vision below).
+> ⚠️ The root `CLAUDE.md` **deliberately does NOT `@`-auto-load this file.** It used to (`@DEVELOPER.md`), but that injected the maintainer guide — including "run the test suite" / release methodology — into *every* session, so an AI handed the repo just to **install** it would start running tests instead of installing. `CLAUDE.md` now splits by intent: install sessions get `./claude-bridge install` (and an explicit "do NOT run tests"), and only **development** sessions are told to open this file. So: when you sit down to change code, open `DEVELOPER.md` yourself (the brainstorming/skill flow and the `CLAUDE.md` pointer will remind you). Do NOT re-add `@DEVELOPER.md` to `CLAUDE.md`, and never inject any of this into the global `~/.claude/CLAUDE.md` (see "Skills over CLAUDE.md injection" in the owner's vision below).
 
-Why this matters: half of this document is "do not redo these mistakes." If Claude can't see it, Claude redoes them.
+Why this matters: half of this document is "do not redo these mistakes." If you're changing code and can't see it, you'll redo them — so read it before dev work.
 
 ---
 

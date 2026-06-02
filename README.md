@@ -11,10 +11,12 @@
 📦 **Install in one line:**
 
 ```bash
-curl -fsSL https://vijay2411.github.io/claude-bridge/claude-bridge | bash
+curl -fsSL https://vijay2411.github.io/claude-bridge/install.sh | bash
 ```
 
 Lands the bridge in `~/.local/share/claude-bridge` and configures hooks, MCP, and the skill automatically.
+
+> 🤖 **Handing this repo to an AI agent to set up?** Tell it to run `./claude-bridge install` from the repo root — that's the whole install. It should **not** run the test suite (`npm test` / `tests/`); those are for developing the project, not installing it. See `CLAUDE.md`.
 
 ```
 You (to CLI Session A):     "Ask the frontend session what auth flow they're using"
