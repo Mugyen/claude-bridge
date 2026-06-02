@@ -18,15 +18,23 @@ bad()  { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 TMP=$(mktemp -d)
 export HOME="$TMP/home"
 mkdir -p "$HOME/.claude"
+# CRITICAL: isolate the tunnel state files. They default to hardcoded /tmp paths,
+# so without this the fake-cloudflared share/stop-share in this test would clobber
+# and KILL a real production tunnel running on the same machine (a real incident).
+export CC_BRIDGE_TUNNEL_PID="$TMP/tunnel.pid"
+export CC_BRIDGE_TUNNEL_URL="$TMP/tunnel.url"
+export CC_BRIDGE_TUNNEL_LOG="$TMP/tunnel.log"
 FAKEBIN="$TMP/bin"
 mkdir -p "$FAKEBIN"
+# Snapshot the REAL tunnel-url file so we can assert the test never modifies it.
+REAL_TUN_BEFORE=$(cat /tmp/claude-bridge-tunnel.url 2>/dev/null || echo __absent__)
 TOKEN_FILE="$HOME/.claude/.cc-bridge-token"
 ROLE_FILE="$HOME/.claude/.cc-bridge-role"
 HUB_FILE="$HOME/.claude/.cc-bridge-hub"
 NODE_FILE="$HOME/.claude/.cc-bridge-node"
 
 cleanup() {
-  [ -f "$TMP/tunnel.pid" ] && kill "$(cat "$TMP/tunnel.pid")" 2>/dev/null
+  [ -f "$CC_BRIDGE_TUNNEL_PID" ] && kill "$(cat "$CC_BRIDGE_TUNNEL_PID")" 2>/dev/null
   lsof -ti:$PORT 2>/dev/null | xargs kill 2>/dev/null
   rm -rf "$TMP"
 }
@@ -83,6 +91,13 @@ if echo "$OUT" | grep -q "fake-tunnel-9.trycloudflare.com"; then ok "--share par
 if echo "$OUT" | grep -q "claude-bridge --join 'https://fake-tunnel-9.trycloudflare.com#"; then ok "--share prints the join link with token fragment"; else bad "--share join link print"; fi
 if [ -s "$TOKEN_FILE" ]; then ok "--share generated a token"; else bad "--share token generation"; fi
 if [ "$(cat "$ROLE_FILE" 2>/dev/null)" = "hub" ]; then ok "--share sets role=hub"; else bad "--share role (got: $(cat "$ROLE_FILE" 2>/dev/null))"; fi
+
+# Isolation guard — WHILE the (fake) tunnel is open: the URL must be in the
+# isolated TMP path, and the REAL /tmp tunnel-url must be untouched. If isolation
+# breaks, the fake URL leaks into /tmp/claude-bridge-tunnel.url and would clobber a
+# live production tunnel (the incident this guards against).
+if [ "$(cat "$CC_BRIDGE_TUNNEL_URL" 2>/dev/null)" = "https://fake-tunnel-9.trycloudflare.com" ]; then ok "tunnel URL written to the ISOLATED path (not /tmp)"; else bad "isolated tunnel URL not written ($(cat "$CC_BRIDGE_TUNNEL_URL" 2>/dev/null))"; fi
+if [ "$(cat /tmp/claude-bridge-tunnel.url 2>/dev/null || echo __absent__)" = "$REAL_TUN_BEFORE" ]; then ok "real /tmp tunnel state untouched while test tunnel is open"; else bad "TEST CLOBBERED the real /tmp/claude-bridge-tunnel.url — isolation broke"; fi
 
 # ── 5. --stop-share closes the tunnel + drops to standalone ─────────────────
 OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/claude-bridge" --stop-share 2>&1 || true)

@@ -31,8 +31,11 @@ TOKEN_FILE="$HOME/.claude/.cc-bridge-token"
 ROLE_FILE="$HOME/.claude/.cc-bridge-role"
 HUB_FILE="$HOME/.claude/.cc-bridge-hub"
 NODE_FILE="$HOME/.claude/.cc-bridge-node"
-TUNNEL_PID_FILE="/tmp/claude-bridge-tunnel.pid"
-TUNNEL_URL_FILE="/tmp/claude-bridge-tunnel.url"
+# Env-overridable so tests NEVER touch the real tunnel state. (Hardcoded /tmp paths
+# meant `npm test`'s fake-cloudflared share/stop-share clobbered + killed a live
+# production tunnel — a real incident.) Production always uses the /tmp defaults.
+TUNNEL_PID_FILE="${CC_BRIDGE_TUNNEL_PID:-/tmp/claude-bridge-tunnel.pid}"
+TUNNEL_URL_FILE="${CC_BRIDGE_TUNNEL_URL:-/tmp/claude-bridge-tunnel.url}"
 
 # Read version from package.json
 VERSION=$(jq -r '.version // "unknown"' "$REPO_DIR/package.json" 2>/dev/null || echo "unknown")
@@ -775,7 +778,7 @@ share_hub() {
     sleep 1
   fi
 
-  local tunnel_log="/tmp/claude-bridge-tunnel.log"
+  local tunnel_log="${CC_BRIDGE_TUNNEL_LOG:-/tmp/claude-bridge-tunnel.log}"
   : > "$tunnel_log"
 
   if [ -n "$named_tunnel" ]; then
