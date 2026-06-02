@@ -704,6 +704,24 @@ ensure_cloudflared() {
   return 1
 }
 
+# Launch cloudflared FULLY DETACHED so the tunnel outlives the launching shell —
+# an interactive terminal that's later closed, OR a non-interactive/automated shell
+# (an agent, a script) that reaps its foreground command's children on exit. Linux:
+# `setsid` gives it its own session. macOS has no `setsid`, so use nohup + stdin off
+# the tty + `disown` (drop it from the shell's job table). Records the PID in
+# $TUNNEL_PID_FILE. ($1 = log file, rest = the cloudflared command.)
+launch_cloudflared() {
+  local log="$1"; shift
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" >> "$log" 2>&1 < /dev/null &
+  else
+    nohup "$@" >> "$log" 2>&1 < /dev/null &
+  fi
+  local pid=$!
+  echo "$pid" > "$TUNNEL_PID_FILE"
+  disown "$pid" 2>/dev/null || true
+}
+
 share_hub() {
   # Parse optional flags: --named-tunnel <hostname>, --node <id>
   local named_tunnel="" node_override=""
@@ -764,8 +782,7 @@ share_hub() {
     # Named tunnel: stable hostname on the user's own domain. The user must have
     # configured the tunnel + DNS route already (cloudflared tunnel route dns ...).
     # Tunnel the FED PORT (loopback-only link surface), never the main bridge port.
-    nohup cloudflared tunnel --url "http://localhost:${FED_PORT}" run "$named_tunnel" >> "$tunnel_log" 2>&1 &
-    echo "$!" > "$TUNNEL_PID_FILE"
+    launch_cloudflared "$tunnel_log" cloudflared tunnel --url "http://localhost:${FED_PORT}" run "$named_tunnel"
     printf '%s' "https://${named_tunnel}" > "$TUNNEL_URL_FILE"
     ok "Named tunnel started ($named_tunnel)"
     echo ""
@@ -775,8 +792,7 @@ share_hub() {
   else
     # Quick tunnel: ephemeral *.trycloudflare.com URL, zero setup.
     # Tunnel the FED PORT (loopback-only link surface), never the main bridge port.
-    nohup cloudflared tunnel --url "http://localhost:${FED_PORT}" >> "$tunnel_log" 2>&1 &
-    echo "$!" > "$TUNNEL_PID_FILE"
+    launch_cloudflared "$tunnel_log" cloudflared tunnel --url "http://localhost:${FED_PORT}"
     ok "Opening Cloudflare quick tunnel..."
     # NB: `set -e` + `pipefail` would abort on an empty grep (the pipeline exits
     # non-zero), so guard the substitution with `|| true`.
