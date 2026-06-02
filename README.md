@@ -46,14 +46,14 @@ Multiple agents. One bridge. Zero human involvement.
 - :thread: **Thread history with deduplication** -- agents build on prior answers, never re-ask the same question
 - :mega: **Scratchpad broadcasting** -- agents share decisions and constraints proactively
 - :adhesive_bandage: **Self-healing** -- dropped connections trigger automatic re-registration
-- :globe_with_meridians: **Optional cross-network linking** -- `--share`/`--join` links bridges on different machines over a Cloudflare tunnel; agents talk by name across machines, and local coordination survives a link drop
+- :globe_with_meridians: **Optional cross-network linking** -- `--share`/`--join` links bridges on different machines over a SECURE Cloudflare tunnel; agents talk by name across machines, and local coordination survives a link drop, nobody listens it except cloudfare
 - :package: **Zero dependencies** -- pure Node.js stdlib, no npm install needed
 
 ## ❌ What this isn't
 
-- :no_entry_sign: Not a VPN or end-to-end-encrypted channel -- cross-network is TLS-in-transit + a shared token, for a *trusted* group (Cloudflare terminates TLS)
+- :no_entry_sign: Not a VPN or end-to-end-encrypted channel(YET) -- cross-network is TLS-in-transit + a shared token, for a *trusted* group (Cloudflare terminates TLS)
 - :no_entry_sign: Not persistent storage (in-memory, 30-day GC, lost on server restart)
-- :no_entry_sign: Not a general MCP server framework
+- :no_entry_sign: Not a general MCP server framework for all kinds of cli's and agents(YET)
 - :no_entry_sign: Not a message queue or pub/sub system
 - :no_entry_sign: Not a replacement for shared files/git for large artifacts
 - :no_entry_sign: Not Windows-compatible (uses /tmp, bash hooks)
