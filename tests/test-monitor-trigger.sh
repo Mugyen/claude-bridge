@@ -104,14 +104,15 @@ else
   fail "ask should nudge after re-enable: output='$OUT' state='$(cat "$MONITOR_FILE" 2>/dev/null)'"
 fi
 
-# ── Case 8: the emitted command names this session and the poll interval ─────
+# ── Case 8: the emitted command polls by STABLE claude_session_id (not name),
+#    names the session in the description, and embeds the interval + arm-confirm ─
 rm -f "$MONITOR_FILE"
 OUT=$(CC_BRIDGE_MONITOR_INTERVAL=42 run "mcp__bridge__reply")
-if echo "$OUT" | grep -q "session=monitortest" && echo "$OUT" | grep -q "sleep 42" \
-   && echo "$OUT" | grep -q "echo on > $MONITOR_FILE"; then
-  pass "nudge embeds session name, interval, and the 'echo on' arm-confirm step"
+if echo "$OUT" | grep -q "claude_session_id=$FAKE_ID" && echo "$OUT" | grep -q "for monitortest" \
+   && echo "$OUT" | grep -q "sleep 42" && echo "$OUT" | grep -q "echo on > $MONITOR_FILE"; then
+  pass "nudge polls by claude_session_id, names the session, embeds interval + 'echo on' arm-confirm"
 else
-  fail "nudge should embed name + interval + arm-confirm: output='$OUT'"
+  fail "nudge should poll by claude_session_id + embed name/interval/arm-confirm: output='$OUT'"
 fi
 
 # ── Case 9: the armed Monitor command wakes on NOTICEs and PEEKS (no consume) ─

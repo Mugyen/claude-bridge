@@ -106,6 +106,16 @@ try {
   const peek3 = await bridge.pending("alice", { peek: true });
   assert("after check_inbox consumes it, peek is empty", !peek3.includes("FYI three"), JSON.stringify(peek3));
 
+  // ── /pending resolves by STABLE claude_session_id (idle-listener path) ──────
+  // Done LAST: registering on the shared TestBridge connection re-points its
+  // identity, so it must not precede the alice-based assertions above.
+  await bridge.call("register", { name: "cidder", description: "cid test", claude_session_id: "cid-xyz-123" });
+  const cn = await bridge.call("notify", { to: "cidder", content: "via cid" });
+  const pcid = await bridge.pending("cidder", { peek: true, cid: "cid-xyz-123" });
+  assert("/pending?claude_session_id= resolves to the session's inbox", pcid.includes("via cid") && pcid.includes(`id: ${cn.message_id}`), JSON.stringify(pcid));
+  const pbad = await bridge.pending("cidder", { cid: "cid-does-not-exist" });
+  assert("/pending with an unknown claude_session_id returns empty (not 400)", pbad === "", JSON.stringify(pbad));
+
   // ── server still alive (Bug 2 regression test) ──────────────────────────
   const h = await bridge.health();
   assert("server still alive after bad inputs", h.status === "ok", JSON.stringify(h));

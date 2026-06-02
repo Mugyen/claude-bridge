@@ -1464,8 +1464,17 @@ const server = http.createServer(async (req, res) => {
 
   // ── GET /pending — for hook scripts ───────────────────────────────────
   if (req.method === "GET" && url.pathname === "/pending") {
-    const session = url.searchParams.get("session");
-    if (!session) { res.writeHead(400); res.end("missing ?session="); return; }
+    // Resolve by the STABLE claude_session_id when given, so the idle-listener
+    // follows a session across renames and we never need a per-name monitor that
+    // drifts/duplicates. Falls back to ?session=<name> for back-compat.
+    const cid = url.searchParams.get("claude_session_id");
+    const session = cid ? claudeIdToName.get(cid) : url.searchParams.get("session");
+    if (!session) {
+      // Unknown/not-yet-registered cid (or missing param) → empty, not an error,
+      // so a monitor armed before register doesn't spew 400s.
+      if (cid) { res.writeHead(200, { "Content-Type": "text/plain" }); res.end(""); return; }
+      res.writeHead(400); res.end("missing ?session= or ?claude_session_id="); return;
+    }
     // peek = render without consuming. The idle-listener monitor peeks (it only
     // needs to detect "something new" to wake the agent); real delivery — and the
     // mark-delivered for one-way notices — happens via the PostToolUse hook
@@ -1477,28 +1486,25 @@ const server = http.createServer(async (req, res) => {
     if (pending.length === 0 && notices.length === 0) { res.writeHead(200, { "Content-Type": "text/plain" }); res.end(""); return; }
 
     let out = "";
+    // Token-efficient injection: only the LAST exchange as context (truncated) +
+    // a one-line reply instruction. The old format re-sent 3 full Q&As and a
+    // 5-point "include everything" checklist on every reply — heavy, and it made
+    // agents write essays. Keep "Question from"/"NOTICE from"/"id: <uuid>" verbatim:
+    // the idle-listener monitor greps those to detect/dedupe messages.
+    const clip = (s, n = 140) => { s = String(s ?? ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
     for (const msg of pending) {
-      const recent = recentAnswered(session, msg.from, 3);
+      const recent = recentAnswered(session, msg.from, 1);
       const fromInfo = [...sessions.values()].find((s) => s.name === msg.from);
 
-      out += `\n${"═".repeat(60)}\n`;
-      out += `🔔 BRIDGE: Question from "${msg.from}"`;
-      if (fromInfo?.description) out += ` (${fromInfo.description})`;
-      out += `\n${"═".repeat(60)}\n`;
-
+      out += `\n🔔 Bridge — Question from "${msg.from}"`;
+      if (fromInfo?.description) out += ` (${clip(fromInfo.description, 60)})`;
+      out += `\n`;
       if (recent.length > 0) {
-        out += `\nThread history (DO NOT repeat — build on these):\n`;
-        for (const p of recent) {
-          out += `  [${p.from}] Q: ${p.question}\n`;
-          out += `  [${p.to === msg.from ? session : msg.from}] A: ${p.answer}\n\n`;
-        }
+        const p = recent[recent.length - 1];
+        out += `prior (don't repeat): Q "${clip(p.question, 120)}" → A "${clip(p.answer, 120)}"\n`;
       }
-
-      out += `NEW QUESTION (id: ${msg.id}):\n  "${msg.question}"\n\n`;
-      out += `→ Call reply(message_id="${msg.id}", answer="...") NOW.\n`;
-      out += `  Include: direct answer with specifics • WHY this choice •\n`;
-      out += `  user preferences that influenced it • alternatives rejected • gotchas\n`;
-      out += `${"═".repeat(60)}\n`;
+      out += `Q (id: ${msg.id}): "${msg.question}"\n`;
+      out += `→ reply(message_id="${msg.id}"): be precise — the answer + any gotchas/traps only. No preamble, don't restate the question.\n`;
     }
 
     // One-way NOTICEs — delivered exactly once, then marked delivered so they
@@ -1507,14 +1513,11 @@ const server = http.createServer(async (req, res) => {
     for (const msg of notices) {
       const fromInfo = [...sessions.values()].find((s) => s.name === msg.from);
 
-      out += `\n${"═".repeat(60)}\n`;
-      out += `📨 NOTICE from "${msg.from}"`;
-      if (fromInfo?.description) out += ` (${fromInfo.description})`;
-      out += `\n${"═".repeat(60)}\n`;
-      out += `id: ${msg.id}\n`;
-      out += `${msg.content}\n\n`;
-      out += `(FYI — no reply needed. This is a one-way message; take it in and continue.)\n`;
-      out += `${"═".repeat(60)}\n`;
+      out += `\n📨 NOTICE from "${msg.from}"`;
+      if (fromInfo?.description) out += ` (${clip(fromInfo.description, 60)})`;
+      out += `\nid: ${msg.id}\n`;
+      out += `${msg.content}\n`;
+      out += `(FYI — one-way, no reply.)\n`;
 
       // Only a non-peek read consumes the notice. A peeking idle-listener must
       // leave it undelivered so the woken agent can still read it via check_inbox.

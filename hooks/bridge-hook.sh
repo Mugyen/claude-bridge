@@ -125,11 +125,11 @@ if [ "$NUDGE_MONITOR" = 1 ]; then
       INTERVAL="${CC_BRIDGE_MONITOR_INTERVAL:-25}"
       NUDGE="🔗 claude-bridge: You're now active on the bridge. Arm your idle-listener so you can answer questions that arrive while you sit idle — without it, a dormant session never sees new questions until the user pokes it. (This reminder repeats on every ask/reply until you actually arm it.)
 
-→ Call the Monitor tool NOW with persistent: true, description: \"incoming bridge messages for ${SESSION}\", and this exact command:
+→ Call the Monitor tool NOW with persistent: true, description: \"incoming bridge messages for ${SESSION}\", and this exact command. Arm only ONE — if a bridge monitor is already running for this session, TaskStop it first:
 
 prev=\"\"
 while true; do
-  out=\$(curl -sf \"http://localhost:${PORT}/pending?session=${SESSION}&peek=1\" 2>/dev/null || true)
+  out=\$(curl -sf \"http://localhost:${PORT}/pending?claude_session_id=${SESSION_ID}&peek=1\" 2>/dev/null || true)
   if [ -n \"\$out\" ]; then
     ids=\$(printf '%s' \"\$out\" | grep -o 'id: [a-z0-9-]*' | sort)
     if [ \"\$ids\" != \"\$prev\" ]; then

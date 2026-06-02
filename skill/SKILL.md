@@ -28,28 +28,19 @@ This means another AI agent is blocked, waiting for YOUR answer. **Reply immedia
 
 ### What makes a good reply
 
-Your answer must be **self-contained** — the asker should NOT need follow-up questions. Every reply includes:
+**Precise and terse.** The asker needs the answer, not an essay — every extra word costs both sessions tokens. Self-contained enough to avoid a follow-up, no more.
 
-- **Direct answer** — file paths, code snippets, exact values, concrete specifics. Not vague descriptions.
-- **The WHY** — your reasoning chain. "I chose X because [specific technical reason], and Y wouldn't work because [concrete limitation]."
-- **User context** — what the user said, preferred, or specified that influenced this decision.
-- **Alternatives rejected** — what else you considered and why you didn't go with it.
-- **Gotchas & dependencies** — anything that could bite the asker. Edge cases, env vars needed, order-of-operations requirements.
+- **The answer** — exact file paths, names, values. Not vague descriptions.
+- **Gotchas/traps only if they'd actually bite** — required env vars, order-of-operations, edge cases.
+- Skip preamble, don't restate the question, don't narrate your reasoning unless the *why* IS the answer. A few lines, not paragraphs. Don't re-explain context the thread already carries.
 
-### Example of a BAD reply
 ```
-"I'm using JWT for auth."
-```
-
-### Example of a GOOD reply
-```
-"Auth uses JWT with rotating refresh tokens, implemented in /src/middleware/auth.ts.
-
-I chose JWT over session cookies because the user specifically asked for a stateless API that works across multiple subdomains. The refresh token rotation (24h access / 7d refresh) follows the pattern in /src/utils/token.ts.
-
-I considered Passport.js but rejected it — adds 40KB of dependencies for functionality we can handle in ~60 lines, and the user wanted minimal dependencies.
-
-Gotchas: The JWT_SECRET env var must be set (see .env.example). The middleware checks Authorization header first, falls back to cookie — make sure CORS is configured if you're calling from a different origin. The refresh endpoint is POST /api/auth/refresh, not GET."
+BAD  (vague):    "I'm using JWT for auth."
+BAD  (verbose):  5 paragraphs with rejected alternatives + backstory — wastes tokens.
+GOOD (precise):  "JWT, rotating refresh 24h/7d — /src/middleware/auth.ts.
+                  Gotcha: JWT_SECRET env var required; middleware reads Authorization
+                  header then cookie, so set CORS for cross-origin. Refresh = POST
+                  /api/auth/refresh (not GET)."
 ```
 
 ## Tool reference
@@ -86,12 +77,11 @@ Call `check_inbox()` to see all unanswered questions addressed to you. This is f
 
 ## When YOU need information from another agent
 
-1. **First** call `get_thread(with_session="target-name")` — the answer might already exist
-2. Only if not answered, call `ask(to="target-name", question="...")` — this blocks until they reply
-3. Ask **specific, precise** questions:
-   - Bad: "How does auth work?" (too vague)
-   - Good: "What middleware validates JWT tokens on protected routes, and where is the token signing secret configured?"
-4. **Build on previous answers** — reference them: "You mentioned JWT refresh tokens in your earlier answer — what's the exact expiry configuration and where is it set?"
+1. **First** `get_thread(with_session="target-name")` — may already be answered.
+2. Else `ask(to="target-name", question="...")` — blocks until they reply (5min).
+3. Keep it **short and specific — a few lines, not a wall of text.** Name the files/functions/constraints. Batch several questions into ONE ask rather than many round-trips. Don't re-explain context the thread already has.
+   - Bad: "How does auth work?"
+   - Good: "Which middleware validates JWT on protected routes, and where's the signing secret set? Also: is refresh-token rotation on?"
 5. **Never re-ask** what's already in the thread history
 
 ## Sending a one-way NOTICE (no reply needed)
@@ -109,7 +99,7 @@ The receiver sees it as a `📨 NOTICE from "<you>"` — delivered once, marked 
 - **`notify`** — you're telling them something; carry on immediately (one recipient).
 - **`broadcast`** — shared state others pull on their own schedule via `read_scratchpad` (no specific recipient).
 
-Keep `content` self-contained — same bar as a good reply: specifics, the why, and any gotcha the receiver needs.
+Keep `content` short and self-contained — same bar as a good reply: the specifics + any gotcha the receiver needs, no padding.
 
 ## When you receive a 📨 NOTICE
 

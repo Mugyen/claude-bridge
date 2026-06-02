@@ -166,8 +166,11 @@ export class TestBridge {
     throw new Error(`Timed out waiting for response to ${name}`);
   }
 
-  async pending(session, { peek = false } = {}) {
-    const url = `http://localhost:${this.port}/pending?session=${encodeURIComponent(session)}${peek ? "&peek=1" : ""}`;
+  async pending(session, { peek = false, cid = null } = {}) {
+    // cid → resolve by stable claude_session_id (what the idle-listener uses);
+    // otherwise by registered name (back-compat).
+    const key = cid ? `claude_session_id=${encodeURIComponent(cid)}` : `session=${encodeURIComponent(session)}`;
+    const url = `http://localhost:${this.port}/pending?${key}${peek ? "&peek=1" : ""}`;
     return new Promise((resolve, reject) => {
       http
         .get(url, (res) => {

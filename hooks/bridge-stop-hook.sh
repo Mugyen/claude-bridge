@@ -68,11 +68,11 @@ if [ -f "$ENGAGED_FILE" ] && [ "$MONITOR_STATE" != "on" ] && [ "$MONITOR_STATE" 
   INTERVAL="${CC_BRIDGE_MONITOR_INTERVAL:-25}"
   REASON="🔗 claude-bridge: You engaged on the bridge (asked or replied) but have NOT armed your idle-listener — so any question that arrives while you sit idle will be MISSED until the user pokes you. Arm it NOW before finishing:
 
-→ Call the Monitor tool with persistent: true, description: \"incoming bridge messages for ${SESSION}\", and this exact command:
+→ Call the Monitor tool with persistent: true, description: \"incoming bridge messages for ${SESSION}\", and this exact command. Arm only ONE — if a bridge monitor is already running for this session, TaskStop it first:
 
 prev=\"\"
 while true; do
-  out=\$(curl -sf \"http://localhost:${PORT}/pending?session=${SESSION}&peek=1\" 2>/dev/null || true)
+  out=\$(curl -sf \"http://localhost:${PORT}/pending?claude_session_id=${SESSION_ID}&peek=1\" 2>/dev/null || true)
   if [ -n \"\$out\" ]; then
     ids=\$(printf '%s' \"\$out\" | grep -o 'id: [a-z0-9-]*' | sort)
     if [ \"\$ids\" != \"\$prev\" ]; then
