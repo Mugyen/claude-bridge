@@ -73,6 +73,7 @@ Claude Desktop ──stdio──┘  MAIN listener        │
 
 ~/.claude/settings.json                       — 5 hooks point to hooks/*.sh
 ~/.claude/skills/claude-bridge/SKILL.md        — protocol docs (loaded on-demand by Claude)
+~/.claude/skills/claude-bridge-debug/SKILL.md  — read-only expert-debugger skill (repo: skill-debug/SKILL.md; triggered by "debug bridge", surfaced by `claude-bridge debug`)
 ~/.claude/.cc-bridge-version                   — installed version marker
 ~/.claude/.cc-bridge-manifest                  — list of files/dirs install touched (for uninstall)
 ~/.claude/.cc-bridge-token                     — federation shared secret (only if --share/--join; chmod 600)

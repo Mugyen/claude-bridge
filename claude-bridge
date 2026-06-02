@@ -14,6 +14,7 @@ done
 REPO_DIR="$(cd "$(dirname "$_src")" && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
 SKILL_DIR="$HOME/.claude/skills/claude-bridge"
+DEBUG_SKILL_DIR="$HOME/.claude/skills/claude-bridge-debug"
 LEGACY_SKILL_DIR="$HOME/.claude/skills/cc-bridge"
 DESKTOP_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
 PID_FILE="/tmp/claude-bridge.pid"
@@ -59,6 +60,7 @@ case "${1:-}" in
   --uninstall|uninstall)    ACTION="uninstall" ;;
   --check|check|status)     ACTION="check" ;;
   --health|health)          ACTION="health" ;;
+  debug)                    ACTION="debug" ;;
   --start|start)            ACTION="start" ;;
   --stop|stop)              ACTION="stop" ;;
   --restart|restart)        ACTION="restart" ;;
@@ -307,6 +309,12 @@ install_skill() {
   cp "$REPO_DIR/skill/SKILL.md" "$SKILL_DIR/SKILL.md"
   manifest_add DIR "$SKILL_DIR"
   ok "Bridge protocol skill installed to $SKILL_DIR"
+
+  # The read-only expert debugger skill (triggered by "debug bridge").
+  mkdir -p "$DEBUG_SKILL_DIR"
+  cp "$REPO_DIR/skill-debug/SKILL.md" "$DEBUG_SKILL_DIR/SKILL.md"
+  manifest_add DIR "$DEBUG_SKILL_DIR"
+  ok "Debug skill installed to $DEBUG_SKILL_DIR (say 'debug bridge' in a new session)"
 }
 
 remove_skill() {
@@ -314,6 +322,11 @@ remove_skill() {
   if [ -d "$SKILL_DIR" ]; then
     rm -rf "$SKILL_DIR"
     ok "Bridge protocol skill removed ($SKILL_DIR)"
+    removed=1
+  fi
+  if [ -d "$DEBUG_SKILL_DIR" ]; then
+    rm -rf "$DEBUG_SKILL_DIR"
+    ok "Debug skill removed ($DEBUG_SKILL_DIR)"
     removed=1
   fi
   if [ -d "$LEGACY_SKILL_DIR" ] && [ "$LEGACY_SKILL_DIR" != "$SKILL_DIR" ]; then
@@ -330,6 +343,11 @@ check_skill() {
   else
     fail "Bridge protocol skill not found"
     return 1
+  fi
+  if [ -f "$DEBUG_SKILL_DIR/SKILL.md" ]; then
+    ok "Debug skill installed"
+  else
+    warn "Debug skill not found (re-run install to add it)"
   fi
 }
 
@@ -1046,6 +1064,36 @@ health_cmd() {
   echo ""
 }
 
+debug_cmd() {
+  local installed="no"; [ -f "$DEBUG_SKILL_DIR/SKILL.md" ] && installed="yes"
+  cat <<EOF
+
+claude-bridge debug
+===================
+
+The debugger runs as a Claude Code skill, not inline here — a misbehaving bridge
+is best investigated from a fresh session with full context.
+
+  1. Open a NEW Claude Code session (any folder is fine).
+  2. Say:  debug bridge
+
+Claude will then act as an expert, READ-ONLY debugger:
+  • read the installed bridge code + the server/CLI logs
+  • explain the architecture and reconstruct what happened
+  • root-cause the issue
+  • prepare a GitHub issue (or a maintainer email) — shown to you first, never sent automatically
+  • hand you a clean, no-code temporary fix you can run yourself
+
+It will NOT change your bridge, restart it, or edit any config — strictly hands-off.
+EOF
+  if [ "$installed" = "yes" ]; then
+    ok "Debug skill is installed ($DEBUG_SKILL_DIR)"
+  else
+    warn "Debug skill not installed yet — run 'claude-bridge install' first"
+  fi
+  echo ""
+}
+
 print_help() {
   cat <<HELP
 
@@ -1061,6 +1109,7 @@ SETUP & MAINTENANCE
   uninstall               Remove skill, MCP, hooks, configs, dotfiles, PATH symlink (leaves a running bridge — stop it explicitly)
   doctor                  Deep health check (prereqs, running bridge, version/role drift, tunnel, ports, log)
   health                  Live server health: role, topology, connected clients (hub+spokes), message counts
+  debug                   How to run the read-only expert debugger (a new session + "debug bridge")
   status                  Quick component status (installed vs repo version, wiring)
   version                 Repo / installed / running versions
   logs [-f]               Show (or follow) the CLI action log
@@ -1273,6 +1322,10 @@ case "$ACTION" in
 
   health)
     health_cmd
+    ;;
+
+  debug)
+    debug_cmd
     ;;
 
   update)

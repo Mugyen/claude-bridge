@@ -61,6 +61,37 @@ fi
 # logs command tails without error
 SH logs >/dev/null 2>&1 && ok "logs → exit 0" || bad "logs command"
 
+# debug command → exit 0, points to a new session + "debug bridge", states read-only
+OUT=$(SH debug); RC=$?
+if [ $RC -eq 0 ] && echo "$OUT" | grep -q "debug bridge" && echo "$OUT" | grep -qi "read-only\|not change"; then
+  ok "debug → exit 0, instructs 'debug bridge' + read-only"
+else bad "debug command (rc=$RC)"; fi
+
+# the repo ships the debug skill with the right frontmatter name (auto-trigger key)
+if grep -q '^name: claude-bridge-debug' "$REPO_DIR/skill-debug/SKILL.md" 2>/dev/null; then
+  ok "skill-debug/SKILL.md ships with name: claude-bridge-debug"
+else bad "debug skill frontmatter name"; fi
+
+# debug skill is read-only by contract: it must NOT instruct restart/stop/edit of the bridge
+if grep -qi "DO NOT TOUCH\|read-only\|never changes" "$REPO_DIR/skill-debug/SKILL.md"; then
+  ok "debug skill states the strict read-only rule"
+else bad "debug skill read-only rule missing"; fi
+
+# full install lands BOTH skills + uninstall removes both (only when the Claude CLI
+# is present — server/hub-only installs skip skill wiring, covered separately).
+if command -v claude >/dev/null 2>&1; then
+  SH2HOME="$TMP/skillhome"; mkdir -p "$SH2HOME/.claude"
+  HOME="$SH2HOME" bash "$REPO_DIR/claude-bridge" install >/dev/null 2>&1
+  both_in=$([ -f "$SH2HOME/.claude/skills/claude-bridge/SKILL.md" ] && [ -f "$SH2HOME/.claude/skills/claude-bridge-debug/SKILL.md" ] && echo yes || echo no)
+  HOME="$SH2HOME" bash "$REPO_DIR/claude-bridge" uninstall >/dev/null 2>&1
+  both_gone=$([ ! -d "$SH2HOME/.claude/skills/claude-bridge" ] && [ ! -d "$SH2HOME/.claude/skills/claude-bridge-debug" ] && echo yes || echo no)
+  if [ "$both_in" = yes ] && [ "$both_gone" = yes ]; then
+    ok "install lands protocol+debug skills; uninstall removes both"
+  else bad "skill install/uninstall round-trip (in=$both_in gone=$both_gone)"; fi
+else
+  ok "skill install round-trip skipped (no claude CLI here — server-only path)"
+fi
+
 # bare `claude-bridge` (no args) → help, and must NOT run the installer
 OUT=$(SH); RC=$?
 if [ $RC -eq 0 ] && echo "$OUT" | grep -q "USAGE" && ! echo "$OUT" | grep -q "Installing..."; then
