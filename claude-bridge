@@ -49,6 +49,21 @@ ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
 fail() { echo -e "  ${RED}✗${NC} $1"; }
 warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 
+# Best-effort PID of whatever is LISTENING on a port. `lsof` can't attribute the
+# socket without privileges on some hosts (e.g. a GCP VM — it returns nothing
+# while a process holds the port), so fall back to `ss` (Linux). May echo empty
+# even when the port IS held — callers must treat "is it up?" as a separate
+# question answered by /health/ping, never by whether this returns a PID.
+port_listener_pid() {
+  local p="$1" pid
+  pid=$(lsof -ti:"$p" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+  if [ -z "$pid" ] && command -v ss >/dev/null 2>&1; then
+    # No -H / sport filter (older ss lacks them); grep the port off the local addr.
+    pid=$(ss -ltnp 2>/dev/null | grep -E "[:.]${p}[[:space:]]" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)
+  fi
+  echo "$pid"
+}
+
 # ── Argument parsing ────────────────────────────────────────────────────────
 
 ACTION="install"
@@ -479,19 +494,16 @@ start_bridge() {
   # Detect what's actually on the port by its LISTENER (not just the PID file) so
   # a bridge started any other way — or a stale/foreign holder — is handled
   # (BUG-1/2). lsof listener-only never returns connected-client PIDs.
-  local listener
-  listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
-  # lsof can't attribute the socket without privileges on some hosts (seen on a
-  # GCP VM — lsof returned nothing while a stale bridge held the port). Fall back
-  # to `ss` (Linux) so a foreign/stale holder is still detected pre-flight.
-  if [ -z "$listener" ] && command -v ss >/dev/null 2>&1; then
-    listener=$(ss -ltnHp "sport = :$PORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)
+  # Already-running detection keys off /health/ping (source of truth), independent
+  # of whether lsof/ss can name the PID — lsof is blind to the socket on some hosts.
+  if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
+    warn "Bridge already running on port $PORT (PID $(port_listener_pid "$PORT" | sed 's/^$/?/')). Use 'claude-bridge restart' to replace it."
+    return
   fi
+  # Port may still be held by a NON-serving (foreign/wedged) holder. lsof→ss.
+  local listener
+  listener=$(port_listener_pid "$PORT")
   if [ -n "$listener" ]; then
-    if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
-      warn "Bridge already running (PID $listener, port $PORT). Use 'claude-bridge restart' to replace it."
-      return
-    fi
     # Port held but not answering as a bridge → foreign/wedged holder.
     if [ "${FORCE:-0}" = "1" ]; then
       warn "Port $PORT held by PID $listener (not serving) — killing (--force)"
@@ -1015,9 +1027,11 @@ doctor() {
   echo "Prerequisites:" ; check_prereqs || true
   echo "" ; echo "Claude Code wiring:" ; check_hooks || true; check_mcp || true; check_skill || true
   echo "" ; echo "Bridge server:"
-  local listener; listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
-  if [ -n "$listener" ] && curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
-    ok "Running (PID $listener, port $PORT)"
+  # Liveness from /health/ping (source of truth); PID is best-effort (lsof is blind
+  # on some hosts). Don't say "not running" just because we couldn't get a PID.
+  local listener; listener=$(port_listener_pid "$PORT")
+  if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
+    ok "Running (PID ${listener:-?}, port $PORT)"
     # Stale-code check: code changed after the bridge started? (pull ≠ restart, OPS-4)
     if [ -f "$PID_FILE" ] && [ "$(_mtime "$REPO_DIR/bridge-server.mjs")" -gt "$(_mtime "$PID_FILE")" ]; then
       warn "Running bridge is OLDER than bridge-server.mjs — run 'claude-bridge restart' to apply the latest code"
@@ -1058,11 +1072,14 @@ health_cmd() {
   echo "claude-bridge health (repo v$VERSION)"
   echo "===================="
   echo ""
-  local listener; listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
-  if [ -z "$listener" ] || ! curl -sf --max-time 2 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
+  # Liveness is decided ONLY by /health/ping — the source of truth. Do NOT gate on
+  # lsof finding a listener PID: lsof is blind to the socket on some hosts (the VM),
+  # which made health falsely report "not running" while the bridge was up + serving.
+  if ! curl -sf --max-time 2 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
     fail "Bridge not running on port $PORT — start it with 'claude-bridge start'"
     return 1
   fi
+  local listener; listener=$(port_listener_pid "$PORT"); [ -z "$listener" ] && listener="?"
   ok "Running — PID $listener · port $PORT · log /tmp/claude-bridge-server.log"
 
   # Full /health is token-gated when sharing is on, so send the token if we have
