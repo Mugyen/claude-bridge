@@ -394,7 +394,8 @@ The installer touches these files and locations. All changes are fully reversibl
 | Hooks fire but agent can't call bridge tools | Session was open before install — restart the session to load MCP tools |
 | `--share` says "cloudflared not found" | Install it: `brew install cloudflared` (no account needed for a quick tunnel) |
 | Spoke can't reach the hub / join link stopped working | Quick-tunnel URLs rotate when cloudflared restarts. Re-run `./claude-bridge --share` on the hub to reprint the link, then re-`--join` on the spoke |
-| `/health` returns 401 | Expected when sharing is on — it's token-gated. Use `./claude-bridge --check` (it probes the ungated `/health/ping`) |
+| `/health` returns 401 | Expected when sharing is on — it's token-gated. Run **`claude-bridge health`** (it reads the token for you and renders role, topology, connected clients, and message counts), or `claude-bridge status`/`--check` which probe the ungated `/health/ping` |
+| Want a live view of who's connected | **`claude-bridge health`** — server up/PID/port, role/node, hub+spoke topology, the registered-client roster (by node), and pending/answered/notice counts. Bare `claude-bridge` just prints help; `install` is an explicit command |
 | Remote session doesn't appear in `list_sessions` | Confirm the link is up (`--check` on both ends shows role/tunnel). The spoke re-advertises on (re)connect; give it a few seconds |
 | Two machines have the same session name | Bare-name `ask` resolves **local-first**; reach the remote one explicitly as `name@node` (see `list_sessions` for the node) |
 | Something seems wrong | Run `./claude-bridge --check` in the repo directory |

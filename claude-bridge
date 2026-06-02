@@ -53,10 +53,12 @@ ARG3="${3:-}"
 # Accept BOTH the new verb form (claude-bridge <verb>) and the original --flags
 # (back-compat — nothing that scripts/docs used before breaks).
 case "${1:-}" in
-  ""|install)               ACTION="install" ;;
+  "")                       ACTION="help" ;;   # bare `claude-bridge` = show help, NOT install (install is an explicit verb)
+  install)                  ACTION="install" ;;
   reinstall)                ACTION="install" ;;
   --uninstall|uninstall)    ACTION="uninstall" ;;
   --check|check|status)     ACTION="check" ;;
+  --health|health)          ACTION="health" ;;
   --start|start)            ACTION="start" ;;
   --stop|stop)              ACTION="stop" ;;
   --restart|restart)        ACTION="restart" ;;
@@ -987,6 +989,63 @@ doctor() {
   echo ""
 }
 
+health_cmd() {
+  echo ""
+  echo "claude-bridge health (repo v$VERSION)"
+  echo "===================="
+  echo ""
+  local listener; listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+  if [ -z "$listener" ] || ! curl -sf --max-time 2 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
+    fail "Bridge not running on port $PORT — start it with 'claude-bridge start'"
+    return 1
+  fi
+  ok "Running — PID $listener · port $PORT · log /tmp/claude-bridge-server.log"
+
+  # Full /health is token-gated when sharing is on, so send the token if we have
+  # one. (Falls back to the ungated ping if the full view is unavailable.)
+  local token resp
+  token=$(cat "$TOKEN_FILE" 2>/dev/null || true)
+  if [ -n "$token" ]; then
+    resp=$(curl -sf --max-time 2 -H "X-Bridge-Token: $token" "http://localhost:$PORT/health" 2>/dev/null || true)
+  else
+    resp=$(curl -sf --max-time 2 "http://localhost:$PORT/health" 2>/dev/null || true)
+  fi
+  if [ -z "$resp" ]; then
+    warn "Full /health unavailable (gated, and no/!wrong token) — ping only:"
+    curl -sf "http://localhost:$PORT/health/ping" 2>/dev/null | jq . 2>/dev/null || true
+    return 0
+  fi
+
+  local role node tok
+  role=$(echo "$resp" | jq -r '.role'); node=$(echo "$resp" | jq -r '.node')
+  [ -n "$token" ] && tok="yes" || tok="no"   # /health has no .sharing field; the token file is the source of truth
+  echo ""
+  echo "Topology:"
+  ok "Role: $role · Node: $node · Token configured: $tok"
+  if [ "$role" = "spoke" ]; then
+    local hub; hub=$(cat "$HUB_FILE" 2>/dev/null || true)
+    if [ -n "$hub" ]; then
+      if curl -sf --max-time 6 "$hub/health/ping" >/dev/null 2>&1; then ok "Hub: $hub (reachable)"
+      else warn "Hub: $hub (NOT reachable — outage or tunnel down)"; fi
+    fi
+  elif [ "$role" = "hub" ]; then
+    if [ -f "$TUNNEL_URL_FILE" ]; then ok "Tunnel: $(cat "$TUNNEL_URL_FILE" 2>/dev/null)"
+    else warn "Hub mode but no tunnel URL recorded — 'claude-bridge share' to (re)open"; fi
+    local spokes; spokes=$(echo "$resp" | jq -r '[.sessions[]?|.node]|map(select(.!="local" and .!=null))|unique|.[]' 2>/dev/null || true)
+    if [ -n "$spokes" ]; then echo "  Connected spokes:"; echo "$spokes" | sed 's/^/    • /'
+    else warn "No spokes connected"; fi
+  fi
+
+  echo ""
+  echo "Registered clients ($(echo "$resp" | jq -r '.sessions|length') session(s)):"
+  echo "$resp" | jq -r '.sessions[]? | "  • \(.name)\(if (.node // "local") != "local" then " @\(.node)" else "" end)\(if (.description // "") != "" then " — \(.description)" else "" end)"' 2>/dev/null || true
+
+  echo ""
+  echo "Messages:"
+  ok "pending $(echo "$resp" | jq -r '.pending') · answered $(echo "$resp" | jq -r '.answered') · notices $(echo "$resp" | jq -r '.notices')"
+  echo ""
+}
+
 print_help() {
   cat <<HELP
 
@@ -1001,7 +1060,8 @@ SETUP & MAINTENANCE
   update                  git pull → reinstall → restart the bridge (pull alone won't reload the server)
   uninstall               Remove skill, MCP, hooks, configs, dotfiles, PATH symlink (leaves a running bridge — stop it explicitly)
   doctor                  Deep health check (prereqs, running bridge, version/role drift, tunnel, ports, log)
-  status                  Quick component status
+  health                  Live server health: role, topology, connected clients (hub+spokes), message counts
+  status                  Quick component status (installed vs repo version, wiring)
   version                 Repo / installed / running versions
   logs [-f]               Show (or follow) the CLI action log
 
@@ -1206,6 +1266,10 @@ case "$ACTION" in
 
   doctor)
     doctor
+    ;;
+
+  health)
+    health_cmd
     ;;
 
   update)

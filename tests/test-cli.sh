@@ -61,6 +61,18 @@ fi
 # logs command tails without error
 SH logs >/dev/null 2>&1 && ok "logs → exit 0" || bad "logs command"
 
+# bare `claude-bridge` (no args) → help, and must NOT run the installer
+OUT=$(SH); RC=$?
+if [ $RC -eq 0 ] && echo "$OUT" | grep -q "USAGE" && ! echo "$OUT" | grep -q "Installing..."; then
+  ok "bare 'claude-bridge' → help (does not install)"
+else bad "bare invocation (rc=$RC, installed=$(echo "$OUT" | grep -q Installing && echo yes || echo no))"; fi
+
+# health → against a port with no bridge, reports not-running (non-zero) without crashing
+OUT=$(CC_BRIDGE_PORT=7499 bash "$REPO_DIR/claude-bridge" health 2>&1); RC=$?
+if [ $RC -ne 0 ] && echo "$OUT" | grep -qi "not running"; then
+  ok "health → 'not running' when no bridge on the port"
+else bad "health no-bridge (rc=$RC: $(echo "$OUT" | tail -2))"; fi
+
 # server/hub-only install: no `claude` on PATH → install still succeeds (warns,
 # skips hooks/MCP/skill/Desktop) and still symlinks the CLI. Build a PATH with
 # node/jq/curl/git/bash but NO claude.
