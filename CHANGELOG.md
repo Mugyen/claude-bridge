@@ -12,6 +12,7 @@ heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
 ### Changed
+- **`uninstall` is now a full teardown — it STOPS the running bridge** (and closes the federation tunnel), reversing the old "leave the server running" behavior. The stop is the last step (after all file/config removal) and targets the listener by port, so a self-disconnect can only land once cleanup is done; graceful SIGTERM then SIGKILL-after-grace. A loud warning prints up front (run it from a separate terminal). Test in `tests/test-cli.sh`; DEVELOPER.md lesson #15 updated.
 - **Bare `claude-bridge` (no command) now prints help instead of installing.** Running it with no args used to re-run the full installer — surprising once it's a real CLI. `install` is an explicit verb; bare invocation shows usage (like `git`).
 - **`claude-bridge install` now works on a headless hub/server node without the Claude Code CLI.** `claude` was a hard prereq (the installer aborted), but a box that only runs the bridge process doesn't need it — hooks/MCP/skill/Desktop are workstation-only. Missing `claude` is now a warning: the install skips those steps but still puts `claude-bridge` on PATH so the server can be driven with `start`/`stop`/`share`/`doctor`. Regression test in `tests/test-cli.sh`.
 

@@ -1188,6 +1188,10 @@ case "$ACTION" in
     echo "claude-bridge uninstaller (running v$VERSION)"
     echo "====================="
     echo ""
+    warn "Full teardown: this removes all config AND stops the running bridge."
+    warn "Connected Claude sessions will be disconnected. If you're running this"
+    warn "FROM a session bound to the bridge, run it from a SEPARATE terminal instead."
+    echo ""
 
     # Detect prior installed version
     if [ -f "$VERSION_FILE" ]; then
@@ -1212,14 +1216,6 @@ case "$ACTION" in
     remove_skill
     remove_claude_md_legacy
     remove_desktop
-    # Kill the federation tunnel child if running (it's not the bridge; lesson #15
-    # — uninstall does NOT stop the bridge server itself).
-    if [ -f "$TUNNEL_PID_FILE" ]; then
-      tp=$(cat "$TUNNEL_PID_FILE" 2>/dev/null || echo "")
-      if [ -n "$tp" ] && kill -0 "$tp" 2>/dev/null; then
-        kill "$tp" 2>/dev/null && ok "Closed federation tunnel (PID $tp)"
-      fi
-    fi
     # Federation config files (hardcoded fallback in case the manifest is missing).
     rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" && ok "Federation config removed (token, role, hub, node)"
     # Remove the claude-bridge CLI symlink from PATH (manifest handles the tracked
@@ -1231,11 +1227,34 @@ case "$ACTION" in
         [ -e "$cli" ] && warn "Could not remove $cli (run: sudo rm -f $cli)" || ok "Removed CLI symlink: $cli"
       fi
     done
+    # Capture runtime PIDs BEFORE we wipe the /tmp markers that record them.
+    tunnel_pid=$(cat "$TUNNEL_PID_FILE" 2>/dev/null || echo "")
     rm -f /tmp/claude-bridge-* /tmp/cc-bridge-* /tmp/claude-bridge.pid /tmp/cc-bridge.pid
-    ok "Temp files cleaned (/tmp/{claude,cc}-bridge-* incl. tunnel pid/url)"
+    ok "Temp files cleaned (/tmp/{claude,cc}-bridge-* incl. session state + pid/url)"
     rm -f "$VERSION_FILE"
+
+    # FINAL step — full teardown: close the tunnel, then stop the running bridge.
+    # Done LAST so that if this is run from a session bound to the bridge, the
+    # disconnect can only land AFTER every other cleanup step has completed.
+    if [ -n "$tunnel_pid" ] && kill -0 "$tunnel_pid" 2>/dev/null; then
+      kill "$tunnel_pid" 2>/dev/null && ok "Closed federation tunnel (PID $tunnel_pid)" || true
+    fi
+    listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+    if [ -n "$listener" ]; then
+      warn "Stopping the running bridge (PID $listener) — connected sessions will disconnect"
+      kill "$listener" 2>/dev/null || true          # SIGTERM → graceful SSE close in the server
+      for _ in 1 2 3 4 5 6; do kill -0 "$listener" 2>/dev/null || break; sleep 0.3; done
+      kill -0 "$listener" 2>/dev/null && { kill -9 "$listener" 2>/dev/null || true; }
+      if lsof -ti:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+        warn "Bridge still on :$PORT — stop it manually:  lsof -ti:$PORT | xargs kill"
+      else
+        ok "Bridge stopped (port $PORT free)"
+      fi
+    else
+      ok "No running bridge on port $PORT"
+    fi
     echo ""
-    echo "Done. Stop any running bridge server: ./claude-bridge --stop"
+    echo "Done — config removed, bridge stopped, everything cleared."
     echo "Relaunch Claude Desktop app if it was configured."
     echo ""
     ;;

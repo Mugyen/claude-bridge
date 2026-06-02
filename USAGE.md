@@ -439,15 +439,17 @@ Replace `/path/to/claude-bridge` with the actual repo path.
 ./claude-bridge --uninstall
 ```
 
-Removes:
+**Uninstall is a full teardown** — it removes all config **and stops the running bridge** (and closes the federation tunnel). Removes:
 - All 5 bridge hooks from `~/.claude/settings.json`
 - MCP server registration (`claude mcp remove bridge`)
-- Bridge protocol skill (`~/.claude/skills/claude-bridge/`)
+- Bridge protocol skill + debug skill (`~/.claude/skills/claude-bridge*/`)
 - Legacy CLAUDE.md protocol docs (if present from older versions)
 - Desktop app config entry from `claude_desktop_config.json`
+- Federation config (token, role, hub, node) + the CLI symlink on PATH
 - All temp files (`/tmp/claude-bridge-*`)
+- **The running bridge server itself** (graceful SIGTERM; closes the tunnel)
 
-Relaunch the Desktop app after uninstalling. Stop the bridge server separately: `./claude-bridge --stop`.
+⚠️ Connected Claude sessions will be disconnected. Run uninstall from a **separate terminal**, not from a session bound to the bridge (stopping it can kill the calling session — see DEVELOPER.md lesson #23). Relaunch the Desktop app afterward.
 
 ### Or tell your agent
 

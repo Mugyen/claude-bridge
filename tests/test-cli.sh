@@ -104,6 +104,24 @@ if [ $RC -ne 0 ] && echo "$OUT" | grep -qi "not running"; then
   ok "health → 'not running' when no bridge on the port"
 else bad "health no-bridge (rc=$RC: $(echo "$OUT" | tail -2))"; fi
 
+# uninstall is a FULL teardown: it STOPS a running bridge (not just config removal).
+# Isolated HOME + a throwaway port so it never touches real config or :7400.
+if command -v node >/dev/null 2>&1; then
+  THOME="$TMP/teardown"; mkdir -p "$THOME/.claude"
+  HOME="$THOME" CC_BRIDGE_PORT=7497 bash "$REPO_DIR/claude-bridge" start >/dev/null 2>&1
+  sleep 1
+  up=$(curl -sf --max-time 1 http://localhost:7497/health/ping >/dev/null 2>&1 && echo yes || echo no)
+  HOME="$THOME" CC_BRIDGE_PORT=7497 bash "$REPO_DIR/claude-bridge" uninstall >/dev/null 2>&1
+  sleep 1
+  down=$(curl -sf --max-time 1 http://localhost:7497/health/ping >/dev/null 2>&1 && echo no || echo yes)
+  lsof -ti:7497 2>/dev/null | xargs kill 2>/dev/null || true
+  if [ "$up" = yes ] && [ "$down" = yes ]; then
+    ok "uninstall stops the running bridge (full teardown)"
+  else bad "uninstall teardown (bridge up before=$up, stopped after=$down)"; fi
+else
+  ok "uninstall teardown test skipped (no node)"
+fi
+
 # server/hub-only install: no `claude` on PATH → install still succeeds (warns,
 # skips hooks/MCP/skill/Desktop) and still symlinks the CLI. Build a PATH with
 # node/jq/curl/git/bash but NO claude.

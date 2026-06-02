@@ -158,8 +158,13 @@ If you install cc-bridge mid-session, hooks fire (settings.json is hot-loaded) b
 ### 14. The "MCP installed" check via `claude mcp list` is slow (~1s)
 Run it ONCE per session in SessionStart and cache the result. Other hooks just read the cache.
 
-### 15. Uninstall does NOT stop the bridge server
-Intentional — the server may have active sessions from other users/contexts. Uninstall removes config files and the PID file, but the running process stays. Users must `./claude-bridge --stop` explicitly (or `lsof -ti:7400 | xargs kill`). The reinstall path handles this gracefully: `--start` reports failure if port is busy, and you can investigate with `--check`.
+### 15. Uninstall IS a full teardown — it STOPS the running bridge (reversed v2.7.0)
+**Originally** uninstall left the server running (the thinking: it might serve other sessions). The owner reversed this: **uninstall = remove everything AND stop the bridge + close the tunnel.** Implementation rules that must hold:
+- The bridge stop is the **LAST** action in the uninstall case, *after* all config/file removal. Reason: if uninstall is run from a session bound to the bridge, stopping it disconnects that session and the harness may SIGKILL the in-flight script (lesson #23) — doing it last means every other cleanup step has already completed.
+- It stops by **listener port** (`lsof -ti:PORT -sTCP:LISTEN`), not the PID file — the temp cleanup deletes the PID file first, and the bridge may be unmanaged. Capture the **tunnel** PID *before* the `/tmp` wipe (the wipe removes `claude-bridge-tunnel.pid`), then kill it.
+- Graceful first (`SIGTERM` → server emits `event: close`), then `SIGKILL` after a short grace if still bound.
+- A loud warning prints at the top ("connected sessions will disconnect; run from a separate terminal"). Uninstall stays non-interactive (no prompt).
+- Test: `tests/test-cli.sh` starts a throwaway bridge on an isolated HOME + port 7497 and asserts uninstall leaves the port free. (Never test this against :7400.)
 
 ### 16. The `Monitor` tool is the ONLY way to wake a dormant agent — and the repo can't call it
 Hooks fire during active work (PostToolUse/Stop) but nothing fires while a session is truly idle, waiting on the user. A hook that spawns a detached background poller can't help: a detached process has no channel back into the model. The only primitive that re-invokes a dormant agent is a background `Monitor` task **the agent itself armed** (its stdout lines become harness notifications). So the bridge can't "auto-run" a monitor — it can only *instruct the agent* to arm one. The idle-listener does exactly that: `bridge-hook.sh` nudges the agent (once, on first ask/reply) with a ready-made Monitor command. This is Claude Code CLI only (Desktop has neither hooks nor Monitor).
