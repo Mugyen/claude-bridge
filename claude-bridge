@@ -481,6 +481,12 @@ start_bridge() {
   # (BUG-1/2). lsof listener-only never returns connected-client PIDs.
   local listener
   listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+  # lsof can't attribute the socket without privileges on some hosts (seen on a
+  # GCP VM — lsof returned nothing while a stale bridge held the port). Fall back
+  # to `ss` (Linux) so a foreign/stale holder is still detected pre-flight.
+  if [ -z "$listener" ] && command -v ss >/dev/null 2>&1; then
+    listener=$(ss -ltnHp "sport = :$PORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)
+  fi
   if [ -n "$listener" ]; then
     if curl -sf --max-time 1 "http://localhost:$PORT/health/ping" >/dev/null 2>&1; then
       warn "Bridge already running (PID $listener, port $PORT). Use 'claude-bridge restart' to replace it."
@@ -523,12 +529,22 @@ start_bridge() {
     sleep 0.3
   done
 
-  if [ -n "$up" ]; then
-    # Guard the read: the PID file is written by the server after bind; if it's
-    # momentarily absent, fall back to the spawned child pid so a failing `cat`
-    # under `set -euo pipefail` can't silently abort the script (BUG-1).
+  if [ -n "$up" ] && kill -0 "$child" 2>/dev/null; then
+    # /health/ping answers AND our spawned child is still alive → the child owns
+    # the port. Real success. (Guard the read: the PID file is written by the
+    # server after bind; if momentarily absent, fall back to the child pid so a
+    # failing `cat` under `set -euo pipefail` can't silently abort the script.)
     local started; started=$(cat "$PID_FILE" 2>/dev/null || echo "$child")
     ok "Bridge started (PID ${started}, port $PORT, log: /tmp/claude-bridge-server.log)"
+  elif [ -n "$up" ]; then
+    # Something answers /health/ping but our child has already EXITED — a stale or
+    # foreign bridge is holding the port and masking the child's EADDRINUSE death.
+    # Reporting "started" here was the bug: `start` lied, then `health` (gated)
+    # said "not running". Detect it and tell the user how to clear the stale one.
+    fail "Port $PORT is already served by a DIFFERENT process — the new server exited (likely EADDRINUSE)."
+    echo "      A stale/foreign bridge is holding the port. Replace it with:  claude-bridge restart --force"
+    echo "      or clear it manually:  pkill -f bridge-server.mjs   (then 'claude-bridge start')."
+    return 1
   else
     kill "$child" 2>/dev/null || true
     fail "Bridge failed to start on port $PORT — check /tmp/claude-bridge-server.log"
@@ -793,7 +809,18 @@ share_hub() {
     echo "    ./claude-bridge --join 'https://${named_tunnel}#${token}'"
     echo ""
   else
-    # Quick tunnel: ephemeral *.trycloudflare.com URL, zero setup.
+    # Quick tunnel: ephemeral *.trycloudflare.com URL, zero setup — but UNRELIABLE.
+    echo ""
+    echo -e "${RED}  ╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}  ║  ⚠  QUICK TUNNEL — NOT RECOMMENDED                                    ║${NC}"
+    echo -e "${RED}  ║  Cloudflare *.trycloudflare.com quick tunnels are FLAPPY: they drop   ║${NC}"
+    echo -e "${RED}  ║  and rotate, the URL changes, and long-lived links (replies coming    ║${NC}"
+    echo -e "${RED}  ║  back to spokes) get silently dropped. This is a Cloudflare-side      ║${NC}"
+    echo -e "${RED}  ║  limitation of quick tunnels, not a bridge bug — it WILL be unstable. ║${NC}"
+    echo -e "${RED}  ║  Use a NAMED tunnel instead:                                          ║${NC}"
+    echo -e "${RED}  ║      claude-bridge share --named-tunnel <your-hostname>               ║${NC}"
+    echo -e "${RED}  ╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
     # Tunnel the FED PORT (loopback-only link surface), never the main bridge port.
     launch_cloudflared "$tunnel_log" cloudflared tunnel --url "http://localhost:${FED_PORT}"
     ok "Opening Cloudflare quick tunnel..."
@@ -1066,8 +1093,21 @@ health_cmd() {
       else warn "Hub: $hub (NOT reachable — outage or tunnel down)"; fi
     fi
   elif [ "$role" = "hub" ]; then
-    if [ -f "$TUNNEL_URL_FILE" ]; then ok "Tunnel: $(cat "$TUNNEL_URL_FILE" 2>/dev/null)"
-    else warn "Hub mode but no tunnel URL recorded — 'claude-bridge share' to (re)open"; fi
+    # Tunnel: URL + whether the cloudflared PROCESS is alive + whether the URL is
+    # actually reachable end-to-end. (Previously only printed the recorded URL, so
+    # a dead/flapping tunnel looked the same as a healthy one.)
+    local turl tpid
+    turl=$(cat "$TUNNEL_URL_FILE" 2>/dev/null || true)
+    tpid=$(cat "$TUNNEL_PID_FILE" 2>/dev/null || true)
+    if [ -z "$turl" ]; then
+      warn "Tunnel: none recorded — hub isn't exposed. Run: claude-bridge share --named-tunnel <host>"
+    else
+      if [ -n "$tpid" ] && kill -0 "$tpid" 2>/dev/null; then ok "Tunnel URL: $turl"; ok "Tunnel process: UP (cloudflared PID $tpid)"
+      else fail "Tunnel URL: $turl"; fail "Tunnel process: DOWN (cloudflared not running) — re-run share"; fi
+      # End-to-end reachability through Cloudflare (the real test).
+      if curl -sf --max-time 8 "$turl/health/ping" >/dev/null 2>&1; then ok "Tunnel reachable: $turl/health/ping → 200"
+      else fail "Tunnel NOT reachable: $turl returns an error (530/timeout) — spokes can't connect"; fi
+    fi
     local spokes; spokes=$(echo "$resp" | jq -r '[.sessions[]?|.node]|map(select(.!="local" and .!=null))|unique|.[]' 2>/dev/null || true)
     if [ -n "$spokes" ]; then echo "  Connected spokes:"; echo "$spokes" | sed 's/^/    • /'
     else warn "No spokes connected"; fi
