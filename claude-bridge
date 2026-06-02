@@ -1102,7 +1102,10 @@ run_install_steps() {
 
 CLI_ARGS="${*:2}"
 # Log every invocation (success OR failure) to ~/.claude/claude-bridge.log.
-trap 'log_action "exit:$?"' EXIT
+# Log every invocation AND preserve the real exit code — without re-exiting, a
+# command's `return 1` (e.g. `health` when the bridge is down) gets clobbered by
+# log_action's own status, so `if claude-bridge health` would misread success.
+trap 'rc=$?; log_action "exit:$rc"; exit $rc' EXIT
 case "$ACTION" in
   install)
     echo ""
