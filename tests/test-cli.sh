@@ -81,9 +81,11 @@ else bad "debug skill read-only rule missing"; fi
 # is present — server/hub-only installs skip skill wiring, covered separately).
 if command -v claude >/dev/null 2>&1; then
   SH2HOME="$TMP/skillhome"; mkdir -p "$SH2HOME/.claude"
-  HOME="$SH2HOME" bash "$REPO_DIR/claude-bridge" install >/dev/null 2>&1
+  # CC_BRIDGE_PORT=7498 (unused) so uninstall's full-teardown step can't stop a
+  # real bridge on the default :7400 — uninstall now kills the listener on $PORT.
+  HOME="$SH2HOME" CC_BRIDGE_PORT=7498 bash "$REPO_DIR/claude-bridge" install >/dev/null 2>&1
   both_in=$([ -f "$SH2HOME/.claude/skills/claude-bridge/SKILL.md" ] && [ -f "$SH2HOME/.claude/skills/claude-bridge-debug/SKILL.md" ] && echo yes || echo no)
-  HOME="$SH2HOME" bash "$REPO_DIR/claude-bridge" uninstall >/dev/null 2>&1
+  HOME="$SH2HOME" CC_BRIDGE_PORT=7498 bash "$REPO_DIR/claude-bridge" uninstall >/dev/null 2>&1
   both_gone=$([ ! -d "$SH2HOME/.claude/skills/claude-bridge" ] && [ ! -d "$SH2HOME/.claude/skills/claude-bridge-debug" ] && echo yes || echo no)
   if [ "$both_in" = yes ] && [ "$both_gone" = yes ]; then
     ok "install lands protocol+debug skills; uninstall removes both"
