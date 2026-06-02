@@ -637,7 +637,17 @@ function spokeAdvertise() {
   if (FED.role !== "spoke") return Promise.resolve();
   return hubPost("/link/register", { node: FED.node, sessions: linkSessions() }).then((r) => {
     if (r && Array.isArray(r.roster)) {
-      remoteRoster = r.roster.filter((e) => e.node !== FED.node);
+      // The hub's register response is globalRoster(), which tags the hub's OWN
+      // sessions node:"local" (correct only ON the hub). Across the link that must
+      // become the hub's real node id (r.node) — otherwise resolveTarget here, being
+      // local-first, treats them as local-and-absent and returns "not connected"
+      // instead of forwarding to the hub. This bit cross-device messaging on every
+      // re-link (the stream-broadcast path is already node-keyed, so it only showed
+      // when no broadcast followed the register). r.node is the hub's node id.
+      const hubNode = (r.node && String(r.node)) || "hub";
+      remoteRoster = r.roster
+        .map((e) => (e.node === "local" ? { ...e, node: hubNode } : e))
+        .filter((e) => e.node !== FED.node);
     }
     return r;
   });

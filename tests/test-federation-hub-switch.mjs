@@ -45,6 +45,14 @@ try {
   }
   assert("linked to hubA → spoke sees alice@huba", sawAlice, JSON.stringify(await spoke.call("list_sessions")));
 
+  // The hub's own session must be tagged with the HUB's node id on the spoke —
+  // NOT "local". If it's "local", the spoke's local-first resolveTarget treats it
+  // as local-and-absent and an ask() returns "not connected" instead of forwarding
+  // (the cross-device messaging bug confirmed live on re-link).
+  const aliceEntry = ((await spoke.call("list_sessions")).sessions || []).find((s) => s.name === "alice");
+  assert("hub session tagged with hub node 'huba' (not 'local') so it routes remotely",
+    aliceEntry && aliceEntry.node === "huba", JSON.stringify(aliceEntry));
+
   // ── SWITCH spoke → hubB (same token, hot reload) ─────────────────────────
   // The old hubA link must be torn down: alice disappears, carol appears.
   await spoke.reloadFed({ token: TOKEN, role: "spoke", node: "spoke", hub: `http://localhost:${B_FED}` });
@@ -58,6 +66,10 @@ try {
   }
   assert("after switch → stale hubA roster cleared (no alice ghost)", cleared, JSON.stringify(await spoke.call("list_sessions")));
   assert("after switch → new hubB link live (sees carol@hubb)", sawCarol, JSON.stringify(await spoke.call("list_sessions")));
+
+  const carolEntry = ((await spoke.call("list_sessions")).sessions || []).find((s) => s.name === "carol");
+  assert("after switch → hubB session tagged 'hubb' (not 'local') — routes remotely after re-link",
+    carolEntry && carolEntry.node === "hubb", JSON.stringify(carolEntry));
 
   // ── Old hub goes DOWN, then we unlink ────────────────────────────────────
   // Kill hubB entirely, then unlink the spoke. The local teardown must still
