@@ -1077,14 +1077,15 @@ is best investigated from a fresh session with full context.
   1. Open a NEW Claude Code session (any folder is fine).
   2. Say:  debug bridge
 
-Claude will then act as an expert, READ-ONLY debugger:
+Claude will then act as an expert debugger (READ-ONLY by default):
   • read the installed bridge code + the server/CLI logs
   • explain the architecture and reconstruct what happened
   • root-cause the issue
   • prepare a GitHub issue (or a maintainer email) — shown to you first, never sent automatically
   • hand you a clean, no-code temporary fix you can run yourself
 
-It will NOT change your bridge, restart it, or edit any config — strictly hands-off.
+By default it changes nothing. It will only apply a fix / restart the bridge if
+YOU explicitly grant permission — then it acts as a full dev within that scope.
 EOF
   if [ "$installed" = "yes" ]; then
     ok "Debug skill is installed ($DEBUG_SKILL_DIR)"
@@ -1223,10 +1224,11 @@ case "$ACTION" in
     rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" && ok "Federation config removed (token, role, hub, node)"
     # Remove the claude-bridge CLI symlink from PATH (manifest handles the tracked
     # one; this hardcoded fallback covers both install locations).
+    UNSUDO="sudo"; [ -t 0 ] || UNSUDO="sudo -n"   # never hang on a password prompt non-interactively
     for cli in /usr/local/bin/claude-bridge "$HOME/.local/bin/claude-bridge"; do
       if [ -L "$cli" ] || [ -e "$cli" ]; then
-        rm -f "$cli" 2>/dev/null || { command -v sudo >/dev/null 2>&1 && sudo rm -f "$cli" 2>/dev/null; }
-        [ -e "$cli" ] || ok "Removed CLI symlink: $cli"
+        rm -f "$cli" 2>/dev/null || { command -v sudo >/dev/null 2>&1 && $UNSUDO rm -f "$cli" 2>/dev/null; }
+        [ -e "$cli" ] && warn "Could not remove $cli (run: sudo rm -f $cli)" || ok "Removed CLI symlink: $cli"
       fi
     done
     rm -f /tmp/claude-bridge-* /tmp/cc-bridge-* /tmp/claude-bridge.pid /tmp/cc-bridge.pid

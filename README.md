@@ -143,6 +143,7 @@ claude-bridge runs a single Node.js HTTP server speaking MCP over SSE. Claude Co
 ## :book: More
 
 - **[USAGE.md](USAGE.md)** -- setup for CLI and Desktop app, troubleshooting
+- **[docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)** -- step-by-step guide to linking machines (hub/spoke, exact getting-started steps)
 - **[BRIDGE.md](BRIDGE.md)** -- protocol docs (what the agent reads to know how to use the bridge)
 - **[LICENSE](LICENSE)** -- MIT
 

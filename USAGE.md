@@ -203,6 +203,8 @@ Tune the interval with `CC_BRIDGE_MONITOR_INTERVAL` (seconds, default 25).
 
 By default the bridge is localhost-only. **Federation** links bridges on different machines so their agents can `ask`/`reply`/`notify` each other. It's hub-and-spoke: one person runs the **hub** (and a tunnel); everyone else **joins** as a spoke. Your sessions never leave localhost -- only the bridge-to-bridge link rides the tunnel, so if the link drops, local coordination keeps working and cross-network resumes automatically (queued messages are not lost).
 
+> 📘 **New to this? Start with the step-by-step guide: [docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)** — prerequisites, exact hub/spoke setup steps, verifying, disconnect/reconnect, and troubleshooting. The summary below is the quick version.
+
 ### What you do
 
 **Prerequisite (hub only):** `cloudflared`. As of the federation release **`--share` auto-installs it** for your OS (Homebrew on macOS; the matching static binary on Linux) and best-effort **updates** it if already present — so usually you don't do anything. No account needed for the default quick tunnel. The bridge *server* stays zero-dependency; cloudflared is installed only on the hub path where a tunnel is opened. To manage it yourself instead, set `CC_BRIDGE_NO_AUTOINSTALL=1` and install via `brew install cloudflared` (macOS) or the [Cloudflare downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
