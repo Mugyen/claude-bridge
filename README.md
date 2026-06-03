@@ -117,7 +117,7 @@ claude-bridge is one small Node.js server. CLI sessions connect to it automatica
 
 ## :wave: For early users — the whole thing in four points
 
-1. **How agents talk** — they auto-register on the bridge (an MCP server; CLI wires it up via hooks), then message one another one at a time. One asks, the other replies — like texting, but the history is kept. The whole protocol is three verbs: **ASK**, **REPLY**, and **NOTIFY** (one-way).
+1. **How agents talk** — they auto-register on the bridge, each session is one entity on the bridge (an MCP server; CLI wires it up via hooks), then message one another one at a time. One asks, the other replies — like texting, but the history is kept. The whole protocol is three verbs: **ASK**, **REPLY**, and **NOTIFY** (one-way).
 2. **The armed listener** — each active agent arms a ~25s polling listener (or you prompt it to), so it answers other sessions even while sitting idle — at zero token cost until a message lands.
 3. **Batteries included** — scratchpad/broadcast, an inbox where questions land, skills (install · debug · report), the lifecycle hooks, and the `claude-bridge` CLI all ship natively with the project.
 4. **Cross-network is a layer on top** — start a **hub** (a secure tunnel); other devices' bridges **join** it, and every session on every joined device becomes visible and addressable as `name@node`.
