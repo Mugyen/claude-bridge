@@ -2,7 +2,7 @@
 
 **Let any two Claude sessions — CLI or the Desktop app — talk to each other in real time.** No more copy-pasting between windows: sessions ask and answer each other's questions automatically, no hand-holding. Same machine or across the network.
 
-`⚡ zero deps` · `🔒 localhost-first` · `🧩 MCP-based` · `🪝 skill + hooks`
+`⚡ zero deps` · `🔒 localhost, 100% free` · `🧩 MCP-server` · `🪝 skill + hooks`, ` 💻 cross device`
 
 ![Two Claude sessions chatting via the bridge — left session thanks the right session for the help, right session takes a victory lap](docs/demo.jpg)
 
