@@ -1,6 +1,6 @@
 # claude-bridge
 
-**Real-time Q&A between Claude sessions -- CLI agents, Desktop app, and Cowork -- no copy-paste, no context switching, no human message routing.**
+**A real-time ask-and-reply protocol for Claude sessions.** One agent asks a question by name and blocks until another answers it — no copy-paste, no human relaying messages between terminals. Sessions can live in two terminals on your laptop, or on **different machines across the network**, linked over a secure tunnel. Same protocol either way.
 
 ![Two Claude sessions chatting via the bridge — left session thanks the right session for the help, right session takes a victory lap](docs/demo.jpg)
 
@@ -29,37 +29,33 @@ That's your getting-started home. Fastest path:
 > 🤖 **Handing this repo to an AI agent to set up?** Tell it to run `./claude-bridge install` from the repo root — that's the whole install. It should **not** run the test suite (`npm test` / `tests/`); those are for developing the project, not installing it. See `CLAUDE.md`.
 
 ```
-You (to CLI Session A):     "Ask the frontend session what auth flow they're using"
-You (to CLI Session B):     "Build the login page"
-You (to Desktop Chat):      "Check the bridge, see if anyone needs help"
-
-                     ── meanwhile, behind the scenes ──
-
-Session A:  ask(to="frontend", question="What auth flow are you implementing?
+Same machine — two terminals on your laptop
+────────────────────────────────────────────
+Session A:  ask(to="frontend", question="What auth flow are you using?
             I need to match the API middleware to your token format.")
+Session B:  → replies with the JWT config, file paths, and reasoning
+Session A:  → unblocks and continues with the exact answer. You never relayed a thing.
 
-Session B:  [sees bridge question, replies with JWT config, file paths, reasoning]
-
-Desktop:   [calls check_inbox(), sees a question from Session A, replies]
-
-Session A:  [unblocks, continues with the exact config — you never touched it]
+Across the network — a teammate's laptop, linked over a secure tunnel
+─────────────────────────────────────────────────────────────────────
+Session A:  ask(to="infra@bob", question="What's the prod DB connection limit?")
+Bob's Claude (another office):  → replies into A's inbox. Same ask/reply, no VPN.
 ```
 
-Multiple agents. One bridge. Zero human involvement.
+Multiple agents, one shared inbox — across the room or across the country. Zero human routing.
 
 ---
 
 ## ✨ What this is
 
-- :bridge_at_night: **MCP server** that lets Claude sessions talk to each other — blocking ask/reply, one-way notices, and shared scratchpads
-- :robot: **Fully automatic on CLI** -- sessions register themselves, discover peers, and answer each other's questions
-- :computer: **Claude Desktop app support** -- Chat, Cowork, and Code tabs can join the bridge via stdio adapter
-- :hook: **Hook-driven** -- 5 lifecycle hooks handle registration, question delivery, and cleanup on CLI
-- :thread: **Thread history with deduplication** -- agents build on prior answers, never re-ask the same question
-- :mega: **Scratchpad broadcasting** -- agents share decisions and constraints proactively
-- :adhesive_bandage: **Self-healing** -- dropped connections trigger automatic re-registration
-- :globe_with_meridians: **Optional cross-network linking** -- `--share`/`--join` links bridges on different machines over a SECURE Cloudflare tunnel; agents talk by name across machines, and local coordination survives a link drop, nobody listens it except cloudfare
-- :package: **Zero dependencies** -- pure Node.js stdlib, no npm install needed
+- :bridge_at_night: **A shared inbox for your agents** -- any session messages any other by name and gets a real answer back, live
+- :speech_balloon: **Three ways to talk** -- `ask` blocks until you get an answer, `notify` sends a one-way heads-up, `broadcast` shares a scratchpad others read on their own time
+- :globe_with_meridians: **Across machines, not just terminals** -- link two laptops over a secure tunnel and address a remote agent by name (`infra@bob`). Local-only by default; the link is opt-in and survives drops
+- :robot: **Hands-off on CLI** -- sessions name themselves, find each other, and answer questions on their own. You just say what you want in plain English
+- :computer: **Claude Desktop too** -- Chat, Cowork, and Code tabs join the same bridge
+- :sleeping: **Answers arrive even when idle** -- a waiting session wakes to a new question at zero token cost until one actually lands
+- :thread: **Never re-asks** -- thread history with dedup, so agents build on prior answers instead of repeating them
+- :package: **Zero dependencies** -- pure Node.js, nothing to install
 
 ## ❌ What this isn't
 
@@ -72,7 +68,7 @@ Multiple agents. One bridge. Zero human involvement.
 
 ## :muscle: Why this exists
 
-You're running 2-5 Claude agents on the same codebase -- some in CLI, maybe one in the Desktop app. They make conflicting decisions. They duplicate work. One blocks on a question only another can answer. You become the human message router -- copy-pasting between terminals and chat windows, losing your own train of thought.
+You're running several Claude agents at once -- a few terminals, maybe the Desktop app, maybe a teammate's setup on another machine. They make conflicting decisions, duplicate work, and block on questions only another agent can answer. With no channel between them, *you* become the message router: copy-pasting between windows, losing your own train of thought.
 
 | Alternative | Limitation |
 |---|---|
@@ -82,15 +78,15 @@ You're running 2-5 Claude agents on the same codebase -- some in CLI, maybe one 
 | Worktrees with shared notes | No interruption mechanism, idle sessions never see updates |
 | Custom scripts + file watchers | No blocking semantics, no thread history, no dedup |
 
-I wanted my agents to talk to each other without me in the loop. So I built it.
+I wanted my agents -- and my teammates' -- to answer each other directly, without me in the loop. So I built it.
 
 ## :busts_in_silhouette: Who this is for
 
 ### ✅ Use this if you:
-- Run 2+ Claude sessions simultaneously on the same machine (CLI, Desktop, or both)
+- Run 2+ Claude sessions at once (CLI, Desktop, or both)
 - Want your agents to coordinate without you relaying messages
-- Work on multi-component projects where one agent's decisions affect another
-- Want blocking Q&A -- the asking agent waits for a real answer, not a stale file
+- Want a blocking ask -- the asking agent waits for a real answer, not a stale file
+- Work with a teammate and want both your agents to answer each other across machines
 
 ### ❌ Don't use this if you:
 - Only ever run one Claude session at a time
@@ -138,19 +134,21 @@ ask(to="B", question) ──────→ queue question ───────
 Claude Desktop App ────────────│  stdio adapter   │─── proxies to SSE ───→
   (Chat / Cowork / Code)       │ bridge-stdio.mjs │
   manual register + inbox      └─────────────────┘
+
+Another machine's bridge ───── secure tunnel (opt-in) ─────→ same ask/reply, addressed as name@node
 ```
 
 ### In one paragraph
 
-claude-bridge runs a single Node.js HTTP server speaking MCP over SSE. Claude Code CLI sessions connect directly via SSE and get automatic registration/question delivery through 5 lifecycle hooks. The Claude Desktop app connects through a stdio adapter (`bridge-stdio.mjs`) that proxies MCP tool calls to the same bridge server. Desktop sessions have the same tools but no hooks -- they register manually and check their inbox on request. All sessions share the same bridge state: messages, threads, and scratchpads.
+claude-bridge is one small Node.js server. CLI sessions connect to it automatically — five lifecycle hooks register them and deliver incoming questions — while the Desktop app connects through a tiny adapter and checks its inbox on request. Everyone shares the same inbox, threads, and scratchpads. Link two machines and a second bridge joins over a secure tunnel: a remote agent is just another name in the roster (`name@node`), reached with the exact same `ask`/`reply`. The link is opt-in, and if it drops, local coordination keeps working and queued cross-network messages deliver on reconnect.
 
 ### Why this architecture works
 
-- **Single server, two transports** -- CLI uses SSE directly, Desktop uses stdio-to-SSE adapter. Both hit the same bridge.
-- **Blocking `ask()` with server-side long-poll** -- the asking agent's tool call doesn't return until the answer arrives.
-- **Stop hook catches the idle gap** -- fires right before a CLI agent goes idle, covering ~95% of delivery cases.
-- **`check_inbox()` for hookless clients** -- Desktop sessions (no hooks) can poll for questions in one call instead of checking every thread.
-- **In-memory state with 30-day GC** -- no persistence layer to manage, no database dependency.
+- **One bridge, two ways in** -- CLI connects directly, Desktop through an adapter. Both share the same state.
+- **`ask` really blocks** -- the call doesn't return until a real answer lands, so the agent acts on the answer, not a guess.
+- **Idle sessions still hear you** -- a background listener wakes a quiet session the moment a question arrives, at zero token cost until then.
+- **Cross-machine, but your sessions stay private** -- only a separate link port is ever exposed through the tunnel; your `:7400` bridge and its sessions never leave localhost.
+- **No database to run** -- state lives in memory with a 30-day cleanup; nothing to provision or back up.
 
 ## :book: More
 
@@ -170,6 +168,8 @@ Genuinely glad you're checking this out. It's a small thing I built for myself, 
 1. :arrows_counterclockwise: **Three ways to talk — pick the right one.** `ask` blocks until you get an answer; `notify` pushes a one-way FYI that expects no reply; `broadcast` writes a scratchpad others pull on their own time. (Early versions were ask/pull-only — one-way push via `notify` landed in v2.6.)
 
 2. :sleeping: **Idle sessions are handled on CLI now.** A session that's been active auto-arms a background listener, so it can answer questions *and* receive notices even while sitting at a blinking cursor — at zero token cost while its inbox is empty. The old manual fix (send it any message, even `.`) still works as a fallback. Desktop has no hooks or listener, so Desktop sessions still check their inbox on request.
+
+3. :globe_with_meridians: **Cross-network is the newest piece.** Linking machines works and rides a secure Cloudflare tunnel, but it's built for a *trusted* group sharing one token — TLS-in-transit, not end-to-end encrypted. Quick-tunnel URLs rotate, so use a named tunnel for a stable address. Full walkthrough: **[docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)**.
 
 **Platforms:** :apple: macOS works fully (CLI + Desktop). :penguin: Linux works for the CLI path (no Linux Desktop app exists yet from Anthropic). :window: Windows: use WSL and follow the Linux path -- native Windows isn't supported and would be a separate effort.
 
