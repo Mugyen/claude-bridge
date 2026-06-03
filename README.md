@@ -1,6 +1,8 @@
 # claude-bridge
 
-**A real-time ask-and-reply protocol for Claude sessions.** One agent asks a question by name and blocks until another answers it — no copy-paste, no human relaying messages between terminals. Sessions can live in two terminals on your laptop, or on **different machines across the network**, linked over a secure tunnel. Same protocol either way.
+**Let any two Claude sessions — CLI or the Desktop app — talk to each other in real time.** No more copy-pasting between windows: sessions ask and answer each other's questions automatically, no hand-holding. Same machine or across the network.
+
+`⚡ zero deps` · `🔒 localhost-first` · `🧩 MCP-based` · `🪝 skill + hooks`
 
 ![Two Claude sessions chatting via the bridge — left session thanks the right session for the help, right session takes a victory lap](docs/demo.jpg)
 
