@@ -16,6 +16,16 @@ curl -fsSL https://vijay2411.github.io/claude-bridge/install.sh | bash
 
 Lands the bridge in `~/.local/share/claude-bridge` and configures hooks, MCP, and the skill automatically.
 
+### ⏭️ Just installed? Go straight to **[USAGE.md](USAGE.md)**
+
+That's your getting-started home. Fastest path:
+
+1. **[Start the bridge + every CLI command](USAGE.md#cli-command-reference)** — `claude-bridge start`, `status`, `health`, `update`, and the rest, with a [terminology cheat-sheet](USAGE.md#terminology-read-this-first).
+2. **[Use it](USAGE.md#part-3-using-the-bridge)** — open 2+ sessions and just tell them what to do.
+3. **[Link machines](USAGE.md#part-4-cross-network-talk-to-agents-on-other-machines)** (optional) — talk to agents on other networks.
+
+📑 USAGE.md opens with a full table of contents — skim it to find anything in seconds.
+
 > 🤖 **Handing this repo to an AI agent to set up?** Tell it to run `./claude-bridge install` from the repo root — that's the whole install. It should **not** run the test suite (`npm test` / `tests/`); those are for developing the project, not installing it. See `CLAUDE.md`.
 
 ```

@@ -1,5 +1,43 @@
 # USAGE
 
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [Part 1: Claude Code CLI Setup](#part-1-claude-code-cli-setup)
+  - [What you do (one-time)](#what-you-do-one-time-2-minutes)
+  - [What claude-bridge does behind the scenes](#what-claude-bridge-does-behind-the-scenes)
+  - [Process management](#process-management)
+- [CLI command reference](#cli-command-reference) — every command, grouped
+  - [Terminology (read this first)](#terminology-read-this-first)
+  - [Setup & maintenance](#setup--maintenance)
+  - [Bridge lifecycle](#bridge-lifecycle)
+  - [Federation](#federation-cross-machine)
+  - [Using the commands in scripts](#using-the-commands-in-scripts)
+- [Part 2: Claude Desktop App Setup](#part-2-claude-desktop-app-setup)
+  - [If you ran claude-bridge](#if-you-ran-claude-bridge-recommended)
+  - [Manual setup](#manual-setup-if-you-didnt-use-claude-bridge)
+  - [How Desktop differs from CLI](#how-the-desktop-app-differs-from-cli)
+  - [Desktop gotchas (shared identity, manual prompting)](#desktop-sessions-share-one-identity)
+- [Part 3: Using the bridge](#part-3-using-the-bridge)
+  - [What CLI agents do automatically](#what-cli-agents-do-automatically)
+  - [Idle sessions: the auto-armed listener](#idle-sessions-the-auto-armed-listener)
+- [Part 4: Cross-network (other machines)](#part-4-cross-network-talk-to-agents-on-other-machines)
+  - [What you do (as hub or spoke)](#what-you-do-as-hub-or-spoke)
+  - [Quick-tunnel URLs rotate](#quick-tunnel-urls-rotate)
+  - [Keeping an always-on hub up](#keeping-an-always-on-hub-up-supervise-cloudflared)
+  - [Security, honestly](#security-honestly)
+- [Manual installation](#manual-installation)
+- [Configuration](#configuration)
+- [How it works (for the curious)](#how-it-works-for-the-curious)
+- [MCP tools reference](#mcp-tools-reference)
+- [REST endpoints reference](#rest-endpoints-reference)
+- [What claude-bridge modifies](#what-claude-bridge-modifies)
+- [Troubleshooting](#troubleshooting)
+- [Hook configuration reference](#hook-configuration-reference)
+- [Uninstalling](#uninstalling)
+
+---
+
 ## Prerequisites
 
 See the [Requirements table in README.md](README.md#warning-requirements). You need Node.js >= 18, jq, curl, and the Claude Code CLI.
@@ -52,13 +90,106 @@ The script is idempotent -- running it twice won't duplicate anything. It handle
 ### Process management
 
 ```bash
-./claude-bridge --start      # Start the bridge server (PID saved to /tmp/claude-bridge.pid)
-./claude-bridge --stop       # Graceful stop (SIGTERM — closes SSE connections cleanly)
-./claude-bridge --restart    # Stop then start
-./claude-bridge --check      # Show status of everything
+claude-bridge start      # Start the bridge server (PID saved to /tmp/claude-bridge.pid)
+claude-bridge stop       # Graceful stop (SIGTERM — closes SSE connections cleanly)
+claude-bridge restart    # Stop then start
+claude-bridge status     # Show status of everything
 ```
 
-Logs go to `/tmp/claude-bridge-server.log`.
+Logs go to `/tmp/claude-bridge-server.log`. **For every command** (federation, health, debug, update, …) see the [CLI command reference](#cli-command-reference) below.
+
+---
+
+## CLI command reference
+
+Once installed, `claude-bridge` is on your PATH (run it from anywhere — no `./` and no repo directory needed). It's a **verb-style CLI**: `claude-bridge <command>`. Bare `claude-bridge` prints help; `install` is an explicit command, never the default.
+
+> The old `--flag` forms (`--start`, `--check`, `--share`, …) still work as aliases, so nothing you scripted before breaks. New commands below are the preferred form. Every invocation is logged to `~/.claude/claude-bridge.log` (see `claude-bridge logs`).
+
+### Terminology (read this first)
+
+The commands below use a handful of words consistently. Here's the whole vocabulary in one picture:
+
+```
+        NODE  =  one machine running a bridge          NODE  =  another machine
+   ┌──────────────────────────────────┐          ┌──────────────────────────────────┐
+   │  bridge  (server on :7400)        │          │  bridge  (server on :7400)        │
+   │   ├── session "api"   ┐           │          │           ┌  session "web"        │
+   │   └── session "db"    │ local     │          │     local │  session "infra"      │
+   │                       ┘ only      │          │      only ┘                       │
+   │                                   │          │                                   │
+   │  fed port :7401  ●────── link (Cloudflare tunnel) ──────● fed port :7401         │
+   └──────────────────────────────────┘          └──────────────────────────────────┘
+        HUB                                            SPOKE
+        runs `claude-bridge share`                     runs `claude-bridge join`
+        (opens the tunnel)                             (links up to the hub)
+```
+
+| Term | What it means |
+|---|---|
+| **bridge** | The local server (`:7400`) your Claude sessions connect to. One per machine. |
+| **session** | One Claude agent, registered on the bridge under a name (e.g. `api`, `db`). |
+| **node** | One machine running a bridge. Defaults to the hostname; set with `--node <id>`. |
+| **hub** | The node that opens the tunnel so others can link in — created by `share`. |
+| **spoke** | A node that links up to a hub — created by `join`. Its sessions stay on `:7400`. |
+| **standalone** | The default: not linked to anyone, fully local. |
+| **fed port** (`:7401`) | A *second* loopback listener used only for the cross-machine link. **It's the only thing the tunnel exposes** — your `:7400` bridge and its sessions are never reachable from outside. |
+
+Only `share`/`join`/`unlink`/`stop-share` involve hub/spoke/fed-port. If you never link machines, you only need the **Setup & maintenance** and **Bridge lifecycle** commands — everything stays local on `:7400`.
+
+### Setup & maintenance
+
+| Command | What it does |
+|---|---|
+| `claude-bridge install` | Install hooks, MCP server, skill, Desktop config + put the `claude-bridge` CLI on PATH. Idempotent. |
+| `claude-bridge reinstall` | Same as `install` (re-run after editing hooks/skill). |
+| `claude-bridge update` | `git pull` → reinstall → **restart** the bridge. Use this to ship code changes — a plain `git pull` won't reload the running server. |
+| `claude-bridge uninstall` | Full teardown — see [Uninstalling](#uninstalling). Removes config **and stops the running bridge**. |
+| `claude-bridge doctor` | Deep health check: prereqs, running bridge, version/role drift, tunnel, ports, log. The go-to "is everything wired up?" check. |
+| `claude-bridge health` | Live server health: role, topology, connected clients (hub + spokes), and pending/answered/notice counts. Reads the token for you when sharing is on (so it works even when `/health` is 401-gated). |
+| `claude-bridge status` | Quick component status — installed vs repo version, wiring (probes the ungated `/health/ping`). |
+| `claude-bridge version` | Repo / installed / running versions. |
+| `claude-bridge logs [-f]` | Show (or `-f`/`--follow`) the CLI action log. |
+| `claude-bridge debug` | Prints how to run the read-only expert debugger: start a **new** Claude session and say `debug bridge`. |
+| `claude-bridge help` | All commands (also `--help`, `-h`, or bare `claude-bridge`). |
+
+### Bridge lifecycle
+
+> ⚠️ Run these from a **separate terminal**, never from a Claude session bound to the bridge — stopping/restarting the live `:7400` listener can kill the calling session (DEVELOPER.md lesson #23). To flip federation role without a restart, use `share`/`join`/`unlink` instead — those hot-reload.
+
+| Command | What it does |
+|---|---|
+| `claude-bridge start` | Start the bridge server (PID → `/tmp/claude-bridge.pid`, logs → `/tmp/claude-bridge-server.log`). No-ops with a notice if one is already up. |
+| `claude-bridge stop [--force]` | Graceful stop (SIGTERM — closes SSE connections cleanly). `--force` = SIGKILL the listener. |
+| `claude-bridge restart [--force]` | Stop then start. `--force` replaces a foreign/stale listener squatting on the port. |
+
+### Federation (cross-machine)
+
+See [Part 4](#part-4-cross-network-talk-to-agents-on-other-machines) and [docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md) for the full walkthrough.
+
+| Command | What it does |
+|---|---|
+| `claude-bridge share [--named-tunnel <host>] [--node <id>]` | Become a **hub**: auto-installs cloudflared, opens a tunnel, prints a one-line join link. |
+| `claude-bridge join 'https://<host>#<token>'` | Become a **spoke**: link to a hub. Your sessions stay on localhost. |
+| `claude-bridge unlink` | Spoke leaves its hub → back to standalone. |
+| `claude-bridge stop-share` | Hub stops sharing: closes the tunnel, keeps the bridge running + the token (fast re-share). |
+
+### Using the commands in scripts
+
+Every command sets a meaningful **exit code** (0 = success), so you can gate scripts on them:
+
+```bash
+# Start the bridge only if it isn't healthy yet
+claude-bridge status >/dev/null 2>&1 || claude-bridge start
+
+# CI / cron health gate
+if ! claude-bridge doctor; then
+  echo "bridge unhealthy" >&2
+  exit 1
+fi
+```
+
+`doctor`, `status`, and `health` are read-only and safe to call from any terminal (including a Claude session). Only `start`/`stop`/`restart`/`uninstall` touch the live listener — keep those in a separate terminal.
 
 ---
 
@@ -205,7 +336,7 @@ By default the bridge is localhost-only. **Federation** links bridges on differe
 
 > 📘 **New to this? Start with the step-by-step guide: [docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)** — prerequisites, exact hub/spoke setup steps, verifying, disconnect/reconnect, and troubleshooting. The summary below is the quick version.
 
-### What you do
+### What you do (as hub or spoke)
 
 **Prerequisite (hub only):** `cloudflared`. As of the federation release **`--share` auto-installs it** for your OS (Homebrew on macOS; the matching static binary on Linux) and best-effort **updates** it if already present — so usually you don't do anything. No account needed for the default quick tunnel. The bridge *server* stays zero-dependency; cloudflared is installed only on the hub path where a tunnel is opened. To manage it yourself instead, set `CC_BRIDGE_NO_AUTOINSTALL=1` and install via `brew install cloudflared` (macOS) or the [Cloudflare downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
 
