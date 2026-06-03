@@ -48,7 +48,7 @@ Multiple agents, one shared inbox — across the room or across the country. Zer
 
 ---
 
-## ✨ What this is
+## What this is
 
 - ✅ **A shared inbox for your agents** — any session messages any other by name and gets a real answer back, live
 - ✅ **Three ways to talk** — `ask` blocks for an answer, `notify` sends a one-way heads-up, `broadcast` shares a scratchpad others read on their own time
@@ -57,7 +57,7 @@ Multiple agents, one shared inbox — across the room or across the country. Zer
 - ✅ **Answers arrive even when idle** — a waiting session wakes on a new question, at zero token cost until one lands
 - ✅ **Zero dependencies** — pure Node.js, nothing to install
 
-## ❌ What this isn't
+## What this isn't
 
 - 🚫 **Not encrypted end-to-end** — cross-network is TLS-in-transit + a shared token, for a *trusted* group. Not a VPN.
 - 🚫 **Not durable** — in-memory only; a server restart clears messages, threads, and scratchpads.
@@ -69,7 +69,7 @@ Multiple agents, one shared inbox — across the room or across the country. Zer
 
 **❌ Skip it** if you only ever run one session, need durable history or an end-to-end-encrypted channel for an untrusted group, or are on native Windows.
 
-## :warning: Requirements
+## Requirements
 
 | Requirement | Verify |
 |---|---|
@@ -78,7 +78,7 @@ Multiple agents, one shared inbox — across the room or across the country. Zer
 
 macOS or Linux. Built on Node.js stdlib + bash hooks (`jq`/`curl`, standard on both) — zero npm dependencies.
 
-## :brain: How it works under the hood
+## How it works under the hood ??
 
 ### Big picture
 
@@ -117,7 +117,7 @@ claude-bridge is one small Node.js server. CLI sessions connect to it automatica
 - **Cross-machine, but your sessions stay private** -- only a separate link port is ever exposed through the tunnel; your `:7400` bridge and its sessions never leave localhost.
 - **No database to run** -- state lives in memory with a 30-day cleanup; nothing to provision or back up.
 
-## :wave: For early users — the whole thing in four points
+## For early users — Hear me out:
 
 1. **How agents talk** — they auto-register on the bridge, each session is one entity on the bridge (an MCP server; CLI wires it up via hooks), then message one another one at a time. One asks, the other replies — like texting, but the history is kept. The whole protocol is three verbs: **ASK**, **REPLY**, and **NOTIFY** (one-way).
 2. **The armed listener** — each active agent arms a ~25s polling listener (or you prompt it to), so it answers other sessions even while sitting idle — at zero token cost until a message lands.
@@ -126,14 +126,14 @@ claude-bridge is one small Node.js server. CLI sessions connect to it automatica
 
 **Platforms:** :apple: macOS works fully (CLI + Desktop). :penguin: Linux works for the CLI path (no Linux Desktop app from Anthropic yet). :window: Windows: use WSL and follow the Linux path.
 
-## :book: More
+## More docs:
 
 - **[USAGE.md](USAGE.md)** — setup, every CLI command, troubleshooting
 - **[docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)** — step-by-step guide to linking machines (hub/spoke)
 - **[BRIDGE.md](BRIDGE.md)** — protocol docs (what the agent reads to use the bridge)
 - **[LICENSE](LICENSE)** — MIT
 
-## :muscle: Why this exists
+## Why do this?
 
 I kept wanting my agents to just answer each other, and wanted agent-to-agent coordination to be real — not a thesis. So I shipped it myself: a version that actually works.
 
