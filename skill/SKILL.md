@@ -22,17 +22,18 @@ You are connected to **claude-bridge**, a message broker that lets you communica
 This means another AI agent is blocked, waiting for YOUR answer. **Reply immediately** from your own context before continuing your own work. Do not ask the human — you are the expert on your session's work.
 
 1. Read the question and the thread history carefully
-2. Call `reply(message_id="...", answer="...")` with a **comprehensive, self-contained answer**
+2. Call `reply(message_id="...", answer="...")` with a **precise, self-contained answer** (terse by default — see below)
    - If you have exactly one pending question, you can omit message_id: `reply(answer="...")`
    - If you have multiple pending questions, call `check_inbox()` first to see them all
 
 ### What makes a good reply
 
-**Precise and terse.** The asker needs the answer, not an essay — every extra word costs both sessions tokens. Self-contained enough to avoid a follow-up, no more.
+**Precise and terse by default.** The asker needs the answer, not an essay — every extra word costs both sessions tokens. Self-contained enough to avoid a needless follow-up, no more.
 
 - **The answer** — exact file paths, names, values. Not vague descriptions.
 - **Gotchas/traps only if they'd actually bite** — required env vars, order-of-operations, edge cases.
-- Skip preamble, don't restate the question, don't narrate your reasoning unless the *why* IS the answer. A few lines, not paragraphs. Don't re-explain context the thread already carries.
+- Skip preamble, don't restate the question, don't re-explain context the thread already carries. A few lines, not paragraphs.
+- **Match the depth they asked for.** Default is tight. Go verbose *only when they signal it* — "walk me through it", "explain in depth", a knowledge-transfer/handoff. Then be as thorough as the task needs. Verbosity is opt-in per request, never the default.
 
 ```
 BAD  (vague):    "I'm using JWT for auth."
@@ -41,7 +42,17 @@ GOOD (precise):  "JWT, rotating refresh 24h/7d — /src/middleware/auth.ts.
                   Gotcha: JWT_SECRET env var required; middleware reads Authorization
                   header then cookie, so set CORS for cross-origin. Refresh = POST
                   /api/auth/refresh (not GET)."
+GOOD (on request, "walk me through the auth flow"): a full step-by-step is fine here —
+                  they asked for depth, so trade tokens for completeness.
 ```
+
+### It's a conversation, not one shot
+
+A bridge exchange can go back and forth like messaging — you don't have to land everything in a single turn:
+
+- After a reply, **either side can follow up** — just `ask` again. A quick clarifying round often beats one bloated turn.
+- **Need depth? Ask for it explicitly** — "give me the full walkthrough", "be verbose, this is a handoff." The other side adapts; without that signal, expect (and give) a tight answer.
+- Keep each turn precise regardless. Multiple short turns > one wall of text.
 
 ## Tool reference
 
@@ -79,10 +90,11 @@ Call `check_inbox()` to see all unanswered questions addressed to you. This is f
 
 1. **First** `get_thread(with_session="target-name")` — may already be answered.
 2. Else `ask(to="target-name", question="...")` — blocks until they reply (5min).
-3. Keep it **short and specific — a few lines, not a wall of text.** Name the files/functions/constraints. Batch several questions into ONE ask rather than many round-trips. Don't re-explain context the thread already has.
+3. Keep it **short and specific — a few lines, not a wall of text.** Name the files/functions/constraints. Batch related questions into ONE ask rather than many round-trips. Don't re-explain context the thread already has.
    - Bad: "How does auth work?"
    - Good: "Which middleware validates JWT on protected routes, and where's the signing secret set? Also: is refresh-token rotation on?"
-5. **Never re-ask** what's already in the thread history
+4. **Want depth? Say so in the question** — "walk me through the whole flow." Otherwise expect a tight answer, and follow up if you need more.
+5. **Never re-ask** what's already in the thread history.
 
 ## Sending a one-way NOTICE (no reply needed)
 

@@ -1504,7 +1504,7 @@ const server = http.createServer(async (req, res) => {
         out += `prior (don't repeat): Q "${clip(p.question, 120)}" → A "${clip(p.answer, 120)}"\n`;
       }
       out += `Q (id: ${msg.id}): "${msg.question}"\n`;
-      out += `→ reply(message_id="${msg.id}"): be precise — the answer + any gotchas/traps only. No preamble, don't restate the question.\n`;
+      out += `→ reply(message_id="${msg.id}"): precise by default — the answer + any gotcha/trap, no preamble, don't restate the Q. Go verbose ONLY if they asked for depth (e.g. a walkthrough/handoff). You may also follow up with your own ask.\n`;
     }
 
     // One-way NOTICEs — delivered exactly once, then marked delivered so they
