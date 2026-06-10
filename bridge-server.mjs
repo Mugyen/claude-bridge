@@ -497,6 +497,9 @@ function injectRemote(fwd) {
       id: fwd.id, from: fwd.from, to: fwd.to, question: fwd.question,
       answer: null, ts: fwd.ts ?? Date.now(), answeredAt: null,
       origin: { node: fwd.originNode },
+      // 3b E2EE reservation: an encrypted payload rides in `enc` (question absent)
+      // and every hub path treats the message as opaque ciphertext.
+      ...(fwd.enc && typeof fwd.enc === "object" ? { enc: fwd.enc } : {}),
     };
     messages.set(msg.id, msg);
     pushThread(fwd.from, fwd.to, msg.id);
@@ -508,6 +511,7 @@ function injectRemote(fwd) {
       id: fwd.id, from: fwd.from, to: fwd.to, kind: "notice",
       content: fwd.content, delivered: false, ts: fwd.ts ?? Date.now(),
       origin: { node: fwd.originNode },
+      ...(fwd.enc && typeof fwd.enc === "object" ? { enc: fwd.enc } : {}),
     };
     messages.set(msg.id, msg);
     pushThread(fwd.from, fwd.to, msg.id);
@@ -652,9 +656,9 @@ function markPendingRelay(payload, node) {
 
 function pushForwardToSpoke(sp, m) {
   if (m.kind === "notice") {
-    linkSend(sp, "forward", { kind: "notice", id: m.id, from: m.from, to: m.to, content: m.content, ts: m.ts, originNode: m.origin?.node ?? FED.node });
+    linkSend(sp, "forward", { kind: "notice", id: m.id, from: m.from, to: m.to, content: m.content, ts: m.ts, originNode: m.origin?.node ?? FED.node, ...(m.enc ? { enc: m.enc } : {}) });
   } else {
-    linkSend(sp, "forward", { kind: "question", id: m.id, from: m.from, to: m.to, question: m.question, ts: m.ts, originNode: m.origin?.node ?? FED.node });
+    linkSend(sp, "forward", { kind: "question", id: m.id, from: m.from, to: m.to, question: m.question, ts: m.ts, originNode: m.origin?.node ?? FED.node, ...(m.enc ? { enc: m.enc } : {}) });
   }
 }
 
@@ -1130,7 +1134,7 @@ async function executeTool(sseId, name, args) {
       const key = tkey(myName, target.name);
       for (const msgId of threads.get(key) || []) {
         const m = messages.get(msgId);
-        if (m?.answer && m.kind !== "notice" && norm(m.question) === norm(question)) {
+        if (m?.answer && m.kind !== "notice" && !m.enc && m.question && norm(m.question) === norm(question)) {
           console.log(`${ts()} ↩ dedup hit (${question.length} chars) → ${m.id}`);
           return { cached: true, message_id: m.id, question: m.question, answer: m.answer, note: "Already asked and answered. Previous answer returned." };
         }
@@ -1234,7 +1238,7 @@ async function executeTool(sseId, name, args) {
         questions: pending.map((m) => ({
           id: m.id,
           from: m.from,
-          question: m.question,
+          question: m.question ?? "[encrypted]",
           asked_at: new Date(m.ts).toISOString(),
         })),
         notices: notices.map((m) => ({
@@ -1660,7 +1664,7 @@ const server = http.createServer(async (req, res) => {
         const p = recent[recent.length - 1];
         out += `prior (don't repeat): Q "${clip(p.question, 120)}" → A "${clip(p.answer, 120)}"\n`;
       }
-      out += `Q (id: ${msg.id}): "${msg.question}"\n`;
+      out += `Q (id: ${msg.id}): "${msg.question ?? "[encrypted — your bridge will decrypt this once E2EE rooms (3b) land]"}"\n`;
       out += `→ reply(message_id="${msg.id}"): precise by default — the answer + any gotcha/trap, no preamble, don't restate the Q. Go verbose ONLY if they asked for depth (e.g. a walkthrough/handoff). You may also follow up with your own ask.\n`;
     }
 
@@ -1673,7 +1677,7 @@ const server = http.createServer(async (req, res) => {
       out += `\n📨 NOTICE from "${msg.from}"`;
       if (fromInfo?.description) out += ` (${clip(fromInfo.description, 60)})`;
       out += `\nid: ${msg.id}\n`;
-      out += `${msg.content}\n`;
+      out += `${msg.content ?? "[encrypted]"}\n`;
       out += `(FYI — one-way, no reply.)\n`;
 
       // Only a non-peek read consumes the notice. A peeking idle-listener must
@@ -1953,7 +1957,7 @@ server.listen(PORT, "127.0.0.1", () => {
   // Load federation config from disk and bring up the link if we're a hub/spoke.
   try { loadFedConfig(); loadRooms(); applyFedConfig(); } catch (e) { console.error(`${ts()} ✗ fed config load failed: ${e.message}`); }
   console.log(`\n${"═".repeat(42)}`);
-  console.log(`  claude-bridge v2.8.0`);
+  console.log(`  claude-bridge v2.9.0`);
   console.log(`  PID:     ${process.pid}`);
   console.log(`  SSE:     http://127.0.0.1:${PORT}/sse`);
   console.log(`  Health:  http://127.0.0.1:${PORT}/health`);

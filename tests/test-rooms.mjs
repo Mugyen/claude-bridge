@@ -74,7 +74,8 @@ try {
 
   // ── 7. password join + wrong password
   r = await hub.raw("POST", "/link/join", { json: { node: "spokepw", password: "hunter2hunter2" } });
-  assert("password join: correct password issues token", ok(r) && r.body.member_token, JSON.stringify(r.body));
+  const pwTok = r.body && r.body.member_token;
+  assert("password join: correct password issues token", ok(r) && pwTok, JSON.stringify(r.body));
   r = await hub.raw("POST", "/link/join", { json: { node: "spokepw2", password: "wrong-password" } });
   assert("password join: wrong password 401", r.status === 401, `status=${r.status}`);
 
@@ -107,6 +108,13 @@ try {
   assert("restart: kicked member STAYS kicked (file persisted)", r.status === 401, `status=${r.status}`);
   r = await hub.raw("POST", "/link/join", { json: { node: "spokepw3", password: "hunter2hunter2" } });
   assert("restart: room + password survive restart", ok(r) && r.body.member_token, JSON.stringify(r.body));
+
+  // ── 10.5 enc envelope (3b reservation): an encrypted forward is stored opaquely
+  r = await hub.raw("POST", "/link/forward", { token: pwTok, node: "spokepw", json: { kind: "question", id: "enc-res-1", from: "encsender", to: "enctarget", enc: { alg: "test", n: "n", ct: "c1pher" }, ts: Date.now(), originNode: "spokepw" } });
+  assert("enc: encrypted forward accepted", ok(r), `status=${r.status}`);
+  r = await hub.health(HUB_TOKEN);
+  const pendingCount = r.pending ?? (r.body && r.body.pending);
+  assert("enc: opaque question queued without crashing the store", Number(pendingCount) >= 1, JSON.stringify(r));
 
   // ── 11. join rate limit (strict global bucket)
   let limited = false;

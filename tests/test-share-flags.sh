@@ -55,7 +55,7 @@ if [ -s "$NODE_FILE" ]; then ok "--join derives a node id"; else bad "--join nod
 
 # ── 2. --join rejects a link with no token fragment ─────────────────────────
 OUT=$(CC_BRIDGE_PORT=$PORT bash "$REPO_DIR/claude-bridge" --join 'https://no-fragment.example.com' 2>&1 || true)
-if echo "$OUT" | grep -q "token fragment"; then ok "--join rejects a link with no token fragment"; else bad "--join no-fragment rejection"; fi
+if echo "$OUT" | grep -qi "must include a fragment"; then ok "--join rejects a link with no token fragment"; else bad "--join no-fragment rejection"; fi
 
 # ── 3. --share without cloudflared + auto-install OFF → instruct + non-zero ──
 # CC_BRIDGE_NO_AUTOINSTALL=1 keeps this hermetic (no real download/brew in CI) and

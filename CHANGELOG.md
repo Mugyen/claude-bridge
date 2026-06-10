@@ -11,6 +11,16 @@ _Add entries here as you work on the next version. Move them under a dated
 heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
+### Added (v2.9.0 — rooms, phase 3a)
+- **Rooms with per-member tokens**: `room create <name> [--ttl <dur>] [--password [value]]` turns the flat shared-token group into real membership — each joining machine gets its OWN token, so `room kick <node>` revokes one machine without rotating everyone. Member = a bridge/machine; sessions stay local and oblivious.
+- **Invites + password gate**: `room invite [--one-time] [--expires <dur>]` prints a complete join link (`…#invite:<code>`, default 7d); `join '<url>' --password` joins a password-gated room (scrypt-hashed; password never rides in a link). `/link/join` is the only unauthenticated link endpoint, behind a strict global rate bucket (10/min) against brute force.
+- **Durable revocation**: rooms persist in `~/.claude/.cc-bridge-rooms.json` (0600, atomic writes, env-overridable `CC_BRIDGE_ROOMS_FILE`) — kicked stays kicked across restarts/reboots. Zero new dependencies (node:crypto scrypt).
+- **Room lifecycle**: `room members/info/rotate <node>/rotate-password/delete <name>` (typed-name confirmation); TTL rooms self-expire (lazy + GC sweep). Kick/rotate/delete sever the member's live stream immediately. `health`/`doctor` show a room line.
+- **E2EE envelope reserved (3b)**: messages can carry an opaque `enc` payload end-to-end through every relay/queue path without the hub reading it — the 3b encryption work slots in without protocol changes.
+
+### Changed (v2.9.0)
+- **Back-compat: legacy shared-token federation works UNTIL the first `room create`** — bit-identical behavior before that; afterwards the fed surface accepts only member tokens (old links get a clear 401 + re-invite hint). `room delete` returns to legacy mode.
+
 ### Added (v2.8.0 — multi-tunnel providers)
 - **Multi-tunnel provider dispatch for `share`**: p2p (dumbpipe, NEW DEFAULT), cloudflared named (`--stable <host>`), bore, pinggy, zrok, and tailscale-direct (`--tailscale`, via `serve --tcp` — L4 passthrough, because Tailscale's HTTP serve/funnel modes buffer SSE). Per-machine default via `CC_BRIDGE_PROVIDER`.
 - **`join` accepts `p2p:<ticket>#<token>` links** — spawns a local dumbpipe forwarder (E2E-encrypted QUIC to the hub); managed by `unlink` (killed only AFTER the hub is notified), `doctor` (liveness + re-join hint), and uninstall.

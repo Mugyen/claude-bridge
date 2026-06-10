@@ -265,6 +265,10 @@ Verified June 2026 (deep-research + Opus verification pass, sources in docs/spec
 - ✅ Raw-stream transports are SSE-safe by construction: bore (TCP — but PLAINTEXT through the relay), pinggy (ssh stream; 60-min free cap), zrok (Ziti), dumbpipe (QUIC, E2E-encrypted, multi-connection through one ticket, auto relay fallback — hole-punching succeeds ~70% in production measurements, so the fallback matters).
 - Rule of thumb: **anything that proxies HTTP must prove it streams; anything that moves raw bytes is safe.**
 
+### 34. Rooms (3a): the store is server-owned; auth is a gate-swap; tests isolate `CC_BRIDGE_ROOMS_FILE`
+
+The rooms store (`~/.claude/.cc-bridge-rooms.json`) is owned by the RUNNING server — the CLI never edits it, it drives the loopback `/room/*` admin surface (same defense as `/link/reload`). `roomAuth()` wraps `tokenOk()`: no room → legacy compare (standalone/shared-token suites pass untouched, which IS the back-compat proof); room → sha256 member-token lookup. Invariants: tokens/invites stored HASHED (plaintext shown once); saves are atomic (tmp+rename — a truncated store would silently un-revoke kicks); `/link/join` is the only unauthenticated link endpoint and sits behind its own strict bucket (`CC_BRIDGE_JOIN_MAX`/`_WINDOW_MS`); kick/rotate/delete must `severSpoke()` (close stream + prune pendingRelay + rebroadcast roster) or the kicked spoke ghosts until the sweep. `lib.mjs` ALWAYS isolates `CC_BRIDGE_ROOMS_FILE` per test bridge, and `stop()` deliberately does NOT delete it (stop+start models a restart; revocation-survives-restart is a tested guarantee). The `enc` field on messages is reserved for 3b — every path (injectRemote, flush, dedup, /pending, check_inbox) treats it as opaque; if you add a new relay/render path, keep it opaque there too.
+
 ---
 
 ## Versioning + manifest approach

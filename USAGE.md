@@ -193,6 +193,20 @@ The default needs zero setup: no account, no domain, nothing public. The others 
 | `pinggy` | No | TLS | 5-minute demos (zero install — plain ssh) | **60-min session cap**; URL rotates → spokes must re-join |
 | `bore` | No | ❌ plaintext relay | Throwaway local experiments | Relay can read token + traffic — never for real work |
 
+### Rooms (per-member tokens)
+
+A **room** upgrades the flat shared-token group: every joining machine gets its **own token**, so you can kick one machine without re-inviting everyone. Members are machines (bridges) — your agent sessions never see any of this. Until you create a room, the classic shared-token links keep working; after `room create`, only member tokens are accepted.
+
+```bash
+claude-bridge room create team --password        # create (generates+prints a strong password once)
+claude-bridge room invite --one-time             # prints a complete join link (…#invite:<code>)
+claude-bridge room members                       # roster with online state
+claude-bridge room kick old-laptop               # that machine's token dies instantly (and stays dead across restarts)
+claude-bridge room delete team                   # typed-name confirmation; all tokens die; legacy mode resumes
+```
+
+Joiners run the printed link as-is, or `claude-bridge join '<share-url>' --password` for password-gated rooms (prompted — passwords never travel in links). Rooms persist in `~/.claude/.cc-bridge-rooms.json` until deleted (`--ttl 2h` makes a self-expiring room). One active room per hub for now.
+
 ### Using the commands in scripts
 
 Every command sets a meaningful **exit code** (0 = success), so you can gate scripts on them:

@@ -89,6 +89,7 @@ case "${1:-}" in
   reinstall)                ACTION="install" ;;
   --uninstall|uninstall)    ACTION="uninstall" ;;
   --check|check|status)     ACTION="check" ;;
+  room)                     ACTION="room" ;;
   --health|health)          ACTION="health" ;;
   debug)                    ACTION="debug" ;;
   --start|start)            ACTION="start" ;;
@@ -1172,17 +1173,173 @@ stop_share_tunnel_only() {
   sleep 1
 }
 
+# ── Rooms (phase 3a) CLI ──────────────────────────────────────────────────────
+# Owner-side verbs talk to the RUNNING bridge's loopback /room/* admin surface
+# (the server owns the store — the CLI never edits the rooms file directly).
+
+# 90s / 15m / 2h / 7d → seconds (bare number = seconds). Empty output = bad input.
+parse_duration() {
+  local d="$1" n unit
+  case "$d" in
+    *s) n="${d%s}"; unit=1 ;;
+    *m) n="${d%m}"; unit=60 ;;
+    *h) n="${d%h}"; unit=3600 ;;
+    *d) n="${d%d}"; unit=86400 ;;
+    *)  n="$d";     unit=1 ;;
+  esac
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  echo $((n * unit))
+}
+
+room_api() { # $1=method $2=path [$3=json-body] → raw response body
+  # NB: ${hdr[@]+"${hdr[@]}"} — expanding an EMPTY array under set -u is an
+  # "unbound variable" error on macOS bash 3.2 (killed doctor on a fresh HOME).
+  local hdr=()
+  [ -s "$TOKEN_FILE" ] && hdr=(-H "X-Bridge-Token: $(cat "$TOKEN_FILE")")
+  if [ "$1" = "GET" ]; then
+    curl -s --max-time 5 ${hdr[@]+"${hdr[@]}"} "http://localhost:${PORT}$2"
+  else
+    # scrypt on create/rotate-password can take a moment — generous timeout.
+    curl -s --max-time 20 -X "$1" ${hdr[@]+"${hdr[@]}"} -H "Content-Type: application/json" -d "${3:-\{\}}" "http://localhost:${PORT}$2"
+  fi
+}
+
+room_err() { # render a server error from a /room response and exit 1
+  fail "$(printf '%s' "$1" | jq -r '.error // "no response from the bridge"' 2>/dev/null)"
+  exit 1
+}
+
+room_cmd() {
+  local sub="${1:-}"; shift 2>/dev/null || true
+  # Room verbs need the RUNNING bridge (the server owns the store) and a token
+  # (the /room/* gate). ensure_token BEFORE start so the gate is consistent.
+  ensure_token >/dev/null
+  if ! fed_bridge_running; then start_bridge || exit 1; fi
+  local resp
+  case "$sub" in
+    create)
+      local name="" ttl_s="" pw="" pw_set=0 args=("$@") i=0
+      while [ $i -lt ${#args[@]} ]; do
+        case "${args[$i]}" in
+          --ttl) i=$((i+1)); ttl_s=$(parse_duration "${args[$i]:-}") || { fail "bad --ttl (use 90s/15m/2h/7d)"; exit 1; } ;;
+          --password)
+            pw_set=1
+            # value may follow; omitted → GENERATE (strong passwords by default)
+            local nxt="${args[$((i+1))]:-}"
+            case "$nxt" in ""|--*) ;; *) i=$((i+1)); pw="$nxt" ;; esac ;;
+          --*) fail "unknown flag '${args[$i]}' for room create"; exit 1 ;;
+          *) [ -z "$name" ] && name="${args[$i]}" ;;
+        esac
+        i=$((i+1))
+      done
+      [ -z "$name" ] && { fail "Usage: claude-bridge room create <name> [--ttl <dur>] [--password [value]]"; exit 1; }
+      if [ "$pw_set" = 1 ] && [ -z "$pw" ]; then
+        pw=$(openssl rand -hex 12 2>/dev/null || node -e "console.log(require('crypto').randomBytes(12).toString('hex'))")
+      fi
+      local body
+      body=$(jq -nc --arg n "$name" --arg p "$pw" --arg t "${ttl_s:-}" \
+        '{name:$n} + (if $p != "" then {password:$p} else {} end) + (if $t != "" then {ttl_seconds:($t|tonumber)} else {} end)')
+      resp=$(room_api POST /room/create "$body")
+      printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+      ok "Room \"$name\" created ($(printf '%s' "$resp" | jq -r '.room.id'))"
+      warn "member-token auth is now ACTIVE: the old shared-token join links no longer work."
+      warn "Hand out invites instead:  claude-bridge room invite"
+      if [ "$pw_set" = 1 ]; then
+        echo ""
+        echo "  Room password (shown ONCE — share it over a safe channel):"
+        echo "    $pw"
+        echo "  Joiners run:  claude-bridge join '<share-url>' --password"
+      fi
+      ;;
+    invite)
+      local one="" exp="" args=("$@") i=0
+      while [ $i -lt ${#args[@]} ]; do
+        case "${args[$i]}" in
+          --one-time) one=true ;;
+          --expires) i=$((i+1)); exp=$(parse_duration "${args[$i]:-}") || { fail "bad --expires (use 90s/15m/2h/7d)"; exit 1; } ;;
+        esac
+        i=$((i+1))
+      done
+      local body
+      body=$(jq -nc --arg o "$one" --arg e "${exp:-}" \
+        '(if $o != "" then {one_time:true} else {} end) + (if $e != "" then {expires_in_seconds:($e|tonumber)} else {} end)')
+      resp=$(room_api POST /room/invite "$body")
+      printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+      local code url
+      code=$(printf '%s' "$resp" | jq -r '.invite_code')
+      url=$(cat "$TUNNEL_URL_FILE" 2>/dev/null || echo "")
+      if [ -z "$url" ]; then
+        warn "Not currently sharing — run 'claude-bridge share' first, then send this link"
+        url="<your-share-url>"
+      fi
+      ok "Invite minted${one:+ (one-time)} — expires $(date -r $(($(printf '%s' "$resp" | jq -r '.expires_at') / 1000)) 2>/dev/null || printf '%s' "$resp" | jq -r '.expires_at')"
+      echo ""
+      echo "  Share this ONE command:"
+      echo "    claude-bridge join '${url}#invite:${code}'"
+      echo ""
+      ;;
+    members|list)
+      resp=$(room_api GET /room/info)
+      printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+      echo ""
+      printf '%s' "$resp" | jq -r '.room as $r | "Room \"\($r.name)\" (\($r.id)) — \($r.members|length) member(s):"'
+      printf '%s' "$resp" | jq -r '.room.members[] | "  • \(.node)  [\(.role)]\(if .online then "  ●online" else "  ○offline" end)"'
+      echo ""
+      ;;
+    kick)
+      [ -z "${1:-}" ] && { fail "Usage: claude-bridge room kick <node>"; exit 1; }
+      resp=$(room_api POST /room/kick "$(jq -nc --arg n "$1" '{node:$n}')")
+      printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+      ok "Kicked \"$1\" — their token is dead and their link was severed"
+      ;;
+    rotate)
+      [ -z "${1:-}" ] && { fail "Usage: claude-bridge room rotate <node>"; exit 1; }
+      resp=$(room_api POST /room/rotate "$(jq -nc --arg n "$1" '{node:$n}')")
+      printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+      ok "Token rotated for \"$1\" (their old token is dead; hand them the new one safely):"
+      echo ""
+      echo "    $(printf '%s' "$resp" | jq -r '.member_token')"
+      echo ""
+      ;;
+    rotate-password)
+      local npw="${1:-}"
+      [ -z "$npw" ] && npw=$(openssl rand -hex 12 2>/dev/null || node -e "console.log(require('crypto').randomBytes(12).toString('hex'))")
+      resp=$(room_api POST /room/rotate-password "$(jq -nc --arg p "$npw" '{password:$p}')")
+      printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+      ok "Room password rotated (shown ONCE):"
+      echo ""
+      echo "    $npw"
+      echo ""
+      ;;
+    info)
+      resp=$(room_api GET /room/info)
+      printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+      printf '%s' "$resp" | jq -r '.room | "Room: \(.name) (\(.id))\nOwner: \(.owner)\nMembers: \(.members|length) · Invites open: \(.invites|length) · Password gate: \(if .password_set then "on" else "off" end)\nExpires: \(if .expires_at then (.expires_at/1000 | todate) else "never (persistent)" end)"'
+      ;;
+    delete)
+      resp=$(room_api POST /room/delete "$(jq -nc --arg c "${1:-}" '{confirm:$c}')")
+      printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+      ok "Room \"$(printf '%s' "$resp" | jq -r '.deleted')\" deleted — every member token is dead; legacy shared-token mode resumes"
+      ;;
+    *)
+      fail "Usage: claude-bridge room <create|invite|members|kick|rotate|rotate-password|info|delete>"
+      exit 1
+      ;;
+  esac
+}
+
 join_hub() {
   local link="$1"
   if [ -z "$link" ]; then
-    fail "Usage: ./claude-bridge --join 'https://<host>#<token>'"
+    fail "Usage: ./claude-bridge --join 'https://<host>#<token-or-invite>'"
     exit 1
   fi
-  # Split on the '#' fragment locally — the token never travels to a server.
+  # Split on the '#' fragment locally — the secret never travels in a URL path.
   local host="${link%%#*}"
   local token="${link#*#}"
-  if [ "$token" = "$link" ] || [ -z "$token" ]; then
-    fail "Join link must include the token fragment: 'https://<host>#<token>' or 'p2p:<ticket>#<token>'"
+  if [ "$token" = "$link" ]; then token=""; fi
+  if [ -z "$token" ] && [ "${JOIN_PW_MODE:-0}" != "1" ]; then
+    fail "Join link must include a fragment ('#<token>' or '#invite:<code>'), or pass --password for a password-gated room"
     exit 1
   fi
   host="${host%/}"
@@ -1225,6 +1382,37 @@ join_hub() {
     ok "p2p forwarder up (PID $ppid): 127.0.0.1:${lport} → hub ticket $(printf '%.16s' "$ticket")…"
     host="http://127.0.0.1:${lport}"
   ;; esac
+
+  # Room joins: exchange an invite code ('#invite:<code>' fragment) or a password
+  # (--password; never carried in a link) for this machine's PER-MEMBER token via
+  # POST /link/join. Legacy links ('#<token>') skip this and use the token as-is.
+  local join_kind="" join_val=""
+  case "$token" in invite:*) join_kind="invite_code"; join_val="${token#invite:}" ;; esac
+  if [ "${JOIN_PW_MODE:-0}" = "1" ]; then
+    join_kind="password"
+    join_val="${JOIN_PASSWORD:-}"
+    if [ -z "$join_val" ]; then
+      printf 'Room password: ' >&2
+      read -rs join_val; echo "" >&2
+    fi
+  fi
+  if [ -n "$join_kind" ]; then
+    ensure_node "${ARG3_NODE:-}"
+    local jnode jbody resp mtok
+    jnode=$(cat "$NODE_FILE")
+    jbody=$(jq -nc --arg n "$jnode" --arg v "$join_val" --arg k "$join_kind" '{node:$n} + {($k): $v}')
+    resp=$(curl -s --max-time 15 -X POST "${host}/link/join" -H "Content-Type: application/json" -d "$jbody" 2>/dev/null || true)
+    mtok=$(printf '%s' "$resp" | jq -r '.member_token // empty' 2>/dev/null)
+    if [ -z "$mtok" ]; then
+      fail "Room join failed: $(printf '%s' "$resp" | jq -r '.error // "no response from the hub"' 2>/dev/null)"
+      # Don't leave a half-configured spoke (esp. a dangling p2p forwarder).
+      kill_recorded "$SPOKE_PIPE_PID_FILE" "p2p forwarder (join failed)"
+      rm -f "$SPOKE_PIPE_PORT_FILE" "$SPOKE_PIPE_TICKET_FILE"
+      exit 1
+    fi
+    ok "Joined room \"$(printf '%s' "$resp" | jq -r '.room.name // "?"')\" as member \"$jnode\" (received a personal token)"
+    token="$mtok"
+  fi
 
   mkdir -p "$(dirname "$TOKEN_FILE")"
   local old_token; old_token=$(cat "$TOKEN_FILE" 2>/dev/null || echo "")
@@ -1439,6 +1627,11 @@ doctor() {
   else
     ok "Role: ${role:-$drole}${ping:+ (live)}"
   fi
+  local drinfo
+  drinfo=$(room_api GET /room/info 2>/dev/null || true)
+  if printf '%s' "$drinfo" | jq -e '.ok' >/dev/null 2>&1; then
+    ok "Room: $(printf '%s' "$drinfo" | jq -r '.room | "\"\(.name)\" (\(.members|length) members)"') — member-token auth active"
+  fi
   if [ "$drole" = "spoke" ]; then
     # P2P spoke: the local forwarder is the road to the hub — if it died (reboot,
     # crash), every reconnect attempt is ECONNREFUSED until the user re-joins.
@@ -1466,7 +1659,8 @@ doctor() {
   # else degrade to a single-listener presence check via port_listener_pid (ss).
   local n
   if command -v lsof >/dev/null 2>&1; then
-    n=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | sort -u | wc -l | tr -d ' ')
+    # `|| true`: lsof exits 1 on no-match, and set -e + pipefail would kill doctor.
+    n=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | sort -u | wc -l | tr -d ' ' || true)
     [ "$n" -le 1 ] && ok "Port $PORT: ${n} listener" || fail "Port $PORT: $n listeners (conflict!)"
   elif [ -n "$(port_listener_pid "$PORT")" ]; then
     ok "Port $PORT: listener present (no lsof — count unavailable, used ss)"
@@ -1514,6 +1708,11 @@ health_cmd() {
   echo ""
   echo "Topology:"
   ok "Role: $role · Node: $node · Token configured: $tok"
+  local rinfo
+  rinfo=$(room_api GET /room/info 2>/dev/null || true)
+  if printf '%s' "$rinfo" | jq -e '.ok' >/dev/null 2>&1; then
+    ok "Room: $(printf '%s' "$rinfo" | jq -r '.room | "\"\(.name)\" — \(.members|length) member(s), \(.invites|length) open invite(s), password \(if .password_set then "on" else "off" end)"')"
+  fi
   if [ "$role" = "spoke" ]; then
     local hub; hub=$(cat "$HUB_FILE" 2>/dev/null || true)
     if [ -n "$hub" ]; then
@@ -1626,9 +1825,17 @@ FEDERATION (link bridges across machines)
   share --tailscale                    Tailnet-only (both machines on your Tailscale network; no extra process)
   share --provider <p>                 Other tunnels: bore | pinggy | zrok (see USAGE.md for trade-offs)
   share [--node <id>]                  --node sets this machine's federation id (default: hostname)
-  join '<link>'                        Become a spoke. Accepts https://<host>#<token> AND p2p:<ticket>#<token>
+  join '<link>' [--password]           Become a spoke. Links: https://<host>#<token> · p2p:<ticket>#<token> · …#invite:<code>
+                                       --password [value] joins a password-gated room (prompts if no value)
   unlink                               Spoke leaves its hub → standalone (kills the p2p forwarder too)
   stop-share                           Hub stops sharing — verified teardown (kills tunnel / serve off), keeps bridge + token
+
+ROOMS (per-member tokens on the hub — kick one machine without rotating everyone)
+  room create <name> [--ttl <dur>] [--password [value]]   Create the room (owner = this machine; auth switches to member tokens)
+  room invite [--one-time] [--expires <dur>]              Mint an invite + print the full join link (default 7d, unlimited uses)
+  room members | info                                     Roster with online state · room summary
+  room kick <node> | rotate <node> | rotate-password      Revoke one machine · re-key one member · re-key the password gate
+  room delete <name>                                      Tear the room down (typed name = confirmation; all tokens die)
 
 Every command is logged to ~/.claude/claude-bridge.log. Old --flags still work.
 HELP
@@ -1852,10 +2059,24 @@ case "$ACTION" in
     echo "claude-bridge --join (become a spoke)"
     echo "====================================="
     echo ""
-    ARG3_NODE=""
-    # support: --join '<link>' --node <id>
-    if [ "${3:-}" = "--node" ]; then ARG3_NODE="${4:-}"; fi
+    # support: join '<link>' [--node <id>] [--password [value]]
+    ARG3_NODE=""; JOIN_PW_MODE=0; JOIN_PASSWORD=""
+    _ja=("$@"); _ji=2   # skip 'join' and the link
+    while [ $_ji -lt ${#_ja[@]} ]; do
+      case "${_ja[$_ji]}" in
+        --node) _ji=$((_ji+1)); ARG3_NODE="${_ja[$_ji]:-}" ;;
+        --password)
+          JOIN_PW_MODE=1
+          _jn="${_ja[$((_ji+1))]:-}"
+          case "$_jn" in ""|--*) ;; *) _ji=$((_ji+1)); JOIN_PASSWORD="$_jn" ;; esac ;;
+      esac
+      _ji=$((_ji+1))
+    done
     join_hub "$ARG2"
+    ;;
+
+  room)
+    room_cmd "$ARG2" "${@:3}"
     ;;
 
   unlink)
