@@ -169,10 +169,27 @@ See [Part 4](#part-4-cross-network-talk-to-agents-on-other-machines) and [docs/C
 
 | Command | What it does |
 |---|---|
-| `claude-bridge share [--named-tunnel <host>] [--node <id>]` | Become a **hub**: auto-installs cloudflared, opens a tunnel, prints a one-line join link. |
-| `claude-bridge join 'https://<host>#<token>'` | Become a **spoke**: link to a hub. Your sessions stay on localhost. |
-| `claude-bridge unlink` | Spoke leaves its hub → back to standalone. |
-| `claude-bridge stop-share` | Hub stops sharing: closes the tunnel, keeps the bridge running + the token (fast re-share). |
+| `claude-bridge share [--node <id>]` | Become a **hub** over an encrypted P2P pipe (default — auto-installs dumbpipe, prints a one-line join link). |
+| `claude-bridge share --stable <host>` | Hub with a stable HTTPS URL on your own domain (cloudflared **named** tunnel; `--named-tunnel <host>` still works). |
+| `claude-bridge share --tailscale` | Hub reachable tailnet-only (no public exposure, no extra process; uses `tailscale serve --tcp`). |
+| `claude-bridge share --provider <p>` | Pick a transport explicitly: `p2p`, `cloudflared-named`, `cloudflared-quick`, `bore`, `pinggy`, `zrok`, `tailscale`. |
+| `claude-bridge join '<link>'` | Become a **spoke**: link to a hub. Accepts `https://<host>#<token>` and `p2p:<ticket>#<token>`. Your sessions stay on localhost. |
+| `claude-bridge unlink` | Spoke leaves its hub → back to standalone (notifies the hub first, then kills the local p2p forwarder). |
+| `claude-bridge stop-share` | Hub stops sharing: **verified** teardown (process confirmed dead / `tailscale serve` config removed), keeps the bridge + token. |
+
+#### Picking a share transport
+
+The default needs zero setup: no account, no domain, nothing public. The others trade setup for different properties. `CC_BRIDGE_PROVIDER` sets a per-machine default.
+
+| Transport | Account needed | Encrypted | Best for | Watch out |
+|---|---|---|---|---|
+| `p2p` *(default)* | No | ✅ end-to-end (QUIC) | Everything — rooms of any size, no public URL | Ticket+token = the whole secret; hub machine must stay on |
+| `cloudflared-named` (`--stable`) | Cloudflare + your domain | TLS | A join link that never changes | Run exactly **one** connector per hostname or the link flaps |
+| `tailscale` | Tailscale on both ends | WireGuard | Machines already on your tailnet | Tailnet-only; never use `tailscale serve` HTTP mode (it buffers SSE) |
+| `zrok` | One-time free (`zrok enable`) | TLS | A real HTTPS URL without owning a domain | Free tier: 24h-window bandwidth cap, ~6.6 req/s |
+| `pinggy` | No | TLS | 5-minute demos (zero install — plain ssh) | **60-min session cap**; URL rotates → spokes must re-join |
+| `bore` | No | ❌ plaintext relay | Throwaway local experiments | Relay can read token + traffic — never for real work |
+| `cloudflared-quick` | No | TLS | Nothing — kept only for back-compat | **SSE-broken**: spokes register but never receive messages |
 
 ### Using the commands in scripts
 
@@ -361,9 +378,13 @@ Once linked, it's transparent: agents talk **by name**, same as local. `list_ses
 - "Ask `frontend` about the API contract" -> a bare name resolves to a **local** session first; if it only exists remotely, it routes across the link.
 - "Ask `frontend@alice` ..." -> targets a **specific** remote session when the same name exists on more than one machine. **Local always wins for a bare name** -- use `name@node` to reach a remote one explicitly.
 
-### Quick-tunnel URLs rotate
+### Quick-tunnel URLs rotate (and quick tunnels are SSE-broken)
 
-A Cloudflare quick tunnel's URL is **ephemeral** -- if `cloudflared` restarts, the URL changes and the old join link stops working. Re-run `./claude-bridge --share` to reprint the current join link, and spokes must re-`--join` with the new one. For a URL that survives restarts, use `--named-tunnel` (your own domain).
+Cloudflare **quick** tunnels buffer Server-Sent Events until the connection closes (cloudflared#1449; official docs: "Quick Tunnels do not support SSE") — through one, spokes register fine but **never receive forwarded messages**. They're kept only as `--provider cloudflared-quick` for back-compat. Their URL is also ephemeral (rotates on restart). Use the default p2p share, `--stable <host>`, or `--tailscale` instead.
+
+### p2p forwarder died (spoke can't reach the hub)
+
+A p2p spoke reaches its hub through a local `dumbpipe connect-tcp` forwarder. If it dies (reboot, crash), the spoke's reconnect loop gets `ECONNREFUSED` forever. `claude-bridge doctor` flags this ("p2p forwarder DOWN") and prints the exact re-join command (the ticket is remembered in `/tmp/claude-bridge-spoke-pipe.ticket`). Re-joining with the same link is always safe.
 
 ### Keeping an always-on hub up (supervise cloudflared)
 
@@ -371,7 +392,7 @@ A Cloudflare quick tunnel's URL is **ephemeral** -- if `cloudflared` restarts, t
 
 ### Security, honestly
 
-- **TLS in transit, not strict end-to-end.** The Cloudflare tunnel encrypts the wire, but Cloudflare terminates TLS at its edge -- it is not E2E. For a **trusted group** plus a shared token, this is the accepted bar. The closest no-VPN path to "no third party sees plaintext" is a self-hosted tunnel with your own cert (out of scope here).
+- **The default p2p share IS end-to-end encrypted.** dumbpipe/iroh runs QUIC with TLS between the two endpoints; even when NAT traversal falls back to a relay, the relay forwards ciphertext it cannot read. The tunnel providers differ: cloudflared/zrok/pinggy encrypt the wire but **terminate TLS at their edge** (the provider could see plaintext); tailscale is WireGuard-encrypted tailnet-internal; **bore is plaintext through the relay** (demo only). For a trusted group plus a shared token, TLS-to-edge is an accepted bar — pick p2p or tailscale when it isn't.
 - **One shared token per hub = a trusted group.** Anyone with the join link (token + URL) is a fully trusted member: they can see the roster and message any session, and within the group node ids and session names are self-asserted (a member could claim another's name or node id). This is a deliberate design choice -- per-node tokens/identity were considered and **declined** to keep joining a one-paste operation. Treat the join link like a password. **To revoke the group, rotate the token** (`./claude-bridge --stop-share` then `--share` mints a fresh one; every spoke must re-`--join`). Give each machine a **distinct** `--node <id>` (defaults to the hostname) so the roster and `name@node` addressing stay unambiguous.
 - **Only the link surface is exposed -- by construction, not just by a token.** The bridge runs two listeners: the **main** one (`127.0.0.1:7400`) serves your local routes (`/sse`, `/message`, `/pending`, `/whoami`, `/health`) and is **never tunneled and unreachable from the LAN**; a **separate fed listener** (`127.0.0.1:7401` in hub mode) serves ONLY the token-gated `/link/*` plus the content-free `/health/ping`, and that fed port is the **only** thing the tunnel exposes. So `/sse`/`/pending`/etc. simply don't exist on the public surface -- a remote caller cannot register, ask, or read pending messages even without a token. When sharing is on, every internet-reachable path requires the token except `/health/ping` (which leaks no session names). `/link/reload` (config hot-reload) is loopback-only and token-gated.
 
@@ -507,7 +528,7 @@ The installer touches these files and locations. All changes are fully reversibl
 | Bridge protocol skill | `~/.claude/skills/claude-bridge/SKILL.md` | Copies protocol docs as a Claude Code skill |
 | Desktop app config | `~/Library/Application Support/Claude/claude_desktop_config.json` | Adds `claude-bridge` MCP server entry pointing to `bridge-stdio.mjs` (macOS only) |
 | Federation config (only if you `--share`/`--join`) | `~/.claude/.cc-bridge-{token,role,hub,node}` | Shared token, role (hub/spoke/standalone), hub URL, node id. Removed by `--uninstall` |
-| Temp files (runtime) | `/tmp/claude-bridge-*` | Session name files, confirmation stamps, MCP check cache, PID file, tunnel PID/URL |
+| Temp files (runtime) | `/tmp/claude-bridge-*` | Session name files, confirmation stamps, MCP check cache, PID file, tunnel PID/URL/provider, p2p forwarder PID/port/ticket (`claude-bridge-spoke-pipe.*`) |
 | Server log (runtime) | `/tmp/claude-bridge-server.log` | Append-only log from bridge-server.mjs |
 
 **Legacy cleanup:** Older versions appended protocol docs directly to `~/.claude/CLAUDE.md`. The installer automatically detects and removes this if present.
@@ -525,8 +546,8 @@ The installer touches these files and locations. All changes are fully reversibl
 | Sessions died after bridge restart | Expected — all CLI sessions have a persistent SSE connection. Use `./claude-bridge --stop` (SIGTERM) instead of `kill -9` so the bridge closes connections gracefully. You may need to resume affected sessions |
 | Desktop can't see bridge tools | Quit and relaunch the Desktop app (reads config on launch) |
 | Hooks fire but agent can't call bridge tools | Session was open before install — restart the session to load MCP tools |
-| `--share` says "cloudflared not found" | Install it: `brew install cloudflared` (no account needed for a quick tunnel) |
-| Spoke can't reach the hub / join link stopped working | Quick-tunnel URLs rotate when cloudflared restarts. Re-run `./claude-bridge --share` on the hub to reprint the link, then re-`--join` on the spoke |
+| `share` says a binary is not found | Providers auto-install their binary (dumbpipe/bore/zrok from GitHub releases, cloudflared via brew). With `CC_BRIDGE_NO_AUTOINSTALL=1` you get install instructions instead |
+| Spoke can't reach the hub / join link stopped working | `claude-bridge doctor` on both ends. p2p spoke: forwarder may be down (doctor prints the re-join command). pinggy: 60-min cap hit — re-share. Quick tunnel: SSE-broken + URL rotates — switch provider |
 | `/health` returns 401 | Expected when sharing is on — it's token-gated. Run **`claude-bridge health`** (it reads the token for you and renders role, topology, connected clients, and message counts), or `claude-bridge status`/`--check` which probe the ungated `/health/ping` |
 | Want a live view of who's connected | **`claude-bridge health`** — server up/PID/port, role/node, hub+spoke topology, the registered-client roster (by node), and pending/answered/notice counts. Bare `claude-bridge` just prints help; `install` is an explicit command |
 | Bridge is misbehaving and you want it diagnosed | Run **`claude-bridge debug`** for instructions, then in a **new** Claude session say **`debug bridge`**. The shipped `claude-bridge-debug` skill acts as an expert, **read-only** debugger: it reads the installed code + logs, root-causes it, prepares a GitHub issue (or a maintainer email — shown to you first, never auto-sent), and gives you a no-code temp fix. It never changes/restarts your bridge |

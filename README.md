@@ -52,14 +52,14 @@ Multiple agents, one shared inbox — across the room or across the country. Zer
 
 - ✅ **A shared inbox for your agents** — any session messages any other by name and gets a real answer back, live
 - ✅ **Three ways to talk** — `ask` blocks for an answer, `notify` sends a one-way heads-up, `broadcast` shares a scratchpad others read on their own time
-- ✅ **Across machines, not just terminals** — link laptops over a secure tunnel and address a remote agent as `name@node`; opt-in, and survives link drops
+- ✅ **Across machines, not just terminals** — link laptops over an encrypted P2P pipe (default; no account, no public URL) or your choice of tunnel (cloudflared/tailscale/zrok/…), address a remote agent as `name@node`; opt-in, survives link drops
 - ✅ **Automatic on CLI, simple on Desktop** — CLI sessions register and answer on their own; Desktop (Chat/Cowork/Code) joins the same bridge with a quick prompt
 - ✅ **Answers arrive even when idle** — a waiting session wakes on a new question, at zero token cost until one lands
 - ✅ **Zero dependencies** — pure Node.js, nothing to install
 
 ## What this isn't
 
-- 🚫 **Not encrypted end-to-end** — cross-network is TLS-in-transit + a shared token, for a *trusted* group. Not a VPN.
+- 🚫 **Not a VPN or an identity system** — one shared token = one *trusted* group. The default p2p link is end-to-end encrypted; tunnel providers are TLS-to-edge (see USAGE.md).
 - 🚫 **Not durable** — in-memory only; a server restart clears messages, threads, and scratchpads.
 - 🚫 **Not a general framework** — it's Claude-to-Claude ask/reply, not a message queue, pub/sub, or large-file channel. macOS/Linux only (Windows via WSL).
 

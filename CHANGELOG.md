@@ -11,6 +11,17 @@ _Add entries here as you work on the next version. Move them under a dated
 heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
+### Added (v2.8.0 — multi-tunnel providers)
+- **Multi-tunnel provider dispatch for `share`**: p2p (dumbpipe, NEW DEFAULT), cloudflared named (`--stable <host>`), cloudflared quick, bore, pinggy, zrok, and tailscale-direct (`--tailscale`, via `serve --tcp` — L4 passthrough, because Tailscale's HTTP serve/funnel modes buffer SSE). Per-machine default via `CC_BRIDGE_PROVIDER`.
+- **`join` accepts `p2p:<ticket>#<token>` links** — spawns a local dumbpipe forwarder (E2E-encrypted QUIC to the hub); managed by `unlink` (killed only AFTER the hub is notified), `doctor` (liveness + re-join hint), and uninstall.
+- **Verified teardown**: `stop-share` confirms the tunnel process actually died (SIGTERM → wait → SIGKILL) and tears down persistent `tailscale serve` config (which survives reboots otherwise).
+- **EXPOSED status line** in `share`/`status`/`health`/`doctor` showing provider + URL/ticket + liveness (tailscale checked via `serve status`, not process checks).
+- Generic GitHub-release binary auto-installer (bore, dumbpipe, zrok); honors `CC_BRIDGE_NO_AUTOINSTALL=1`.
+
+### Changed (v2.8.0)
+- **Default share transport is now p2p (dumbpipe)** — no account, no public URL, end-to-end encrypted, SSE-safe, any number of spokes through one ticket.
+- **Cloudflared QUICK tunnels demoted to explicit `--provider cloudflared-quick`** with a corrected warning: they BUFFER SSE, so spokes register but never receive forwarded messages (cloudflared#1449 + official docs "Quick Tunnels do not support SSE") — the prior "flappy" warning understated the problem. Named tunnels are unaffected (run ONE connector per hostname).
+
 ### Changed
 - **`uninstall` is now a full teardown — it STOPS the running bridge** (and closes the federation tunnel), reversing the old "leave the server running" behavior. The stop is the last step (after all file/config removal) and targets the listener by port, so a self-disconnect can only land once cleanup is done; graceful SIGTERM then SIGKILL-after-grace. A loud warning prints up front (run it from a separate terminal). Test in `tests/test-cli.sh`; DEVELOPER.md lesson #15 updated.
 - **Bare `claude-bridge` (no command) now prints help instead of installing.** Running it with no args used to re-run the full installer — surprising once it's a real CLI. `install` is an explicit verb; bare invocation shows usage (like `git`).

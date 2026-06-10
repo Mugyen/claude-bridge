@@ -79,7 +79,8 @@ Claude Desktop ──stdio──┘  MAIN listener        │
 ~/.claude/.cc-bridge-role                      — federation role: hub | spoke | standalone
 ~/.claude/.cc-bridge-hub                       — spoke only: the hub's https://host URL
 ~/.claude/.cc-bridge-node                      — this node's stable id (defaults to hostname)
-/tmp/claude-bridge-tunnel.{pid,url}            — cloudflared child PID + parsed tunnel URL (runtime)
+/tmp/claude-bridge-tunnel.{pid,url,provider}   — share process PID + URL/ticket + provider name (runtime)
+/tmp/claude-bridge-spoke-pipe.{pid,port,ticket} — p2p spoke forwarder state (runtime; dumbpipe connect-tcp)
 ~/Library/Application Support/Claude/claude_desktop_config.json  — Desktop MCP entry (macOS)
 ```
 
@@ -95,7 +96,7 @@ Spoke bridge ◀──SSE /link/stream (roster + forward events)─────�
    (token in X-Bridge-Token header; cloudflared tunnel → Hub FED_PORT ONLY; /link/* token-gated, /health/ping ungated/content-free)
 ```
 
-claude-bridge: `--share [--named-tunnel <h>] [--node <id>]`, `--join '<link>'`, `--unlink`, `--stop-share` — all flip a *running* bridge via `POST /link/reload` (no restart). `cloudflared` is **auto-installed/updated by `--share`** via `ensure_cloudflared()` (brew on macOS; static-binary download on Linux; best-effort update if present) — opt out with `CC_BRIDGE_NO_AUTOINSTALL=1`. The bridge *server* is still zero-dependency: cloudflared only touches the hub path. (CI never installs it — `test-share-flags.sh` uses a fake cloudflared on PATH + `CC_BRIDGE_NO_AUTOINSTALL=1`.)
+claude-bridge: `share [--stable <h> | --tailscale | --p2p | --provider <p>] [--node <id>]` (default provider: **p2p/dumbpipe**; `--named-tunnel <h>` = back-compat alias for `--stable`), `join '<link>'` (https OR `p2p:<ticket>` links), `unlink`, `stop-share` — all flip a *running* bridge via `POST /link/reload` (no restart). Provider binaries are **auto-installed by `share`** (cloudflared via brew/static download; dumbpipe/bore/zrok from GitHub releases via `install_release_binary`) — opt out with `CC_BRIDGE_NO_AUTOINSTALL=1`. The bridge *server* is still zero-dependency: providers only touch the hub/spoke CLI paths. (CI never installs them — `test-share-flags.sh`/`test-providers.sh` use fake binaries on PATH + `CC_BRIDGE_NO_AUTOINSTALL=1`.) Provider contract + SSE-safety table: lessons #32/#33.
 
 ### The 5 hooks (CLI only)
 
@@ -244,6 +245,25 @@ Added bounds so a flood / hostile-but-authenticated peer can't exhaust the hub, 
 - **Descriptions don't cross the link** by default — `linkSessions()` (name-only) is what `broadcastRoster`/`spokeAdvertise` send, NOT `activeSessions()` (which keeps descriptions for LOCAL `list_sessions`). If you add a new link-crossing roster path, use `linkSessions()`.
 - **The 413 keep-alive gotcha (cost me a test):** on an over-cap body, do **not** `req.destroy()` mid-read and keep the connection — Node ≥19 pools keep-alive sockets by default, so the half-read socket gets reused and the NEXT request on it ECONNRESETs. Respond `413` with **`Connection: close`** and `res.end()` so the agent discards the socket. Same rule for any early-abort response that hasn't drained the request body.
 - **Don't log message content.** `ask`/`notify` log lines carry only `id` + char-count, never the question/notice text (the log is world-readable until claude-bridge's `0600`). Keep it that way.
+
+### 32. Tunnel providers are four case-dispatched functions + shared state files — update every reader together
+
+`share` dispatches on a provider name (`p2p` default | `cloudflared-named` | `cloudflared-quick` | `bore` | `pinggy` | `zrok` | `tailscale`) to `provider_<p>_{ensure,launch,extract,warn}` (bash-3.2-safe computed names — no associative arrays; `-` → `_` via `tr`). Shared state: `TUNNEL_{PID,URL,PROVIDER}_FILE` + the tunnel log (ALL env-overridable for tests — `CC_BRIDGE_TUNNEL_{PID,URL,LOG,PROVIDER}`), plus the spoke-side `SPOKE_PIPE_{PID,PORT,TICKET}_FILE` (`CC_BRIDGE_SPOKE_PIPE_*`). Rules learned the hard way:
+- **Readers and writers move together.** `stop_share`, `stop_share_tunnel_only`, `check_bridge`, `doctor`, `health_cmd`, and `uninstall` ALL read these files. Adding a provider or file means auditing every one of them.
+- **tailscale is the odd one out**: no process of ours, no PID file — `tailscaled` owns the forward. Its liveness is `tailscale serve status` (never `pgrep`), and its serve config **persists across reboots**, so teardown must run `tailscale serve --tcp $FED_PORT off` and VERIFY. It must use `serve --tcp` (L4); the HTTP serve/funnel modes buffer SSE (same bug class as quick tunnels).
+- **The p2p spoke forwarder**: `join 'p2p:<ticket>#<token>'` spawns `dumbpipe connect-tcp` (same detach hardening as `launch_tunnel`), writes the pipe files, and rewrites the hub URL to `http://127.0.0.1:<port>`. `unlink` MUST notify the hub BEFORE killing the forwarder (the unregister POST rides the pipe). `uninstall` captures the pipe PID before the /tmp wipe, same as the tunnel PID.
+- **Fake-binary tests** (`tests/test-providers.sh`): every fake writes its URL after a ~1s delay (exercises the extractor's poll loop); a fake `ssh` MUST be removed from PATH after its case (everything later would break); per-provider extract functions keep the fake's output format and the real grep from drifting apart.
+
+### 33. The SSE-buffering table — which transports can actually carry the bridge
+
+Verified June 2026 (deep-research + Opus verification pass, sources in docs/specs/2026-06-10-multi-tunnel-providers-plan.md):
+- ❌ **cloudflared QUICK tunnels buffer SSE** until the origin closes the connection — events through `/link/stream` NEVER arrive (cloudflared#1449; now stated in official docs; confirmed intentional "demo product guardrails" by a CF maintainer). This was the real cause behind the "quick tunnels are flappy" field reports.
+- ✅ cloudflared NAMED tunnels stream SSE correctly — but run ONE connector per hostname (two = CF load-balancing = intermittent 530/1033 split-brain).
+- ❌ **Tailscale Serve/Funnel HTTP modes buffer SSE** (opencode#16726) + WS drops (tailscale#18827). ✅ `serve --tcp` (L4) and raw tailnet IP access are fine.
+- ❌ MS dev tunnels: hard 504 on SSE at 15 min (dev-tunnels#518, closed not-planned). Excluded.
+- ❌ ngrok free: no idle timeout but 20k req/mo + 1GB/mo quotas — a chatty broker exhausts them. Excluded.
+- ✅ Raw-stream transports are SSE-safe by construction: bore (TCP — but PLAINTEXT through the relay), pinggy (ssh stream; 60-min free cap), zrok (Ziti), dumbpipe (QUIC, E2E-encrypted, multi-connection through one ticket, auto relay fallback — hole-punching succeeds ~70% in production measurements, so the fallback matters).
+- Rule of thumb: **anything that proxies HTTP must prove it streams; anything that moves raw bytes is safe.**
 
 ---
 
