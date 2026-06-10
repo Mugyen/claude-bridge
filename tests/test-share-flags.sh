@@ -1,7 +1,7 @@
 #!/bin/bash
 # claude-bridge federation flags: --join parses a link into the right files,
 # --share without cloudflared prints install instructions and exits non-zero,
-# --share with a FAKE cloudflared parses the quick-tunnel URL and prints a join
+# --share --stable with a FAKE cloudflared prints the named URL and a join
 # link. We never open a real tunnel in CI (external tool = detect-and-instruct).
 #
 # Uses port 7408 and isolated HOME-like config paths so it never touches the
@@ -62,11 +62,11 @@ if echo "$OUT" | grep -q "token fragment"; then ok "--join rejects a link with n
 # exercises the detect-and-instruct fallback. (The auto-install path itself uses
 # brew/curl — an external tool — and is verified live, not in CI.)
 rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE"
-OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:/usr/bin:/bin" bash "$REPO_DIR/claude-bridge" --share --provider cloudflared-quick 2>&1; echo "RC=$?")
+OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:/usr/bin:/bin" bash "$REPO_DIR/claude-bridge" --share --stable fake-tunnel-9.trycloudflare.com 2>&1; echo "RC=$?")
 if echo "$OUT" | grep -q "cloudflared not found"; then ok "--share without cloudflared (auto-install off) prints not-found"; else bad "--share missing-cloudflared message ($(echo "$OUT" | tail -3))"; fi
 if echo "$OUT" | grep -q "RC=1"; then ok "--share without cloudflared exits non-zero"; else bad "--share missing-cloudflared exit code"; fi
 
-# ── 4. --share with a FAKE cloudflared parses the quick-tunnel URL ──────────
+# ── 4. --share --stable with a FAKE cloudflared prints the named URL ────────
 # Fake cloudflared: branches on the subcommand so the auto-install/update probe
 # (`cloudflared update` / `--version`) returns fast instead of hanging on sleep.
 # Only `tunnel` simulates the long-lived tunnel.
@@ -86,8 +86,8 @@ EOF
 chmod +x "$FAKEBIN/cloudflared"
 # Fake node/openssl already on real PATH; need jq + node + curl for start_bridge.
 # We DO start a real bridge here (on 7408) so fed_reload/start works.
-OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/claude-bridge" --share --provider cloudflared-quick 2>&1; echo "RC=$?")
-if echo "$OUT" | grep -q "fake-tunnel-9.trycloudflare.com"; then ok "--share parses the quick-tunnel URL from cloudflared output"; else bad "--share URL parse ($(echo "$OUT" | tail -3))"; fi
+OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/claude-bridge" --share --stable fake-tunnel-9.trycloudflare.com 2>&1; echo "RC=$?")
+if echo "$OUT" | grep -q "fake-tunnel-9.trycloudflare.com"; then ok "--share (named) prints the share URL"; else bad "--share URL parse ($(echo "$OUT" | tail -3))"; fi
 if echo "$OUT" | grep -q "claude-bridge join 'https://fake-tunnel-9.trycloudflare.com#"; then ok "--share prints the join link with token fragment"; else bad "--share join link print"; fi
 if [ -s "$TOKEN_FILE" ]; then ok "--share generated a token"; else bad "--share token generation"; fi
 if [ "$(cat "$ROLE_FILE" 2>/dev/null)" = "hub" ]; then ok "--share sets role=hub"; else bad "--share role (got: $(cat "$ROLE_FILE" 2>/dev/null))"; fi

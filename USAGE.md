@@ -23,7 +23,7 @@
   - [Idle sessions: the auto-armed listener](#idle-sessions-the-auto-armed-listener)
 - [Part 4: Cross-network (other machines)](#part-4-cross-network-talk-to-agents-on-other-machines)
   - [What you do (as hub or spoke)](#what-you-do-as-hub-or-spoke)
-  - [Quick-tunnel URLs rotate](#quick-tunnel-urls-rotate)
+  - [Cloudflare quick tunnels were removed](#cloudflare-quick-tunnels-were-removed)
   - [Keeping an always-on hub up](#keeping-an-always-on-hub-up-supervise-cloudflared)
   - [Security, honestly](#security-honestly)
 - [Manual installation](#manual-installation)
@@ -172,7 +172,7 @@ See [Part 4](#part-4-cross-network-talk-to-agents-on-other-machines) and [docs/C
 | `claude-bridge share [--node <id>]` | Become a **hub** over an encrypted P2P pipe (default — auto-installs dumbpipe, prints a one-line join link). |
 | `claude-bridge share --stable <host>` | Hub with a stable HTTPS URL on your own domain (cloudflared **named** tunnel; `--named-tunnel <host>` still works). |
 | `claude-bridge share --tailscale` | Hub reachable tailnet-only (no public exposure, no extra process; uses `tailscale serve --tcp`). |
-| `claude-bridge share --provider <p>` | Pick a transport explicitly: `p2p`, `cloudflared-named`, `cloudflared-quick`, `bore`, `pinggy`, `zrok`, `tailscale`. |
+| `claude-bridge share --provider <p>` | Pick a transport explicitly: `p2p`, `cloudflared-named`, `bore`, `pinggy`, `zrok`, `tailscale`. |
 | `claude-bridge join '<link>'` | Become a **spoke**: link to a hub. Accepts `https://<host>#<token>` and `p2p:<ticket>#<token>`. Your sessions stay on localhost. |
 | `claude-bridge unlink` | Spoke leaves its hub → back to standalone (notifies the hub first, then kills the local p2p forwarder). |
 | `claude-bridge stop-share` | Hub stops sharing: **verified** teardown (process confirmed dead / `tailscale serve` config removed), keeps the bridge + token. |
@@ -189,7 +189,6 @@ The default needs zero setup: no account, no domain, nothing public. The others 
 | `zrok` | One-time free (`zrok enable`) | TLS | A real HTTPS URL without owning a domain | Free tier: 24h-window bandwidth cap, ~6.6 req/s |
 | `pinggy` | No | TLS | 5-minute demos (zero install — plain ssh) | **60-min session cap**; URL rotates → spokes must re-join |
 | `bore` | No | ❌ plaintext relay | Throwaway local experiments | Relay can read token + traffic — never for real work |
-| `cloudflared-quick` | No | TLS | Nothing — kept only for back-compat | **SSE-broken**: spokes register but never receive messages |
 
 ### Using the commands in scripts
 
@@ -378,9 +377,9 @@ Once linked, it's transparent: agents talk **by name**, same as local. `list_ses
 - "Ask `frontend` about the API contract" -> a bare name resolves to a **local** session first; if it only exists remotely, it routes across the link.
 - "Ask `frontend@alice` ..." -> targets a **specific** remote session when the same name exists on more than one machine. **Local always wins for a bare name** -- use `name@node` to reach a remote one explicitly.
 
-### Quick-tunnel URLs rotate (and quick tunnels are SSE-broken)
+### Cloudflare quick tunnels were removed
 
-Cloudflare **quick** tunnels buffer Server-Sent Events until the connection closes (cloudflared#1449; official docs: "Quick Tunnels do not support SSE") — through one, spokes register fine but **never receive forwarded messages**. They're kept only as `--provider cloudflared-quick` for back-compat. Their URL is also ephemeral (rotates on restart). Use the default p2p share, `--stable <host>`, or `--tailscale` instead.
+Cloudflare **quick** tunnels buffer Server-Sent Events until the connection closes (cloudflared#1449; official docs: "Quick Tunnels do not support SSE") — through one, spokes register fine but **never receive forwarded messages**. v2.8.0 removed them entirely; `share --provider cloudflared-quick` now explains why and points at the working transports. Use the default p2p share, `--stable <host>` (cloudflared **named** tunnels stream SSE correctly), or `--tailscale`.
 
 ### p2p forwarder died (spoke can't reach the hub)
 
@@ -547,7 +546,7 @@ The installer touches these files and locations. All changes are fully reversibl
 | Desktop can't see bridge tools | Quit and relaunch the Desktop app (reads config on launch) |
 | Hooks fire but agent can't call bridge tools | Session was open before install — restart the session to load MCP tools |
 | `share` says a binary is not found | Providers auto-install their binary (dumbpipe/bore/zrok from GitHub releases, cloudflared via brew). With `CC_BRIDGE_NO_AUTOINSTALL=1` you get install instructions instead |
-| Spoke can't reach the hub / join link stopped working | `claude-bridge doctor` on both ends. p2p spoke: forwarder may be down (doctor prints the re-join command). pinggy: 60-min cap hit — re-share. Quick tunnel: SSE-broken + URL rotates — switch provider |
+| Spoke can't reach the hub / join link stopped working | `claude-bridge doctor` on both ends. p2p spoke: forwarder may be down (doctor prints the re-join command). pinggy: 60-min cap hit — re-share. (Quick tunnels were removed in v2.8.0 — they could never deliver messages) |
 | `/health` returns 401 | Expected when sharing is on — it's token-gated. Run **`claude-bridge health`** (it reads the token for you and renders role, topology, connected clients, and message counts), or `claude-bridge status`/`--check` which probe the ungated `/health/ping` |
 | Want a live view of who's connected | **`claude-bridge health`** — server up/PID/port, role/node, hub+spoke topology, the registered-client roster (by node), and pending/answered/notice counts. Bare `claude-bridge` just prints help; `install` is an explicit command |
 | Bridge is misbehaving and you want it diagnosed | Run **`claude-bridge debug`** for instructions, then in a **new** Claude session say **`debug bridge`**. The shipped `claude-bridge-debug` skill acts as an expert, **read-only** debugger: it reads the installed code + logs, root-causes it, prepares a GitHub issue (or a maintainer email — shown to you first, never auto-sent), and gives you a no-code temp fix. It never changes/restarts your bridge |

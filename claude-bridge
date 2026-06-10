@@ -36,7 +36,7 @@ NODE_FILE="$HOME/.claude/.cc-bridge-node"
 # production tunnel — a real incident.) Production always uses the /tmp defaults.
 TUNNEL_PID_FILE="${CC_BRIDGE_TUNNEL_PID:-/tmp/claude-bridge-tunnel.pid}"
 TUNNEL_URL_FILE="${CC_BRIDGE_TUNNEL_URL:-/tmp/claude-bridge-tunnel.url}"
-# Which provider opened the current share (cloudflared-quick|cloudflared-named|p2p|
+# Which provider opened the current share (p2p|cloudflared-named|
 # bore|pinggy|zrok|tailscale). stop-share/status read it to tear down / report the
 # right thing — update EVERY reader if you add a writer (DEVELOPER.md lesson #32).
 TUNNEL_PROVIDER_FILE="${CC_BRIDGE_TUNNEL_PROVIDER:-/tmp/claude-bridge-tunnel.provider}"
@@ -824,44 +824,19 @@ release_pattern() {
 # whatever `join` consumes: https://host, http://host:port, or p2p:<ticket>.
 # Every provider tunnels FED_PORT (the loopback link surface) — NEVER the main port.
 
-provider_cloudflared_quick_ensure()  { ensure_cloudflared; }
 provider_cloudflared_named_ensure()  { ensure_cloudflared; }
 
-provider_cloudflared_quick_warn() {
-  echo ""
-  echo -e "${RED}  ⚠  QUICK TUNNEL — BROKEN FOR THE BRIDGE, DEMO ONLY${NC}"
-  echo -e "${RED}     Cloudflare quick tunnels BUFFER Server-Sent Events: spokes will register${NC}"
-  echo -e "${RED}     but NEVER receive forwarded messages (cloudflared#1449; official docs:${NC}"
-  echo -e "${RED}     'Quick Tunnels do not support SSE'). Use instead:${NC}"
-  echo -e "${RED}       claude-bridge share                    # p2p — no account, encrypted${NC}"
-  echo -e "${RED}       claude-bridge share --stable <host>    # your own domain (named tunnel)${NC}"
-  echo ""
-}
 provider_cloudflared_named_warn() {
   warn "Named tunnel: run exactly ONE connector for this hostname — two connectors on one"
   warn "named tunnel get load-balanced by Cloudflare and the link flaps (530/1033)."
 }
 
-provider_cloudflared_quick_launch() {
-  launch_tunnel "$1" cloudflared tunnel --url "http://localhost:${FED_PORT}"
-}
 provider_cloudflared_named_launch() {
   # The user must have configured the tunnel + DNS route already
   # (cloudflared tunnel route dns ...). NAMED_TUNNEL_HOST is set by share_hub.
   launch_tunnel "$1" cloudflared tunnel --url "http://localhost:${FED_PORT}" run "$NAMED_TUNNEL_HOST"
 }
 
-provider_cloudflared_quick_extract() {
-  # NB: `set -e` + `pipefail` would abort on an empty grep (the pipeline exits
-  # non-zero), so guard the substitution with `|| true`.
-  local url=""
-  for _ in $(seq 1 30); do
-    url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$1" 2>/dev/null | head -1 || true)
-    [ -n "$url" ] && break
-    sleep 1
-  done
-  printf '%s' "$url"
-}
 provider_cloudflared_named_extract() { printf 'https://%s' "$NAMED_TUNNEL_HOST"; }
 
 provider_bore_ensure() { install_release_binary "ekzhang/bore" "bore" "$(release_pattern)"; }
@@ -1056,9 +1031,15 @@ share_hub() {
         fail "--stable needs a hostname: claude-bridge share --stable <host>"
         exit 1
       fi ;;
-    cloudflared) provider="cloudflared-quick" ;;   # alias
-    cloudflared-quick|p2p|bore|pinggy|zrok|tailscale) ;;
-    *) fail "Unknown provider '$provider'. Available: p2p, cloudflared-named (--stable <host>), cloudflared-quick, bore, pinggy, zrok, tailscale"; exit 1 ;;
+    cloudflared|cloudflared-quick)
+      # Quick tunnels are REMOVED, not just discouraged: they buffer SSE, so spokes
+      # register but never receive messages (cloudflared#1449 + official docs).
+      fail "Cloudflare QUICK tunnels can't carry the bridge (they buffer SSE — messages never arrive)."
+      echo "      Use:  claude-bridge share                    # p2p — no account, encrypted (default)"
+      echo "            claude-bridge share --stable <host>    # cloudflared NAMED tunnel, your domain"
+      exit 1 ;;
+    p2p|bore|pinggy|zrok|tailscale) ;;
+    *) fail "Unknown provider '$provider'. Available: p2p, cloudflared-named (--stable <host>), bore, pinggy, zrok, tailscale"; exit 1 ;;
   esac
 
   # Provider preflight: binary present / account enabled (auto-install unless
@@ -1559,7 +1540,7 @@ FEDERATION (link bridges across machines)
   share                                Become a hub over an encrypted P2P pipe (default; no account, no public URL)
   share --stable <host>                Stable HTTPS URL on your own domain (cloudflared named tunnel; ONE connector only)
   share --tailscale                    Tailnet-only (both machines on your Tailscale network; no extra process)
-  share --provider <p>                 Other tunnels: bore | pinggy | zrok | cloudflared-quick (see USAGE.md for trade-offs)
+  share --provider <p>                 Other tunnels: bore | pinggy | zrok (see USAGE.md for trade-offs)
   share [--node <id>]                  --node sets this machine's federation id (default: hostname)
   join '<link>'                        Become a spoke. Accepts https://<host>#<token> AND p2p:<ticket>#<token>
   unlink                               Spoke leaves its hub → standalone (kills the p2p forwarder too)

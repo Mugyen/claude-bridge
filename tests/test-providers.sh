@@ -24,7 +24,7 @@ export PATH="$WORK/bin:$PATH"; mkdir -p "$WORK/bin"
 sleep 300 & SLEEPER=$!
 echo "$SLEEPER" > "$WORK/tunnel.pid"
 echo "https://example.test" > "$WORK/tunnel.url"
-echo "cloudflared-quick" > "$WORK/tunnel.provider"
+echo "bore" > "$WORK/tunnel.provider"
 "$REPO/claude-bridge" stop-share >/dev/null 2>&1
 sleep 0.5
 if kill -0 "$SLEEPER" 2>/dev/null; then bad "stop-share: tunnel process still alive"; kill -9 "$SLEEPER"; else ok "stop-share: tunnel process killed"; fi
@@ -47,7 +47,7 @@ start_test_bridge() {
 }
 stop_test_bridge() { kill "$BRIDGE_PID" 2>/dev/null; wait "$BRIDGE_PID" 2>/dev/null; }
 
-# ── Case 2: share --provider cloudflared-quick uses the fake binary, records provider+URL
+# ── Case 2: share --stable (cloudflared named) records provider+URL; quick is REJECTED
 cat > "$WORK/bin/cloudflared" <<'FAKE'
 #!/bin/bash
 ( sleep 1; echo "INF +-- https://fake-test.trycloudflare.com" >&2 )
@@ -55,11 +55,14 @@ exec sleep 300
 FAKE
 chmod +x "$WORK/bin/cloudflared"
 start_test_bridge
-"$REPO/claude-bridge" share --provider cloudflared-quick >/dev/null 2>&1
-[ "$(cat "$WORK/tunnel.provider" 2>/dev/null)" = "cloudflared-quick" ] \
+"$REPO/claude-bridge" share --stable fake-test.example.com >/dev/null 2>&1
+[ "$(cat "$WORK/tunnel.provider" 2>/dev/null)" = "cloudflared-named" ] \
   && ok "share: provider recorded" || bad "share: provider file wrong/missing (got: $(cat "$WORK/tunnel.provider" 2>/dev/null))"
-grep -q "trycloudflare.com" "$WORK/tunnel.url" 2>/dev/null \
-  && ok "share: URL extracted from fake" || bad "share: URL not extracted"
+[ "$(cat "$WORK/tunnel.url" 2>/dev/null)" = "https://fake-test.example.com" ] \
+  && ok "share: named URL recorded" || bad "share: named URL wrong"
+OUT=$("$REPO/claude-bridge" share --provider cloudflared-quick 2>&1; true)
+echo "$OUT" | grep -q "buffer SSE" \
+  && ok "share: quick tunnels REJECTED with explanation" || bad "share: quick not rejected ($OUT)"
 "$REPO/claude-bridge" stop-share >/dev/null 2>&1
 stop_test_bridge
 
