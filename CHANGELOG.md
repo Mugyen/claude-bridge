@@ -17,6 +17,7 @@ heading when you tag the release and bump `package.json` + the banner in
 - **Verified teardown**: `stop-share` confirms the tunnel process actually died (SIGTERM → wait → SIGKILL) and tears down persistent `tailscale serve` config (which survives reboots otherwise).
 - **EXPOSED status line** in `share`/`status`/`health`/`doctor` showing provider + URL/ticket + liveness (tailscale checked via `serve status`, not process checks).
 - Generic GitHub-release binary auto-installer (bore, dumbpipe, zrok); honors `CC_BRIDGE_NO_AUTOINSTALL=1`.
+- **`share --reuse`** — persistent p2p identity: a 32-byte key (`~/.claude/.cc-bridge-p2p-key`, 0600, removed by uninstall) is handed to dumbpipe via `IROH_SECRET`, and the join ticket is derived canonically from it (`generate-ticket`) — so the ticket is IDENTICAL across restarts/reboots and spokes never re-join. Default `share` stays ephemeral (restart = new ticket = old links revoked). Live-verified: same ticket across restarts, canonical ticket dials a running listener.
 - **`update [branch]`** — `claude-bridge update <branch>` fetches, switches to, and tracks that branch (beta-testing a feature branch in one command); bare `update` now always returns to the repo's default branch (main). Unknown branches fail with the remote branch list. Test: `tests/test-update-branch.sh`.
 
 ### Fixed (v2.8.0 — found by live Mac↔GCP-VM testing)

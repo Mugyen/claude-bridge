@@ -44,6 +44,10 @@ TUNNEL_PROVIDER_FILE="${CC_BRIDGE_TUNNEL_PROVIDER:-/tmp/claude-bridge-tunnel.pro
 SPOKE_PIPE_PID_FILE="${CC_BRIDGE_SPOKE_PIPE_PID:-/tmp/claude-bridge-spoke-pipe.pid}"
 SPOKE_PIPE_PORT_FILE="${CC_BRIDGE_SPOKE_PIPE_PORT:-/tmp/claude-bridge-spoke-pipe.port}"
 SPOKE_PIPE_TICKET_FILE="${CC_BRIDGE_SPOKE_PIPE_TICKET:-/tmp/claude-bridge-spoke-pipe.ticket}"
+# Persistent p2p identity (share --reuse): a 32-byte hex secret handed to dumbpipe
+# via IROH_SECRET so the ticket/endpoint id survives restarts. Lives next to the
+# token (NOT /tmp) — it IS this bridge's long-term p2p identity. chmod 600.
+P2P_KEY_FILE="${CC_BRIDGE_P2P_KEY:-$HOME/.claude/.cc-bridge-p2p-key}"
 
 # Read version from package.json
 VERSION=$(jq -r '.version // "unknown"' "$REPO_DIR/package.json" 2>/dev/null || echo "unknown")
@@ -921,8 +925,37 @@ provider_p2p_warn() {
   ok "automatic (relay fallback if hole-punching fails). The ticket admits anyone who"
   ok "holds it — treat the whole join link as a secret."
 }
-provider_p2p_launch() { launch_tunnel "$1" dumbpipe listen-tcp --host "127.0.0.1:${FED_PORT}"; }
+provider_p2p_launch() {
+  if [ "${P2P_REUSE:-0}" = "1" ]; then
+    # Stable identity: same IROH_SECRET → same endpoint id → SAME TICKET across
+    # restarts (verified: dumbpipe generate-ticket is deterministic per key).
+    # Trade-off vs the ephemeral default: a leaked old join link stays valid
+    # until you rotate (delete $P2P_KEY_FILE or share without --reuse).
+    if [ ! -s "$P2P_KEY_FILE" ]; then
+      mkdir -p "$(dirname "$P2P_KEY_FILE")"
+      if command -v openssl &>/dev/null; then openssl rand -hex 32 > "$P2P_KEY_FILE"
+      else node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" > "$P2P_KEY_FILE"; fi
+      chmod 600 "$P2P_KEY_FILE"
+      ok "Generated persistent p2p identity ($P2P_KEY_FILE)"
+    else
+      ok "Reusing p2p identity ($P2P_KEY_FILE) — ticket will match previous --reuse shares"
+    fi
+    launch_tunnel "$1" env IROH_SECRET="$(cat "$P2P_KEY_FILE")" dumbpipe listen-tcp --host "127.0.0.1:${FED_PORT}"
+  else
+    launch_tunnel "$1" dumbpipe listen-tcp --host "127.0.0.1:${FED_PORT}"
+  fi
+}
 provider_p2p_extract() {
+  # --reuse: derive the CANONICAL ticket from the persisted key — deterministic
+  # (`generate-ticket` is hint-free). The listener log's ticket embeds per-run
+  # address hints, so its STRING changes every restart even with a stable key;
+  # the canonical one is identical forever and dials by endpoint id (verified
+  # live against a running listener). Plain shares keep the log-scraped ticket.
+  if [ "${P2P_REUSE:-0}" = "1" ] && [ -s "$P2P_KEY_FILE" ]; then
+    local ct
+    ct=$(IROH_SECRET="$(cat "$P2P_KEY_FILE")" dumbpipe generate-ticket 2>/dev/null | tail -1 || true)
+    case "$ct" in endpoint*) printf 'p2p:%s' "$ct"; return ;; esac
+  fi
   # The listener prints a connect command containing the ticket. Any number of
   # spokes can connect through this ONE ticket (each becomes its own TCP conn).
   local t=""
@@ -1017,6 +1050,7 @@ share_hub() {
     case "${shift_args[$i]}" in
       --provider)     i=$((i+1)); provider="${shift_args[$i]:-}" ;;
       --p2p)          provider="p2p" ;;
+      --reuse)        P2P_REUSE=1 ;;
       --tailscale)    provider="tailscale" ;;
       --stable)       i=$((i+1)); provider="cloudflared-named"; named_tunnel="${shift_args[$i]:-}" ;;
       --named-tunnel) i=$((i+1)); provider="cloudflared-named"; named_tunnel="${shift_args[$i]:-}" ;;  # back-compat
@@ -1586,6 +1620,8 @@ BRIDGE LIFECYCLE  (run from a SEPARATE terminal — not a Claude session on the 
 
 FEDERATION (link bridges across machines)
   share                                Become a hub over an encrypted P2P pipe (default; no account, no public URL)
+  share --reuse                        P2P with a PERSISTENT identity: the ticket survives restarts (spokes never re-join);
+                                       trade-off: old links stay valid until you rotate (delete ~/.claude/.cc-bridge-p2p-key)
   share --stable <host>                Stable HTTPS URL on your own domain (cloudflared named tunnel; ONE connector only)
   share --tailscale                    Tailnet-only (both machines on your Tailscale network; no extra process)
   share --provider <p>                 Other tunnels: bore | pinggy | zrok (see USAGE.md for trade-offs)
@@ -1690,7 +1726,7 @@ case "$ACTION" in
     remove_claude_md_legacy
     remove_desktop
     # Federation config files (hardcoded fallback in case the manifest is missing).
-    rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" && ok "Federation config removed (token, role, hub, node)"
+    rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" "$P2P_KEY_FILE" && ok "Federation config removed (token, role, hub, node, p2p key)"
     # Remove the claude-bridge CLI symlink from PATH (manifest handles the tracked
     # one; this hardcoded fallback covers both install locations).
     UNSUDO="sudo"; [ -t 0 ] || UNSUDO="sudo -n"   # never hang on a password prompt non-interactively

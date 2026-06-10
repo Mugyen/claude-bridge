@@ -114,10 +114,12 @@ stop_test_bridge
 cat > "$WORK/bin/dumbpipe" <<'FAKE'
 #!/bin/bash
 if [ "$1" = "listen-tcp" ]; then
+  echo "secret=${IROH_SECRET:-none}"
   ( sleep 1; echo "To connect, use e.g.:"; echo "dumbpipe connect-tcp nodeaafake7ticket3string9xyz" )
   exec sleep 300
 fi
 if [ "$1" = "connect-tcp" ]; then exec sleep 300; fi
+if [ "$1" = "generate-ticket" ]; then echo "endpointfake$(printf %.8s "${IROH_SECRET:-rand}")canonical"; exit 0; fi
 FAKE
 chmod +x "$WORK/bin/dumbpipe"
 start_test_bridge
@@ -188,6 +190,27 @@ start_test_bridge
 "$REPO/claude-bridge" share >/dev/null 2>&1
 [ "$(cat "$WORK/tunnel.provider" 2>/dev/null)" = "p2p" ] \
   && ok "default provider is p2p" || bad "default provider is '$(cat "$WORK/tunnel.provider" 2>/dev/null)', expected p2p"
+"$REPO/claude-bridge" stop-share >/dev/null 2>&1
+stop_test_bridge
+
+# ── Case 9: share --reuse persists a key and passes the SAME IROH_SECRET each time
+export CC_BRIDGE_P2P_KEY="$WORK/p2p.key"
+start_test_bridge
+"$REPO/claude-bridge" share --reuse >/dev/null 2>&1
+[ -s "$WORK/p2p.key" ] && ok "reuse: key file created" || bad "reuse: key file missing"
+perms=$(stat -f %Lp "$WORK/p2p.key" 2>/dev/null || stat -c %a "$WORK/p2p.key" 2>/dev/null)
+[ "$perms" = "600" ] && ok "reuse: key file is 0600" || bad "reuse: key perms $perms"
+S1=$(grep -oE 'secret=[a-f0-9]+' "$WORK/tunnel.log" | head -1)
+REUSE_T1=$(cat "$WORK/tunnel.url")
+"$REPO/claude-bridge" stop-share >/dev/null 2>&1
+"$REPO/claude-bridge" share --reuse >/dev/null 2>&1
+S2=$(grep -oE 'secret=[a-f0-9]+' "$WORK/tunnel.log" | head -1)
+[ -n "$S1" ] && [ "$S1" = "$S2" ] && ok "reuse: same IROH_SECRET across restarts" || bad "reuse: secret changed ($S1 vs $S2)"
+[ "$(cat "$WORK/tunnel.url")" = "$REUSE_T1" ] && ok "reuse: ticket STRING identical across restarts (canonical)" || bad "reuse: ticket changed ($REUSE_T1 vs $(cat "$WORK/tunnel.url"))"
+"$REPO/claude-bridge" stop-share >/dev/null 2>&1
+"$REPO/claude-bridge" share >/dev/null 2>&1
+S3=$(grep -oE 'secret=[a-f0-9]+' "$WORK/tunnel.log" | head -1 || true)
+[ "$S3" != "$S1" ] && ok "reuse: plain share stays ephemeral (no secret reuse)" || bad "reuse: plain share leaked the persistent key"
 "$REPO/claude-bridge" stop-share >/dev/null 2>&1
 stop_test_bridge
 

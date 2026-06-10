@@ -171,7 +171,8 @@ See [Part 4](#part-4-cross-network-talk-to-agents-on-other-machines) and [docs/C
 
 | Command | What it does |
 |---|---|
-| `claude-bridge share [--node <id>]` | Become a **hub** over an encrypted P2P pipe (default — auto-installs dumbpipe, prints a one-line join link). |
+| `claude-bridge share [--node <id>]` | Become a **hub** over an encrypted P2P pipe (default — auto-installs dumbpipe, prints a one-line join link). Fresh ticket each share (a leaked link dies on restart). |
+| `claude-bridge share --reuse` | P2P with a **persistent identity**: a key in `~/.claude/.cc-bridge-p2p-key` makes the ticket identical across restarts/reboots — spokes never need a new link. Trade-off: an old link stays valid until you rotate (delete the key file, or share without `--reuse`). |
 | `claude-bridge share --stable <host>` | Hub with a stable HTTPS URL on your own domain (cloudflared **named** tunnel; `--named-tunnel <host>` still works). |
 | `claude-bridge share --tailscale` | Hub reachable tailnet-only (no public exposure, no extra process; uses `tailscale serve --tcp`). |
 | `claude-bridge share --provider <p>` | Pick a transport explicitly: `p2p`, `cloudflared-named`, `bore`, `pinggy`, `zrok`, `tailscale`. |
