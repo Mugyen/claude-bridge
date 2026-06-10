@@ -48,6 +48,9 @@ SPOKE_PIPE_TICKET_FILE="${CC_BRIDGE_SPOKE_PIPE_TICKET:-/tmp/claude-bridge-spoke-
 # via IROH_SECRET so the ticket/endpoint id survives restarts. Lives next to the
 # token (NOT /tmp) — it IS this bridge's long-term p2p identity. chmod 600.
 P2P_KEY_FILE="${CC_BRIDGE_P2P_KEY:-$HOME/.claude/.cc-bridge-p2p-key}"
+# Default exposure policy for sessions when this bridge is federated: "all"
+# (legacy) or "none" (privacy-first). Written by `join --expose <all|none>`.
+EXPOSE_FILE="${CC_BRIDGE_EXPOSE_FILE:-$HOME/.claude/.cc-bridge-expose}"
 
 # Read version from package.json
 VERSION=$(jq -r '.version // "unknown"' "$REPO_DIR/package.json" 2>/dev/null || echo "unknown")
@@ -90,6 +93,9 @@ case "${1:-}" in
   --uninstall|uninstall)    ACTION="uninstall" ;;
   --check|check|status)     ACTION="check" ;;
   room)                     ACTION="room" ;;
+  sessions)                 ACTION="sessions" ;;
+  expose)                   ACTION="expose" ;;
+  hide)                     ACTION="hide" ;;
   --health|health)          ACTION="health" ;;
   debug)                    ACTION="debug" ;;
   --start|start)            ACTION="start" ;;
@@ -1333,6 +1339,42 @@ room_cmd() {
   esac
 }
 
+# `claude-bridge sessions` — who's on this bridge, and which privacy zone.
+sessions_cmd() {
+  if ! fed_bridge_running; then fail "Bridge not running — claude-bridge start"; exit 1; fi
+  local resp
+  resp=$(room_api GET /sessions/exposure)
+  printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+  echo ""
+  if [ "$(printf '%s' "$resp" | jq -r '.federated')" = "true" ]; then
+    printf '%s' "$resp" | jq -r '"Sessions on this bridge (default for new sessions: \(.expose_default)):"'
+    printf '%s' "$resp" | jq -r '.sessions[] | "  \(if .expose then "🌐 EXPOSED" else "🔒 hidden " end)  \(.name)\(if .description != "" then " — \(.description)" else "" end)"'
+    echo ""
+    echo "  🌐 = visible + reachable from the linked room · 🔒 = sealed off (airlock)"
+    echo "  Toggle anytime:  claude-bridge expose <name>   |   claude-bridge hide <name>"
+  else
+    printf '%s' "$resp" | jq -r '.sessions[] | "  • \(.name)\(if .description != "" then " — \(.description)" else "" end)"'
+    echo ""
+    echo "  (standalone bridge — no room link, so no privacy zones)"
+  fi
+  echo ""
+}
+
+# `claude-bridge expose <name>` / `hide <name>` — move a session across the airlock.
+expose_cmd() { # $1 = name, $2 = true|false
+  [ -z "${1:-}" ] && { fail "Usage: claude-bridge ${3:-expose} <session-name>   (see names: claude-bridge sessions)"; exit 1; }
+  if ! fed_bridge_running; then fail "Bridge not running — claude-bridge start"; exit 1; fi
+  local resp
+  resp=$(room_api POST /sessions/expose "$(jq -nc --arg n "$1" --argjson e "$2" '{name:$n, expose:$e}')")
+  printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+  if [ "$2" = "true" ]; then
+    ok "\"$1\" is now EXPOSED 🌐 — visible and reachable from the room (and cut off from hidden local sessions)"
+    warn "Exposure is not amnesia: anything this session learned while hidden is now one question away."
+  else
+    ok "\"$1\" is now HIDDEN 🔒 — invisible to the room, sealed behind the airlock"
+  fi
+}
+
 join_hub() {
   local link="$1"
   if [ -z "$link" ]; then
@@ -1830,8 +1872,10 @@ FEDERATION (link bridges across machines)
   share --tailscale                    Tailnet-only (both machines on your Tailscale network; no extra process)
   share --provider <p>                 Other tunnels: bore | pinggy | zrok (see USAGE.md for trade-offs)
   share [--node <id>]                  --node sets this machine's federation id (default: hostname)
-  join '<link>' [--password]           Become a spoke. Links: https://<host>#<token> · p2p:<ticket>#<token> · …#invite:<code>
-                                       --password [value] joins a password-gated room (prompts if no value)
+  join '<link>' [--password] [--expose all|none]
+                                       Become a spoke. Links: https://<host>#<token> · p2p:<ticket>#<token> · …#invite:<code>
+                                       --password joins a password-gated room (prompts) · --expose none = privacy-first
+                                       (sessions hidden from the room until you expose them)
   unlink                               Spoke leaves its hub → standalone (kills the p2p forwarder too)
   stop-share                           Hub stops sharing — verified teardown (kills tunnel / serve off), keeps bridge + token
 
@@ -1843,6 +1887,11 @@ ROOMS (per-member tokens on the hub — kick one machine without rotating everyo
   room members | info                                     Roster with online state · room summary
   room kick <node> | rotate <node> | rotate-password      Revoke one machine · re-key one member · re-key the password gate
   room delete <name>                                      Tear the room down (typed name = confirmation; all tokens die)
+
+PRIVACY ZONES (when linked to a room — the AIRLOCK)
+  sessions                             Who's on this bridge: 🌐 EXPOSED (room can see+reach) vs 🔒 hidden (sealed off)
+  expose <name> | hide <name>          Move a session across the airlock. Hidden sessions and exposed sessions can
+                                       NEVER message each other through the bridge — that's the point.
 
 Every command is logged to ~/.claude/claude-bridge.log. Old --flags still work.
 HELP
@@ -1940,7 +1989,7 @@ case "$ACTION" in
     remove_claude_md_legacy
     remove_desktop
     # Federation config files (hardcoded fallback in case the manifest is missing).
-    rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" "$P2P_KEY_FILE" && ok "Federation config removed (token, role, hub, node, p2p key)"
+    rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" "$P2P_KEY_FILE" "$EXPOSE_FILE" && ok "Federation config removed (token, role, hub, node, p2p key, expose policy)"
     # Remove the claude-bridge CLI symlink from PATH (manifest handles the tracked
     # one; this hardcoded fallback covers both install locations).
     UNSUDO="sudo"; [ -t 0 ] || UNSUDO="sudo -n"   # never hang on a password prompt non-interactively
@@ -2067,11 +2116,12 @@ case "$ACTION" in
     echo "====================================="
     echo ""
     # support: join '<link>' [--node <id>] [--password [value]]
-    ARG3_NODE=""; JOIN_PW_MODE=0; JOIN_PASSWORD=""
+    ARG3_NODE=""; JOIN_PW_MODE=0; JOIN_PASSWORD=""; JOIN_EXPOSE=""
     _ja=("$@"); _ji=2   # skip 'join' and the link
     while [ $_ji -lt ${#_ja[@]} ]; do
       case "${_ja[$_ji]}" in
         --node) _ji=$((_ji+1)); ARG3_NODE="${_ja[$_ji]:-}" ;;
+        --expose) _ji=$((_ji+1)); JOIN_EXPOSE="${_ja[$_ji]:-}" ;;
         --password)
           JOIN_PW_MODE=1
           _jn="${_ja[$((_ji+1))]:-}"
@@ -2079,11 +2129,30 @@ case "$ACTION" in
       esac
       _ji=$((_ji+1))
     done
+    case "$JOIN_EXPOSE" in
+      "") ;;
+      all|none)
+        printf '%s' "$JOIN_EXPOSE" > "$EXPOSE_FILE"
+        [ "$JOIN_EXPOSE" = "none" ] && warn "Privacy-first join: your sessions stay HIDDEN from the room until you run: claude-bridge expose <name>" ;;
+      *) fail "--expose takes 'all' or 'none'"; exit 1 ;;
+    esac
     join_hub "$ARG2"
     ;;
 
   room)
     room_cmd "$ARG2" "${@:3}"
+    ;;
+
+  sessions)
+    sessions_cmd
+    ;;
+
+  expose)
+    expose_cmd "$ARG2" true expose
+    ;;
+
+  hide)
+    expose_cmd "$ARG2" false hide
     ;;
 
   unlink)

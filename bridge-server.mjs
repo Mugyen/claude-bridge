@@ -59,6 +59,11 @@ const TOKEN_FILE = process.env.CC_BRIDGE_TOKEN_FILE ?? `${HOME}/.claude/.cc-brid
 const ROLE_FILE = process.env.CC_BRIDGE_ROLE_FILE ?? `${HOME}/.claude/.cc-bridge-role`;
 const HUB_FILE = process.env.CC_BRIDGE_HUB_FILE ?? `${HOME}/.claude/.cc-bridge-hub`;
 const NODE_FILE = process.env.CC_BRIDGE_NODE_FILE ?? `${HOME}/.claude/.cc-bridge-node`;
+// Default exposure policy for sessions on a FEDERATED bridge: "all" (legacy) or
+// "none" (privacy-first — sessions are hidden from the room until exposed).
+// Written by `join --expose <all|none>`; per-session override via register() or
+// the loopback /sessions/expose endpoint (CLI: claude-bridge expose/hide <name>).
+const EXPOSE_FILE = process.env.CC_BRIDGE_EXPOSE_FILE ?? `${HOME}/.claude/.cc-bridge-expose`;
 
 function sanitizeNode(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "") || "node";
@@ -74,6 +79,7 @@ const FED = {
   token: null,
   node: sanitizeNode(process.env.CC_BRIDGE_NODE ?? os.hostname()),
   hubUrl: null, // spoke only
+  exposeDefault: "all", // "all" | "none" — see EXPOSE_FILE
 };
 
 // HUB side: node → { res:SSEResponse|null, sessions:[{name,description}], lastSeen:number }
@@ -131,6 +137,7 @@ function loadFedConfig() {
   FED.token = token;
   FED.node = sanitizeNode(node ?? process.env.CC_BRIDGE_NODE ?? os.hostname());
   FED.hubUrl = hubUrl;
+  FED.exposeDefault = readFileTrim(EXPOSE_FILE) === "none" ? "none" : "all";
 
   // Role inference: explicit role file wins; else token+hubUrl ⇒ spoke, token alone ⇒ hub.
   if (role === "hub" || role === "spoke" || role === "standalone") {
@@ -236,7 +243,7 @@ function activeSessions() {
   const out = [];
   for (const [sseId, info] of sessions) {
     if (sseClients.has(sseId)) {
-      out.push({ name: info.name, description: info.description });
+      out.push({ name: info.name, description: info.description, expose: info.expose !== false });
     }
   }
   return out;
@@ -247,7 +254,9 @@ function activeSessions() {
 // broadcasts the roster to every node) — opt in with CC_BRIDGE_SHARE_DESCRIPTIONS=1.
 // Local list_sessions still shows local descriptions regardless.
 function linkSessions() {
-  return activeSessions().map((s) => (SHARE_DESCRIPTIONS ? { name: s.name, description: s.description } : { name: s.name }));
+  return activeSessions()
+    .filter((s) => s.expose !== false)   // hidden sessions never cross the link
+    .map((s) => (SHARE_DESCRIPTIONS ? { name: s.name, description: s.description } : { name: s.name }));
 }
 
 function getName(sseId) {
@@ -363,6 +372,32 @@ function activeRoom() {
 function hostOnly() {
   const r = activeRoom();
   return !!(r && r.host_participates === false && FED.role === "hub");
+}
+
+// ── Per-session exposure + AIRLOCK zones ─────────────────────────────────────
+// On a federated bridge each local session is either EXPOSED (visible/addressable
+// from the room, can message it) or HIDDEN (invisible, unreachable, room-mute).
+// AIRLOCK (always on, by design decision): exposed and hidden sessions cannot
+// exchange anything through the bridge — ask/notify/get_thread/read_scratchpad
+// are refused across the line IN BOTH DIRECTIONS. This makes the social-
+// engineering path (room → exposed gateway → private sessions) mechanically
+// impossible: the gateway cannot query the private zone no matter what it is
+// talked into. Each zone is fully functional within itself. Standalone bridges
+// have no zones. Toggling: /sessions/expose (CLI expose/hide) — exposure is not
+// retroactive amnesia; expose fresh sessions, not seasoned ones.
+function isFederated() { return FED.role !== "standalone"; }
+/** true = exposed, false = hidden, null = not a local session. */
+function sessionExposed(name) {
+  const sse = nameToSSE.get(name);
+  if (!sse || !sessions.has(sse)) return null;
+  return sessions.get(sse).expose !== false;
+}
+/** Cross-zone check for two LOCAL sessions (federated bridges only). */
+function crossZone(aName, bName) {
+  if (!isFederated()) return false;
+  const a = sessionExposed(aName), b = sessionExposed(bName);
+  if (a === null || b === null) return false;
+  return a !== b;
 }
 
 const sha256hex = (s) => crypto.createHash("sha256").update(s).digest("hex");
@@ -499,6 +534,13 @@ function injectRemote(fwd) {
   if (!["question", "notice", "answer"].includes(fwd.kind)) return;
   if (typeof fwd.id !== "string" || !fwd.id) return;
   if (fwd.kind !== "answer" && (typeof fwd.from !== "string" || typeof fwd.to !== "string")) return;
+  // Exposure guard: a HIDDEN local session is unreachable from the room even if
+  // a (malicious) peer forges a forward addressed to its name (roster filtering
+  // alone is not enforcement — this is).
+  if (fwd.kind !== "answer" && sessionExposed(fwd.to) === false) {
+    console.log(`${ts()} 🛡 dropped inbound ${fwd.kind} for HIDDEN session "${fwd.to}" (not exposed to the room)`);
+    return;
+  }
   if (fwd.kind === "question") {
     if (messages.has(fwd.id)) return; // idempotent re-forward
     const msg = {
@@ -964,6 +1006,7 @@ const TOOLS = [
         name: { type: "string", description: 'Unique session name, e.g. "api-builder", "frontend"' },
         description: { type: "string", description: "What this session is working on" },
         claude_session_id: { type: "string", description: "The Claude Code session_id printed by the SessionStart hook. Required so the PostToolUse hook can resolve your canonical name." },
+        expose: { type: "boolean", description: "Federated bridges only: expose this session to the linked room (visible + addressable). Defaults to the bridge's policy (join --expose all|none). Hidden sessions are sealed off from the room AND from exposed local sessions (airlock)." },
       },
       required: ["name"],
     },
@@ -1111,7 +1154,8 @@ async function executeTool(sseId, name, args) {
         }
         console.log(`${ts()} ↪ rename: "${prev.name}" → "${sName}" (old name retired, pending asks + notices migrated)`);
       }
-      sessions.set(sseId, { name: sName, description, connectedAt: Date.now() });
+      const expose = typeof args.expose === "boolean" ? args.expose : FED.exposeDefault !== "none";
+      sessions.set(sseId, { name: sName, description, connectedAt: Date.now(), expose });
       nameToSSE.set(sName, sseId);
 
       // Persist claude_session_id → name so the hook can resolve canonical name
@@ -1130,11 +1174,19 @@ async function executeTool(sseId, name, args) {
       return { ok: true, your_name: sName, active_sessions: activeSessions() };
     }
 
-    case "list_sessions":
+    case "list_sessions": {
       // Host-only hub: local sessions see only each other — the room is invisible
       // to them, exactly as they are invisible to the room (two privacy zones).
       if (hostOnly()) return { sessions: activeSessions() };
-      return { sessions: FED.role === "standalone" ? activeSessions() : globalRoster() };
+      if (FED.role === "standalone") return { sessions: activeSessions() };
+      // Federated: each session sees its own zone. Hidden → hidden locals only.
+      // Exposed → exposed locals + the room roster.
+      const meExposed = sessionExposed(myName);
+      if (meExposed === false) {
+        return { sessions: activeSessions().filter((x) => x.expose === false), note: "you are HIDDEN from the room: this is your private zone only" };
+      }
+      return { sessions: globalRoster().filter((e) => e.node !== "local" || sessionExposed(e.name) !== false) };
+    }
 
     case "ask": {
       if (!myName) return { error: "Call register() first." };
@@ -1142,6 +1194,12 @@ async function executeTool(sseId, name, args) {
       const target = resolveTarget(to);
       if (target.kind === "remote" && hostOnly()) {
         return { error: "this hub is HOST-ONLY: it relays for the room, but local sessions are not participants (room created with --host-only)" };
+      }
+      if (target.kind === "remote" && sessionExposed(myName) === false) {
+        return { error: `you ("${myName}") are HIDDEN from the room — you can't message it. The user can change this with: claude-bridge expose ${myName}` };
+      }
+      if (target.kind === "local" && crossZone(myName, target.name)) {
+        return { error: `AIRLOCK: "${target.name}" is in the other privacy zone (exposed↔hidden) — the bridge does not carry messages across. The user can move a session with: claude-bridge expose/hide <name>` };
       }
       if (target.kind === "none") {
         const roster = (FED.role === "standalone" ? activeSessions().map((s) => s.name)
@@ -1224,6 +1282,12 @@ async function executeTool(sseId, name, args) {
       if (target.kind === "remote" && hostOnly()) {
         return { error: "this hub is HOST-ONLY: it relays for the room, but local sessions are not participants (room created with --host-only)" };
       }
+      if (target.kind === "remote" && sessionExposed(myName) === false) {
+        return { error: `you ("${myName}") are HIDDEN from the room — you can't message it. The user can change this with: claude-bridge expose ${myName}` };
+      }
+      if (target.kind === "local" && crossZone(myName, target.name)) {
+        return { error: `AIRLOCK: "${target.name}" is in the other privacy zone (exposed↔hidden) — the bridge does not carry messages across. The user can move a session with: claude-bridge expose/hide <name>` };
+      }
       const id = crypto.randomUUID(); // full 122-bit id: unguessable, no pre-claim/collision vector (S3)
       // NO answer field — lesson #19.
       const msg = { id, from: myName, to: target.name ?? to, kind: "notice", content, delivered: false, ts: Date.now(), origin: { node: FED.node } };
@@ -1274,6 +1338,12 @@ async function executeTool(sseId, name, args) {
 
     case "get_thread": {
       if (!myName) return { error: "Call register() first." };
+      if (crossZone(myName, args.with_session)) {
+        return { error: `AIRLOCK: "${args.with_session}" is in the other privacy zone — history is not readable across the line` };
+      }
+      if (isFederated() && sessionExposed(myName) === false && sessionExposed(args.with_session) === null) {
+        return { error: `you ("${myName}") are HIDDEN from the room — remote threads are not accessible` };
+      }
       const history = getThread(myName, args.with_session);
       return { thread_with: args.with_session, count: history.length, messages: history };
     }
@@ -1288,9 +1358,17 @@ async function executeTool(sseId, name, args) {
     }
 
     case "read_scratchpad": {
-      if (args.session) return { session: args.session, content: scratchpad.get(args.session) || "(empty)" };
+      if (args.session) {
+        if (myName && crossZone(myName, args.session)) {
+          return { session: args.session, content: "(restricted: different privacy zone — the airlock does not carry scratchpads across)" };
+        }
+        return { session: args.session, content: scratchpad.get(args.session) || "(empty)" };
+      }
       const all = {};
-      for (const [k, v] of scratchpad) all[k] = v;
+      for (const [k, v] of scratchpad) {
+        if (myName && crossZone(myName, k)) continue;   // other zone: invisible
+        all[k] = v;
+      }
       return { scratchpads: Object.keys(all).length ? all : "(none)" };
     }
 
@@ -1765,6 +1843,38 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname.startsWith("/link/")) {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
+    return;
+  }
+
+  // ── /sessions/* — exposure admin, MAIN listener ONLY (loopback) ─────────
+  // CLI: `claude-bridge sessions` (list zones) · `expose <name>` · `hide <name>`.
+  if (url.pathname.startsWith("/sessions/")) {
+    if (!isLoopback(req)) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "forbidden: loopback only" })); return; }
+    if (FED.token && !tokenOk(req)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+    if (req.method === "GET" && url.pathname === "/sessions/exposure") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, expose_default: FED.exposeDefault, federated: isFederated(), sessions: activeSessions().map((x) => ({ name: x.name, description: x.description, expose: x.expose })) }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/sessions/expose") {
+      let sbody = "";
+      for await (const chunk of req) {
+        sbody += chunk;
+        if (sbody.length > MAX_BODY_BYTES) { res.writeHead(413, { "Content-Type": "application/json", "Connection": "close" }); res.end(JSON.stringify({ error: "payload too large" })); return; }
+      }
+      let sp2;
+      try { sp2 = JSON.parse(sbody || "{}"); } catch { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "bad json" })); return; }
+      const sse = nameToSSE.get(sp2.name);
+      if (!sse || !sessions.has(sse)) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: `no active session named "${sp2.name}"` })); return; }
+      sessions.get(sse).expose = sp2.expose !== false;
+      console.log(`${ts()} 🛡 session "${sp2.name}" is now ${sp2.expose !== false ? "EXPOSED to" : "HIDDEN from"} the room`);
+      onLocalRosterChange();   // roster updates ripple to the room immediately
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, name: sp2.name, expose: sp2.expose !== false }));
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "unknown sessions endpoint" }));
     return;
   }
 
