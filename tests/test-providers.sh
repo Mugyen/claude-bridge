@@ -147,5 +147,38 @@ else
 fi
 stop_test_bridge
 
+# ── Case 7: tailscale — fake CLI; share uses serve --tcp; stop-share runs serve off
+cat > "$WORK/bin/tailscale" <<'FAKE'
+#!/bin/bash
+case "$1" in
+  status)
+    if [ "${2:-}" = "--json" ]; then echo '{"BackendState":"Running","Self":{"DNSName":"myhost.tail1234.ts.net."}}'; else echo "running"; fi ;;
+  serve)
+    echo "$@" >> "${TAILSCALE_FAKE_LOG:-/tmp/ts-fake.log}"
+    if [ "${2:-}" = "status" ]; then cat "${TAILSCALE_FAKE_STATE:-/dev/null}" 2>/dev/null; exit 0; fi
+    case " $* " in
+      *" off "*) : > "${TAILSCALE_FAKE_STATE}" ;;
+      *) echo "|-- tcp://myhost.tail1234.ts.net:7498 -> tcp://127.0.0.1:7498" > "${TAILSCALE_FAKE_STATE}" ;;
+    esac ;;
+esac
+FAKE
+chmod +x "$WORK/bin/tailscale"
+export TAILSCALE_FAKE_LOG="$WORK/ts.log" TAILSCALE_FAKE_STATE="$WORK/ts.state"
+export CC_BRIDGE_FED_PORT=7498
+start_test_bridge
+"$REPO/claude-bridge" share --tailscale >/dev/null 2>&1
+[ "$(cat "$WORK/tunnel.url" 2>/dev/null)" = "http://myhost.tail1234.ts.net:7498" ] \
+  && ok "tailscale: URL built from MagicDNS" || bad "tailscale: URL wrong (got: $(cat "$WORK/tunnel.url" 2>/dev/null))"
+grep -q -- "--tcp" "$WORK/ts.log" 2>/dev/null \
+  && ok "tailscale: used serve --tcp (L4, no SSE buffering)" || bad "tailscale: did not use --tcp"
+"$REPO/claude-bridge" stop-share >/dev/null 2>&1
+if grep -q " off" "$WORK/ts.log" 2>/dev/null && [ ! -s "$WORK/ts.state" ]; then
+  ok "tailscale: serve torn down (config persists otherwise!)"
+else
+  bad "tailscale: serve NOT torn down"
+fi
+unset CC_BRIDGE_FED_PORT
+stop_test_bridge
+
 echo ""; echo "test-providers: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

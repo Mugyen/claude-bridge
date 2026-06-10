@@ -949,6 +949,43 @@ provider_p2p_extract() {
   if [ -n "$t" ]; then printf 'p2p:%s' "$t"; fi
 }
 
+provider_tailscale_ensure() {
+  command -v tailscale &>/dev/null || { fail "tailscale not installed — https://tailscale.com/download"; return 1; }
+  local state
+  state=$(tailscale status --json 2>/dev/null | jq -r '.BackendState // "?"')
+  if [ "$state" != "Running" ]; then
+    fail "tailscale is not up (state: $state) — run: tailscale up"
+    return 1
+  fi
+}
+provider_tailscale_warn() {
+  ok "tailscale mode: tailnet-only (NOT public internet), WireGuard-encrypted, no extra"
+  ok "process. Spokes must be on the SAME tailnet. Uses 'serve --tcp' (L4 passthrough —"
+  ok "the HTTP serve/funnel modes buffer SSE and would silently break the bridge)."
+}
+provider_tailscale_launch() {
+  # serve --tcp is L4: the fed listener stays loopback; tailscaled forwards the
+  # tailnet-side port to it. --bg persists it past this shell. NO PID file of ours —
+  # tailscaled owns it; teardown/status go through the serve CLI, not processes.
+  tailscale serve --bg --tcp "${FED_PORT}" "tcp://127.0.0.1:${FED_PORT}" >> "$1" 2>&1
+}
+provider_tailscale_extract() {
+  local dns
+  dns=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
+  if [ -n "$dns" ]; then printf 'http://%s:%s' "$dns" "${FED_PORT}"; fi
+}
+provider_tailscale_teardown() {
+  if command -v tailscale &>/dev/null; then
+    tailscale serve --tcp "${FED_PORT}" off 2>/dev/null || true
+    # Serve config PERSISTS across reboots — verify it's actually gone.
+    if tailscale serve status 2>/dev/null | grep -q ":${FED_PORT}"; then
+      warn "tailscale serve still lists :${FED_PORT} — run: tailscale serve --tcp ${FED_PORT} off"
+    else
+      ok "tailscale serve for :${FED_PORT} torn down (verified)"
+    fi
+  fi
+}
+
 # Launch a tunnel/forwarder process FULLY DETACHED so it outlives the launching
 # shell — an interactive terminal that's later closed, OR a non-interactive/automated
 # shell (an agent, a script) that reaps its foreground command's children on exit.
