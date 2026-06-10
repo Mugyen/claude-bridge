@@ -63,5 +63,19 @@ grep -q "trycloudflare.com" "$WORK/tunnel.url" 2>/dev/null \
 "$REPO/claude-bridge" stop-share >/dev/null 2>&1
 stop_test_bridge
 
+# ── Case 3: share --provider bore extracts bore.pub URL from fake
+cat > "$WORK/bin/bore" <<'FAKE'
+#!/bin/bash
+( sleep 1; echo "2026-06-10 listening at bore.pub:34567" )
+exec sleep 300
+FAKE
+chmod +x "$WORK/bin/bore"
+start_test_bridge
+"$REPO/claude-bridge" share --provider bore >/dev/null 2>&1
+[ "$(cat "$WORK/tunnel.url" 2>/dev/null)" = "http://bore.pub:34567" ] \
+  && ok "bore: URL extracted" || bad "bore: URL extraction failed (got: $(cat "$WORK/tunnel.url" 2>/dev/null))"
+"$REPO/claude-bridge" stop-share >/dev/null 2>&1
+stop_test_bridge
+
 echo ""; echo "test-providers: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

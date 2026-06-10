@@ -754,6 +754,63 @@ ensure_cloudflared() {
   return 1
 }
 
+# Install a single-binary tool from its latest GitHub release. Resolves the asset
+# via the GitHub API (asset names embed versions, so /latest/download/<name> can't
+# be hardcoded). $1=owner/repo $2=binary-name $3=grep-pattern for this OS/arch.
+# Tarballs, zips and raw binaries all handled. Honors CC_BRIDGE_NO_AUTOINSTALL=1.
+install_release_binary() {
+  local repo="$1" bin="$2" pattern="$3"
+  command -v "$bin" &>/dev/null && return 0
+  if [ "${CC_BRIDGE_NO_AUTOINSTALL:-}" = "1" ]; then
+    fail "$bin not found — required for this provider (auto-install disabled)."
+    echo "      Install it from: https://github.com/$repo/releases"
+    return 1
+  fi
+  if [ "$pattern" = "__unsupported__" ]; then
+    fail "unsupported OS/arch ($(uname -s)/$(uname -m)) — install $bin manually: https://github.com/$repo/releases"
+    return 1
+  fi
+  warn "$bin not found — installing from github.com/$repo..."
+  local api url tmp found dest
+  api=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null) || { fail "GitHub API unreachable"; return 1; }
+  url=$(printf '%s' "$api" | grep -oE '"browser_download_url": *"[^"]+"' | cut -d'"' -f4 | grep -E "$pattern" | grep -vE '\.(sha256|sig|txt|json)$' | head -1 || true)
+  [ -z "$url" ] && { fail "no release asset matching '$pattern' for $repo — install manually"; return 1; }
+  tmp=$(mktemp -d)
+  curl -fsSL "$url" -o "$tmp/asset" || { fail "download failed: $url"; rm -rf "$tmp"; return 1; }
+  case "$url" in
+    *.tar.gz|*.tgz) tar -xzf "$tmp/asset" -C "$tmp" 2>/dev/null || true; rm -f "$tmp/asset" ;;
+    *.zip)          unzip -q "$tmp/asset" -d "$tmp" 2>/dev/null || true; rm -f "$tmp/asset" ;;
+    *)              mv "$tmp/asset" "$tmp/$bin" ;;
+  esac
+  found=$(find "$tmp" -name "$bin" -type f 2>/dev/null | head -1)
+  [ -z "$found" ] && { fail "binary '$bin' not found in release asset"; rm -rf "$tmp"; return 1; }
+  chmod +x "$found"
+  if [ -w /usr/local/bin ]; then dest=/usr/local/bin/$bin
+  else
+    mkdir -p "$HOME/.local/bin"; dest="$HOME/.local/bin/$bin"
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+  mv "$found" "$dest"; rm -rf "$tmp"
+  if command -v "$bin" &>/dev/null; then
+    ok "$bin installed ($dest)"
+    case "$dest" in "$HOME/.local/bin/"*) warn "installed to ~/.local/bin — ensure it's on your PATH for future shells";; esac
+  else
+    fail "$bin still not on PATH after install"; return 1
+  fi
+}
+
+# OS/arch → release-asset grep pattern (covers rust-style and go-style asset names).
+release_pattern() {
+  local os arch; os="$(uname -s)"; arch="$(uname -m)"
+  case "$os-$arch" in
+    Darwin-arm64)              echo 'aarch64-apple-darwin|darwin_arm64|darwin-arm64' ;;
+    Darwin-x86_64)             echo 'x86_64-apple-darwin|darwin_amd64|darwin-amd64' ;;
+    Linux-x86_64)              echo 'x86_64-unknown-linux|linux_amd64|linux-amd64' ;;
+    Linux-aarch64|Linux-arm64) echo 'aarch64-unknown-linux|linux_arm64|linux-arm64' ;;
+    *) echo "__unsupported__" ;;
+  esac
+}
+
 # ── Tunnel providers ─────────────────────────────────────────────────────────
 # Contract — each provider implements (dispatched via computed names, bash-3.2 safe):
 #   provider_<p>_ensure    : binary present (auto-install unless CC_BRIDGE_NO_AUTOINSTALL=1) → 0/1
@@ -803,6 +860,23 @@ provider_cloudflared_quick_extract() {
   printf '%s' "$url"
 }
 provider_cloudflared_named_extract() { printf 'https://%s' "$NAMED_TUNNEL_HOST"; }
+
+provider_bore_ensure() { install_release_binary "ekzhang/bore" "bore" "$(release_pattern)"; }
+provider_bore_warn() {
+  warn "bore relays PLAINTEXT TCP through bore.pub: the relay operator can read the"
+  warn "token and all bridge traffic. Use only for throwaway demos — prefer the"
+  warn "p2p mode (end-to-end encrypted) for anything real."
+}
+provider_bore_launch() { launch_tunnel "$1" bore local "${FED_PORT}" --to bore.pub; }
+provider_bore_extract() {
+  local hostport=""
+  for _ in $(seq 1 20); do
+    hostport=$(grep -oE 'bore\.pub:[0-9]+' "$1" 2>/dev/null | head -1 || true)
+    [ -n "$hostport" ] && break
+    sleep 1
+  done
+  if [ -n "$hostport" ]; then printf 'http://%s' "$hostport"; fi
+}
 
 # Launch a tunnel/forwarder process FULLY DETACHED so it outlives the launching
 # shell — an interactive terminal that's later closed, OR a non-interactive/automated
