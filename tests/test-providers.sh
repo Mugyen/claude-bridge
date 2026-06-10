@@ -107,5 +107,45 @@ start_test_bridge
 "$REPO/claude-bridge" stop-share >/dev/null 2>&1
 stop_test_bridge
 
+# ── Case 6a: share --p2p extracts the ticket as p2p:<ticket>
+cat > "$WORK/bin/dumbpipe" <<'FAKE'
+#!/bin/bash
+if [ "$1" = "listen-tcp" ]; then
+  ( sleep 1; echo "To connect, use e.g.:"; echo "dumbpipe connect-tcp nodeaafake7ticket3string9xyz" )
+  exec sleep 300
+fi
+if [ "$1" = "connect-tcp" ]; then exec sleep 300; fi
+FAKE
+chmod +x "$WORK/bin/dumbpipe"
+start_test_bridge
+"$REPO/claude-bridge" share --p2p >/dev/null 2>&1
+[ "$(cat "$WORK/tunnel.url" 2>/dev/null)" = "p2p:nodeaafake7ticket3string9xyz" ] \
+  && ok "p2p: ticket extracted" || bad "p2p: ticket extraction failed (got: $(cat "$WORK/tunnel.url" 2>/dev/null))"
+"$REPO/claude-bridge" stop-share >/dev/null 2>&1
+
+# ── Case 6b: join 'p2p:<ticket>#<token>' spawns the forwarder + writes localhost HUB_FILE
+"$REPO/claude-bridge" join 'p2p:nodeaafake7ticket3string9xyz#deadbeef' >/dev/null 2>&1
+hub=$(cat "$HOME/.claude/.cc-bridge-hub" 2>/dev/null)
+case "$hub" in
+  http://127.0.0.1:*) ok "p2p join: HUB_FILE is localhost forwarder ($hub)";;
+  *) bad "p2p join: HUB_FILE wrong: $hub";;
+esac
+if [ -f "$WORK/pipe.pid" ] && kill -0 "$(cat "$WORK/pipe.pid")" 2>/dev/null; then
+  ok "p2p join: forwarder running"
+else
+  bad "p2p join: forwarder not running"
+fi
+[ "$(cat "$WORK/pipe.ticket" 2>/dev/null)" = "nodeaafake7ticket3string9xyz" ] \
+  && ok "p2p join: ticket recorded" || bad "p2p join: ticket file wrong"
+PIPE_PID_BEFORE=$(cat "$WORK/pipe.pid" 2>/dev/null || echo "")
+"$REPO/claude-bridge" unlink >/dev/null 2>&1
+sleep 0.5
+if [ -n "$PIPE_PID_BEFORE" ] && kill -0 "$PIPE_PID_BEFORE" 2>/dev/null; then
+  bad "unlink: forwarder still alive"; kill -9 "$PIPE_PID_BEFORE" 2>/dev/null
+else
+  ok "unlink: forwarder killed"
+fi
+stop_test_bridge
+
 echo ""; echo "test-providers: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

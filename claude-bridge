@@ -930,6 +930,25 @@ provider_zrok_extract() {
   printf '%s' "$url"
 }
 
+provider_p2p_ensure() { install_release_binary "n0-computer/dumbpipe" "dumbpipe" "$(release_pattern)"; }
+provider_p2p_warn() {
+  ok "p2p mode: end-to-end encrypted QUIC, no account, no public URL. NAT traversal is"
+  ok "automatic (relay fallback if hole-punching fails). The ticket admits anyone who"
+  ok "holds it — treat the whole join link as a secret."
+}
+provider_p2p_launch() { launch_tunnel "$1" dumbpipe listen-tcp --host "127.0.0.1:${FED_PORT}"; }
+provider_p2p_extract() {
+  # The listener prints a connect command containing the ticket. Any number of
+  # spokes can connect through this ONE ticket (each becomes its own TCP conn).
+  local t=""
+  for _ in $(seq 1 30); do
+    t=$(grep -oE 'connect-tcp +[a-z0-9]+' "$1" 2>/dev/null | head -1 | awk '{print $2}' || true)
+    [ -n "$t" ] && break
+    sleep 1
+  done
+  if [ -n "$t" ]; then printf 'p2p:%s' "$t"; fi
+}
+
 # Launch a tunnel/forwarder process FULLY DETACHED so it outlives the launching
 # shell — an interactive terminal that's later closed, OR a non-interactive/automated
 # shell (an agent, a script) that reaps its foreground command's children on exit.
@@ -1095,10 +1114,49 @@ join_hub() {
   local host="${link%%#*}"
   local token="${link#*#}"
   if [ "$token" = "$link" ] || [ -z "$token" ]; then
-    fail "Join link must include the token fragment: 'https://<host>#<token>'"
+    fail "Join link must include the token fragment: 'https://<host>#<token>' or 'p2p:<ticket>#<token>'"
     exit 1
   fi
   host="${host%/}"
+
+  # P2P link: 'p2p:<ticket>#<token>' — spawn a local dumbpipe forwarder and treat
+  # http://127.0.0.1:<port> as the hub URL. connectToHub picks http/https by
+  # protocol, so everything downstream (HUB_FILE, fed_reload, heartbeats, queued
+  # reconnects) is unchanged. The pipe is E2E-encrypted (QUIC), so the plain-http
+  # hop never leaves this machine.
+  case "$host" in p2p:*)
+    local ticket="${host#p2p:}"
+    if [ -z "$ticket" ]; then fail "p2p link has an empty ticket"; exit 1; fi
+    provider_p2p_ensure || exit 1
+    # Replace any previous forwarder (re-join with a new ticket).
+    kill_recorded "$SPOKE_PIPE_PID_FILE" "Old p2p forwarder"
+    local lport
+    lport=$(node -e 's=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
+    if [ -z "$lport" ]; then fail "could not pick a free local port for the p2p forwarder"; exit 1; fi
+    local pipe_log="${CC_BRIDGE_TUNNEL_LOG:-/tmp/claude-bridge-tunnel.log}.spoke"
+    : > "$pipe_log"
+    # Same detach hardening as the hub tunnel (setsid / nohup+disown+</dev/null) —
+    # the forwarder must outlive this shell. PID goes to the pipe's OWN file so
+    # unlink/doctor/uninstall can manage it independently of any hub tunnel.
+    if command -v setsid >/dev/null 2>&1; then
+      setsid dumbpipe connect-tcp --addr "127.0.0.1:${lport}" "$ticket" >> "$pipe_log" 2>&1 < /dev/null &
+    else
+      nohup dumbpipe connect-tcp --addr "127.0.0.1:${lport}" "$ticket" >> "$pipe_log" 2>&1 < /dev/null &
+    fi
+    local ppid=$!
+    echo "$ppid" > "$SPOKE_PIPE_PID_FILE"
+    disown "$ppid" 2>/dev/null || true
+    printf '%s' "$lport"  > "$SPOKE_PIPE_PORT_FILE"
+    printf '%s' "$ticket" > "$SPOKE_PIPE_TICKET_FILE"
+    sleep 1
+    if ! kill -0 "$ppid" 2>/dev/null; then
+      fail "p2p forwarder died on start — check $pipe_log"
+      rm -f "$SPOKE_PIPE_PID_FILE" "$SPOKE_PIPE_PORT_FILE" "$SPOKE_PIPE_TICKET_FILE"
+      exit 1
+    fi
+    ok "p2p forwarder up (PID $ppid): 127.0.0.1:${lport} → hub ticket $(printf '%.16s' "$ticket")…"
+    host="http://127.0.0.1:${lport}"
+  ;; esac
 
   mkdir -p "$(dirname "$TOKEN_FILE")"
   local old_token; old_token=$(cat "$TOKEN_FILE" 2>/dev/null || echo "")
@@ -1140,6 +1198,10 @@ unlink_hub() {
   fi
   : > "$HUB_FILE"
   printf '%s' "standalone" > "$ROLE_FILE"
+  # ORDER MATTERS: the hub was notified ABOVE (over the still-alive forwarder for
+  # p2p links) — only now is it safe to kill the local pipe.
+  kill_recorded "$SPOKE_PIPE_PID_FILE" "p2p forwarder"
+  rm -f "$SPOKE_PIPE_PORT_FILE" "$SPOKE_PIPE_TICKET_FILE"
   fed_reload && ok "Unlinked — back to standalone (local sessions unaffected)"
 }
 
@@ -1276,6 +1338,15 @@ doctor() {
     ok "Role: ${role:-$drole}${ping:+ (live)}"
   fi
   if [ "$drole" = "spoke" ]; then
+    # P2P spoke: the local forwarder is the road to the hub — if it died (reboot,
+    # crash), every reconnect attempt is ECONNREFUSED until the user re-joins.
+    if [ -s "$SPOKE_PIPE_TICKET_FILE" ]; then
+      if [ -f "$SPOKE_PIPE_PID_FILE" ] && kill -0 "$(cat "$SPOKE_PIPE_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        ok "p2p forwarder up (ticket $(cut -c1-16 "$SPOKE_PIPE_TICKET_FILE" 2>/dev/null)…)"
+      else
+        fail "p2p forwarder DOWN — hub unreachable. Re-join: claude-bridge join 'p2p:$(cat "$SPOKE_PIPE_TICKET_FILE")#<token>'"
+      fi
+    fi
     local hub; hub=$(cat "$HUB_FILE" 2>/dev/null)
     if [ -n "$hub" ] && curl -sf --max-time 6 "${hub}/health/ping" >/dev/null 2>&1; then ok "Hub reachable: $hub"
     elif [ -n "$hub" ]; then warn "Hub NOT reachable: $hub (outage, or tunnel down on the hub)"; fi
