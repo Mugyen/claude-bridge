@@ -783,6 +783,9 @@ install_release_binary() {
     *)              mv "$tmp/asset" "$tmp/$bin" ;;
   esac
   found=$(find "$tmp" -name "$bin" -type f 2>/dev/null | head -1)
+  # Some projects version the binary name inside the tarball (zrok v2 ships
+  # "zrok2") — fall back to a prefix match, installed AS the canonical name.
+  [ -z "$found" ] && found=$(find "$tmp" -name "${bin}*" -type f ! -name "*.md" ! -name "*.txt" 2>/dev/null | head -1)
   [ -z "$found" ] && { fail "binary '$bin' not found in release asset"; rm -rf "$tmp"; return 1; }
   chmod +x "$found"
   if [ -w /usr/local/bin ]; then dest=/usr/local/bin/$bin
@@ -803,10 +806,10 @@ install_release_binary() {
 release_pattern() {
   local os arch; os="$(uname -s)"; arch="$(uname -m)"
   case "$os-$arch" in
-    Darwin-arm64)              echo 'aarch64-apple-darwin|darwin_arm64|darwin-arm64' ;;
-    Darwin-x86_64)             echo 'x86_64-apple-darwin|darwin_amd64|darwin-amd64' ;;
-    Linux-x86_64)              echo 'x86_64-unknown-linux|linux_amd64|linux-amd64' ;;
-    Linux-aarch64|Linux-arm64) echo 'aarch64-unknown-linux|linux_arm64|linux-arm64' ;;
+    Darwin-arm64)              echo 'aarch64-apple-darwin|darwin_arm64|darwin-arm64|darwin-aarch64' ;;
+    Darwin-x86_64)             echo 'x86_64-apple-darwin|darwin_amd64|darwin-amd64|darwin-x86_64' ;;
+    Linux-x86_64)              echo 'x86_64-unknown-linux|linux_amd64|linux-amd64|linux-x86_64' ;;
+    Linux-aarch64|Linux-arm64) echo 'aarch64-unknown-linux|linux_arm64|linux-arm64|linux-aarch64' ;;
     *) echo "__unsupported__" ;;
   esac
 }
@@ -893,9 +896,12 @@ provider_pinggy_launch() {
     -o ExitOnForwardFailure=yes -p 443 -R0:127.0.0.1:"${FED_PORT}" a.pinggy.io
 }
 provider_pinggy_extract() {
+  # Pinggy's free TUNNEL domains drift (*.pinggy.link, *.free.pinggy.net,
+  # *.run.pinggy-free.link all observed). Enumerate them — a looser match grabs
+  # the dashboard.pinggy.io upsell link from the banner (bit us live).
   local url=""
   for _ in $(seq 1 30); do
-    url=$(grep -oE 'https://[a-z0-9.-]+\.pinggy\.link' "$1" 2>/dev/null | head -1 || true)
+    url=$(grep -oE 'https://[a-z0-9.-]+\.pinggy(\.link|\.net|-free\.link)' "$1" 2>/dev/null | head -1 || true)
     [ -n "$url" ] && break
     sleep 1
   done
@@ -1115,6 +1121,9 @@ share_hub() {
   url=$(NAMED_TUNNEL_HOST="$named_tunnel" "provider_${pfn}_extract" "$tunnel_log")
   if [ -z "$url" ]; then
     fail "Share did not report a URL/ticket — check $tunnel_log"
+    # Don't leak the detached process we just launched (found live: a failed
+    # pinggy extract left the ssh tunnel running with no recorded URL).
+    kill_recorded "$TUNNEL_PID_FILE" "Failed $provider share"
     exit 1
   fi
   printf '%s' "$url" > "$TUNNEL_URL_FILE"

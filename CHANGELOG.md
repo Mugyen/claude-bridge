@@ -18,6 +18,11 @@ heading when you tag the release and bump `package.json` + the banner in
 - **EXPOSED status line** in `share`/`status`/`health`/`doctor` showing provider + URL/ticket + liveness (tailscale checked via `serve status`, not process checks).
 - Generic GitHub-release binary auto-installer (bore, dumbpipe, zrok); honors `CC_BRIDGE_NO_AUTOINSTALL=1`.
 
+### Fixed (v2.8.0 — found by live Mac↔GCP-VM testing)
+- Release-asset patterns broadened to real-world names (`darwin-aarch64`/`linux-x86_64` for dumbpipe); installer falls back to a prefix match when the binary is versioned inside the tarball (zrok v2 ships `zrok2`).
+- pinggy extractor matches the real free-tier tunnel domains (`*.free.pinggy.net`, `*.run.pinggy-free.link`) and no longer grabs the `dashboard.pinggy.io` banner link.
+- A failed URL/ticket extraction now kills the just-launched detached process instead of leaking it (hit live with pinggy).
+
 ### Changed (v2.8.0)
 - **Default share transport is now p2p (dumbpipe)** — no account, no public URL, end-to-end encrypted, SSE-safe, any number of spokes through one ticket.
 - **Cloudflared QUICK tunnels demoted to explicit `--provider cloudflared-quick`** with a corrected warning: they BUFFER SSE, so spokes register but never receive forwarded messages (cloudflared#1449 + official docs "Quick Tunnels do not support SSE") — the prior "flappy" warning understated the problem. Named tunnels are unaffected (run ONE connector per hostname).
