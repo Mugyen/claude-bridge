@@ -139,6 +139,25 @@ try {
   await sleep(1500);
   r = await hub.raw("POST", "/link/join", { json: { node: "tardy", password: "x" } });
   assert("ttl: expired room is gone (join 404/503)", r.status === 404 || r.status === 503, `status=${r.status}`);
+  // ── 14. host-only room: hub relays, but its sessions are out of the room
+  r = await hub.raw("POST", "/room/create", { token: HUB_TOKEN, json: { name: "pure", host_only: true, password: "hostonlypw1234" } });
+  assert("host-only: room created", ok(r), JSON.stringify(r.body));
+  await hub.call("register", { name: "hider", description: "hub-local private session" });
+  r = await hub.raw("POST", "/link/join", { json: { node: "spokeho", password: "hostonlypw1234" } });
+  const hoTok = r.body && r.body.member_token;
+  assert("host-only: member can join", ok(r) && hoTok, JSON.stringify(r.body));
+  r = await hub.raw("POST", "/link/register", { token: hoTok, node: "spokeho", json: { node: "spokeho", sessions: [{ name: "remoteguy" }] } });
+  const localLeak = (r.body.roster || []).filter((e) => e.node === "local");
+  assert("host-only: register roster hides ALL hub-local sessions", ok(r) && localLeak.length === 0, JSON.stringify(r.body.roster));
+  const ls = await hub.call("list_sessions", {});
+  const names = (ls.sessions || []).map((x) => x.name);
+  assert("host-only: hub locals don't see the room", names.includes("hider") && !names.includes("remoteguy"), JSON.stringify(names));
+  const askOut = await hub.call("ask", { to: "remoteguy", question: "leak?" });
+  assert("host-only: hub local blocked from messaging the room", askOut && /HOST-ONLY/i.test(askOut.error || ""), JSON.stringify(askOut));
+  r = await hub.raw("POST", "/link/forward", { token: hoTok, node: "spokeho", json: { kind: "question", id: "ho-1", from: "remoteguy", to: "hider", question: "secrets?", ts: Date.now(), originNode: "spokeho" } });
+  assert("host-only: inbound forward accepted at transport", ok(r), `status=${r.status}`);
+  const hiderInbox = await hub.call("check_inbox", {});
+  assert("host-only: inbound to hub-local DROPPED (never delivered)", (hiderInbox.questions || []).every((q) => q.id !== "ho-1"), JSON.stringify(hiderInbox.questions));
 } catch (e) {
   assert("unexpected error", false, e.stack || String(e));
 } finally {

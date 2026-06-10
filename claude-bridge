@@ -1218,9 +1218,10 @@ room_cmd() {
   local resp
   case "$sub" in
     create)
-      local name="" ttl_s="" pw="" pw_set=0 args=("$@") i=0
+      local name="" ttl_s="" pw="" pw_set=0 host_only="" args=("$@") i=0
       while [ $i -lt ${#args[@]} ]; do
         case "${args[$i]}" in
+          --host-only) host_only=true ;;
           --ttl) i=$((i+1)); ttl_s=$(parse_duration "${args[$i]:-}") || { fail "bad --ttl (use 90s/15m/2h/7d)"; exit 1; } ;;
           --password)
             pw_set=1
@@ -1237,13 +1238,17 @@ room_cmd() {
         pw=$(openssl rand -hex 12 2>/dev/null || node -e "console.log(require('crypto').randomBytes(12).toString('hex'))")
       fi
       local body
-      body=$(jq -nc --arg n "$name" --arg p "$pw" --arg t "${ttl_s:-}" \
-        '{name:$n} + (if $p != "" then {password:$p} else {} end) + (if $t != "" then {ttl_seconds:($t|tonumber)} else {} end)')
+      body=$(jq -nc --arg n "$name" --arg p "$pw" --arg t "${ttl_s:-}" --arg h "$host_only" \
+        '{name:$n} + (if $p != "" then {password:$p} else {} end) + (if $t != "" then {ttl_seconds:($t|tonumber)} else {} end) + (if $h != "" then {host_only:true} else {} end)')
       resp=$(room_api POST /room/create "$body")
       printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
       ok "Room \"$name\" created ($(printf '%s' "$resp" | jq -r '.room.id'))"
       warn "member-token auth is now ACTIVE: the old shared-token join links no longer work."
       warn "Hand out invites instead:  claude-bridge room invite"
+      if [ -n "$host_only" ]; then
+        ok "HOST-ONLY: this machine relays the room but its own sessions are NOT participants"
+        ok "(invisible to members, unable to message the room; local sessions unaffected locally)"
+      fi
       if [ "$pw_set" = 1 ]; then
         echo ""
         echo "  Room password (shown ONCE — share it over a safe channel):"
@@ -1314,7 +1319,7 @@ room_cmd() {
     info)
       resp=$(room_api GET /room/info)
       printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
-      printf '%s' "$resp" | jq -r '.room | "Room: \(.name) (\(.id))\nOwner: \(.owner)\nMembers: \(.members|length) · Invites open: \(.invites|length) · Password gate: \(if .password_set then "on" else "off" end)\nExpires: \(if .expires_at then (.expires_at/1000 | todate) else "never (persistent)" end)"'
+      printf '%s' "$resp" | jq -r '.room | "Room: \(.name) (\(.id))\nOwner: \(.owner)\(if .host_participates then "" else "  [HOST-ONLY: relay, not a participant]" end)\nMembers: \(.members|length) · Invites open: \(.invites|length) · Password gate: \(if .password_set then "on" else "off" end)\nExpires: \(if .expires_at then (.expires_at/1000 | todate) else "never (persistent)" end)"'
       ;;
     delete)
       resp=$(room_api POST /room/delete "$(jq -nc --arg c "${1:-}" '{confirm:$c}')")
@@ -1831,7 +1836,9 @@ FEDERATION (link bridges across machines)
   stop-share                           Hub stops sharing — verified teardown (kills tunnel / serve off), keeps bridge + token
 
 ROOMS (per-member tokens on the hub — kick one machine without rotating everyone)
-  room create <name> [--ttl <dur>] [--password [value]]   Create the room (owner = this machine; auth switches to member tokens)
+  room create <name> [--ttl <dur>] [--password [value]] [--host-only]
+                                                          Create the room (owner = this machine; auth switches to member tokens).
+                                                          --host-only: relay for the community WITHOUT your sessions participating
   room invite [--one-time] [--expires <dur>]              Mint an invite + print the full join link (default 7d, unlimited uses)
   room members | info                                     Roster with online state · room summary
   room kick <node> | rotate <node> | rotate-password      Revoke one machine · re-key one member · re-key the password gate

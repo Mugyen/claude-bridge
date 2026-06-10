@@ -357,6 +357,14 @@ function activeRoom() {
   return found;
 }
 
+/** Host-only room: this hub relays for the community but its OWN sessions are
+ *  not participants — never advertised, never addressable from the room, and
+ *  blocked from reaching the room (two-way isolation; pure broker). */
+function hostOnly() {
+  const r = activeRoom();
+  return !!(r && r.host_participates === false && FED.role === "hub");
+}
+
 const sha256hex = (s) => crypto.createHash("sha256").update(s).digest("hex");
 // scrypt (node:crypto): memory-hard password hash for the JOIN GATE, zero-dep.
 // (Argon2id is reserved for the 3b E2EE room-key derivation via libsodium.)
@@ -586,12 +594,17 @@ function routeForward(payload) {
     // question | notice
     const target = resolveTarget(payload.to);
     if (target.kind === "local") {
+      // Host-only room: the hub's own sessions are NOT participants — inbound
+      // room traffic must never reach them. Drop (asker fails/times out).
+      if (hostOnly()) { console.log(`${ts()} 🚪 host-only: dropped inbound for local "${payload.to}"`); return; }
       injectRemote(payload); // wakes the hub-local target via normal delivery
     } else if (target.kind === "remote") {
       relayForward(target.node, payload); // another spoke
     } else {
       // Unknown target on the hub: inject so it queues (30d TTL) and delivers if a
       // session by that name appears locally later (lesson #22 dead-letter caveat).
+      // Host-only: never queue for local adoption either.
+      if (hostOnly()) { console.log(`${ts()} 🚪 host-only: dropped inbound for unknown "${payload.to}"`); return; }
       injectRemote(payload);
     }
   } catch (e) {
@@ -713,7 +726,7 @@ function linkSend(sp, event, data) {
 function broadcastRoster() {
   if (FED.role !== "hub") return;
   const nodes = {};
-  nodes[FED.node] = linkSessions();
+  nodes[FED.node] = hostOnly() ? [] : linkSessions();
   for (const [node, sp] of spokes) {
     if (sp.res) nodes[node] = sp.sessions || [];
   }
@@ -1118,12 +1131,18 @@ async function executeTool(sseId, name, args) {
     }
 
     case "list_sessions":
+      // Host-only hub: local sessions see only each other — the room is invisible
+      // to them, exactly as they are invisible to the room (two privacy zones).
+      if (hostOnly()) return { sessions: activeSessions() };
       return { sessions: FED.role === "standalone" ? activeSessions() : globalRoster() };
 
     case "ask": {
       if (!myName) return { error: "Call register() first." };
       const { to, question } = args;
       const target = resolveTarget(to);
+      if (target.kind === "remote" && hostOnly()) {
+        return { error: "this hub is HOST-ONLY: it relays for the room, but local sessions are not participants (room created with --host-only)" };
+      }
       if (target.kind === "none") {
         const roster = (FED.role === "standalone" ? activeSessions().map((s) => s.name)
           : globalRoster().map((e) => (e.node === "local" ? e.name : `${e.name}@${e.node}`)));
@@ -1202,6 +1221,9 @@ async function executeTool(sseId, name, args) {
         return { error: "notify requires { to: string, content: string }" };
       }
       const target = resolveTarget(to);
+      if (target.kind === "remote" && hostOnly()) {
+        return { error: "this hub is HOST-ONLY: it relays for the room, but local sessions are not participants (room created with --host-only)" };
+      }
       const id = crypto.randomUUID(); // full 122-bit id: unguessable, no pre-claim/collision vector (S3)
       // NO answer field — lesson #19.
       const msg = { id, from: myName, to: target.name ?? to, kind: "notice", content, delivered: false, ts: Date.now(), origin: { node: FED.node } };
@@ -1447,7 +1469,7 @@ async function handleLinkRequest(req, res, url) {
         // stream-connect resync saw an empty session list). No-op if no stream.
         flushPendingForwards(node);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, node: FED.node, roster: globalRoster() }));
+        res.end(JSON.stringify({ ok: true, node: FED.node, roster: hostOnly() ? globalRoster().filter((e) => e.node !== "local") : globalRoster() }));
         return;
       }
       if (url.pathname === "/link/forward") {
@@ -1469,7 +1491,7 @@ async function handleLinkRequest(req, res, url) {
         const sp = spokes.get(node);
         if (sp) sp.lastSeen = Date.now();
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, roster: globalRoster() }));
+        res.end(JSON.stringify({ ok: true, roster: hostOnly() ? globalRoster().filter((e) => e.node !== "local") : globalRoster() }));
         return;
       }
       if (url.pathname === "/link/unregister") {
@@ -1776,6 +1798,7 @@ const server = http.createServer(async (req, res) => {
           created_at: Date.now(),
           expires_at: Number(rp.ttl_seconds) > 0 ? Date.now() + Number(rp.ttl_seconds) * 1000 : null,
           owner: { node: FED.node, pubkey: (typeof rp.owner_pubkey === "string" && rp.owner_pubkey) || null },
+          host_participates: rp.host_only === true ? false : true,
           password: null,
           members: {
             // The owner's entry is bookkeeping (role/roster) — the hub never
@@ -1815,7 +1838,7 @@ const server = http.createServer(async (req, res) => {
           has_token: !!m.token_hash,
         }));
         const invites = Object.entries(room.invites || {}).map(([id, i]) => ({ id, expires_at: i.expires_at, max_uses: i.max_uses, uses: i.uses }));
-        return jres(200, { ok: true, room: { id: room.id, name: room.name, created_at: room.created_at, expires_at: room.expires_at, owner: room.owner.node, password_set: !!room.password, members, invites } });
+        return jres(200, { ok: true, room: { id: room.id, name: room.name, created_at: room.created_at, expires_at: room.expires_at, owner: room.owner.node, host_participates: room.host_participates !== false, password_set: !!room.password, members, invites } });
       }
 
       if (req.method === "POST" && url.pathname === "/room/kick") {
