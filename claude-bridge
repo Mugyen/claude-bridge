@@ -1704,8 +1704,19 @@ case "$ACTION" in
     tunnel_pid=$(cat "$TUNNEL_PID_FILE" 2>/dev/null || echo "")
     pipe_pid=$(cat "$SPOKE_PIPE_PID_FILE" 2>/dev/null || echo "")
     tunnel_prov=$(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null || echo "")
-    rm -f /tmp/claude-bridge-* /tmp/cc-bridge-* /tmp/claude-bridge.pid /tmp/cc-bridge.pid
-    ok "Temp files cleaned (/tmp/{claude,cc}-bridge-* incl. session state + pid/url)"
+    rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_PROVIDER_FILE" \
+          "$SPOKE_PIPE_PID_FILE" "$SPOKE_PIPE_PORT_FILE" "$SPOKE_PIPE_TICKET_FILE"
+    if [ "$TUNNEL_PID_FILE" = "/tmp/claude-bridge-tunnel.pid" ]; then
+      # Real uninstall: full wipe. When the tunnel paths are env-overridden (a
+      # TEST is running uninstall against scratch state), SKIP the global glob —
+      # it nuked a live production share's state files and the captured-PID kill
+      # below took out the real dumbpipe (field incident 2026-06-10, second of
+      # its class after the test-share-flags one; see DEVELOPER.md lesson #15).
+      rm -f /tmp/claude-bridge-* /tmp/cc-bridge-* /tmp/claude-bridge.pid /tmp/cc-bridge.pid
+      ok "Temp files cleaned (/tmp/{claude,cc}-bridge-* incl. session state + pid/url)"
+    else
+      ok "Temp files cleaned (scoped — tunnel paths env-overridden, global /tmp wipe skipped)"
+    fi
     rm -f "$VERSION_FILE"
 
     # FINAL step — full teardown: close the tunnel, then stop the running bridge.

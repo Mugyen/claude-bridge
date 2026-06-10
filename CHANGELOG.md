@@ -20,6 +20,7 @@ heading when you tag the release and bump `package.json` + the banner in
 - **`update [branch]`** — `claude-bridge update <branch>` fetches, switches to, and tracks that branch (beta-testing a feature branch in one command); bare `update` now always returns to the repo's default branch (main). Unknown branches fail with the remote branch list. Test: `tests/test-update-branch.sh`.
 
 ### Fixed (v2.8.0 — found by live Mac↔GCP-VM testing)
+- **`npm test` can no longer kill a live production share (second incident of this class).** `test-cli.sh`'s uninstall round-trip isolated the port but not the tunnel state paths — uninstall read the REAL `/tmp/claude-bridge-tunnel.pid`, killed the live dumbpipe, and its unconditional `/tmp/claude-bridge-*` glob wiped the share's state files (+ live sessions' name files). Uninstall now skips the global /tmp wipe when the tunnel paths are env-overridden (i.e., a test), and every test uninstall sets the overrides. Sentinel regression test added.
 - Release-asset patterns broadened to real-world names (`darwin-aarch64`/`linux-x86_64` for dumbpipe); installer falls back to a prefix match when the binary is versioned inside the tarball (zrok v2 ships `zrok2`).
 - pinggy extractor matches the real free-tier tunnel domains (`*.free.pinggy.net`, `*.run.pinggy-free.link`) and no longer grabs the `dashboard.pinggy.io` banner link.
 - A failed URL/ticket extraction now kills the just-launched detached process instead of leaking it (hit live with pinggy).

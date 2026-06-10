@@ -83,9 +83,9 @@ if command -v claude >/dev/null 2>&1; then
   SH2HOME="$TMP/skillhome"; mkdir -p "$SH2HOME/.claude"
   # CC_BRIDGE_PORT=7498 (unused) so uninstall's full-teardown step can't stop a
   # real bridge on the default :7400 — uninstall now kills the listener on $PORT.
-  HOME="$SH2HOME" CC_BRIDGE_PORT=7498 bash "$REPO_DIR/claude-bridge" install >/dev/null 2>&1
+  HOME="$SH2HOME" CC_BRIDGE_PORT=7498 CC_BRIDGE_TUNNEL_PID="$SH2HOME/t.pid" CC_BRIDGE_TUNNEL_URL="$SH2HOME/t.url" CC_BRIDGE_TUNNEL_PROVIDER="$SH2HOME/t.provider" CC_BRIDGE_SPOKE_PIPE_PID="$SH2HOME/p.pid" CC_BRIDGE_SPOKE_PIPE_PORT="$SH2HOME/p.port" CC_BRIDGE_SPOKE_PIPE_TICKET="$SH2HOME/p.ticket" bash "$REPO_DIR/claude-bridge" install >/dev/null 2>&1
   both_in=$([ -f "$SH2HOME/.claude/skills/claude-bridge/SKILL.md" ] && [ -f "$SH2HOME/.claude/skills/claude-bridge-debug/SKILL.md" ] && echo yes || echo no)
-  HOME="$SH2HOME" CC_BRIDGE_PORT=7498 bash "$REPO_DIR/claude-bridge" uninstall >/dev/null 2>&1
+  HOME="$SH2HOME" CC_BRIDGE_PORT=7498 CC_BRIDGE_TUNNEL_PID="$SH2HOME/t.pid" CC_BRIDGE_TUNNEL_URL="$SH2HOME/t.url" CC_BRIDGE_TUNNEL_PROVIDER="$SH2HOME/t.provider" CC_BRIDGE_SPOKE_PIPE_PID="$SH2HOME/p.pid" CC_BRIDGE_SPOKE_PIPE_PORT="$SH2HOME/p.port" CC_BRIDGE_SPOKE_PIPE_TICKET="$SH2HOME/p.ticket" bash "$REPO_DIR/claude-bridge" uninstall >/dev/null 2>&1
   both_gone=$([ ! -d "$SH2HOME/.claude/skills/claude-bridge" ] && [ ! -d "$SH2HOME/.claude/skills/claude-bridge-debug" ] && echo yes || echo no)
   if [ "$both_in" = yes ] && [ "$both_gone" = yes ]; then
     ok "install lands protocol+debug skills; uninstall removes both"
@@ -113,7 +113,7 @@ if command -v node >/dev/null 2>&1; then
   HOME="$THOME" CC_BRIDGE_PORT=7497 bash "$REPO_DIR/claude-bridge" start >/dev/null 2>&1
   sleep 1
   up=$(curl -sf --max-time 1 http://localhost:7497/health/ping >/dev/null 2>&1 && echo yes || echo no)
-  HOME="$THOME" CC_BRIDGE_PORT=7497 bash "$REPO_DIR/claude-bridge" uninstall >/dev/null 2>&1
+  HOME="$THOME" CC_BRIDGE_PORT=7497 CC_BRIDGE_TUNNEL_PID="$THOME/t.pid" CC_BRIDGE_TUNNEL_URL="$THOME/t.url" CC_BRIDGE_TUNNEL_PROVIDER="$THOME/t.provider" CC_BRIDGE_SPOKE_PIPE_PID="$THOME/p.pid" CC_BRIDGE_SPOKE_PIPE_PORT="$THOME/p.port" CC_BRIDGE_SPOKE_PIPE_TICKET="$THOME/p.ticket" bash "$REPO_DIR/claude-bridge" uninstall >/dev/null 2>&1
   sleep 1
   down=$(curl -sf --max-time 1 http://localhost:7497/health/ping >/dev/null 2>&1 && echo no || echo yes)
   lsof -ti:7497 2>/dev/null | xargs kill 2>/dev/null || true
@@ -136,6 +136,24 @@ OUT=$(HOME="$SRV_HOME" PATH="$FB" bash "$REPO_DIR/claude-bridge" install 2>&1); 
 if [ $RC -eq 0 ] && echo "$OUT" | grep -qi "server/hub-only" && [ -L "$SRV_HOME/.local/bin/claude-bridge" ]; then
   ok "server/hub-only install (no claude CLI) → succeeds, skips wiring, still symlinks CLI"
 else bad "server-only install (rc=$RC, symlink=$([ -L "$SRV_HOME/.local/bin/claude-bridge" ] && echo yes || echo no)): $(echo "$OUT" | tail -3)"; fi
+
+# ── uninstall with env-overridden tunnel paths must NOT touch real /tmp state ──
+# (regression: the global /tmp/claude-bridge-* glob — run from a TEST — wiped a
+# live production share's state files and killed its dumbpipe, 2026-06-10)
+SENTINEL="/tmp/claude-bridge-SENTINEL-$$"
+echo live > "$SENTINEL"
+UHOME="$TMP/uhome"; mkdir -p "$UHOME/.claude"
+HOME="$UHOME" CC_BRIDGE_PORT=7496 \
+  CC_BRIDGE_TUNNEL_PID="$UHOME/t.pid" CC_BRIDGE_TUNNEL_URL="$UHOME/t.url" \
+  CC_BRIDGE_TUNNEL_PROVIDER="$UHOME/t.provider" CC_BRIDGE_SPOKE_PIPE_PID="$UHOME/p.pid" \
+  CC_BRIDGE_SPOKE_PIPE_PORT="$UHOME/p.port" CC_BRIDGE_SPOKE_PIPE_TICKET="$UHOME/p.ticket" \
+  bash "$REPO_DIR/claude-bridge" uninstall >/dev/null 2>&1
+if [ -f "$SENTINEL" ]; then
+  ok "scoped uninstall: real /tmp/claude-bridge-* state survives (sentinel intact)"
+else
+  bad "scoped uninstall WIPED real /tmp state (sentinel gone) — live-share killer regressed!"
+fi
+rm -f "$SENTINEL"
 
 echo ""
 echo "$PASS passed, $FAIL failed"
