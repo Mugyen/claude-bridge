@@ -92,5 +92,20 @@ start_test_bridge
 rm -f "$WORK/bin/ssh"   # IMPORTANT: don't leave a fake ssh on PATH for later cases
 stop_test_bridge
 
+# ── Case 5: zrok — fake binary handles `status` (enabled) and `share` (emits URL)
+cat > "$WORK/bin/zrok" <<'FAKE'
+#!/bin/bash
+if [ "$1" = "status" ]; then echo "OK: environment enabled"; exit 0; fi
+( sleep 1; echo "https://fak3test.share.zrok.io" )
+exec sleep 300
+FAKE
+chmod +x "$WORK/bin/zrok"
+start_test_bridge
+"$REPO/claude-bridge" share --provider zrok >/dev/null 2>&1
+[ "$(cat "$WORK/tunnel.url" 2>/dev/null)" = "https://fak3test.share.zrok.io" ] \
+  && ok "zrok: URL extracted" || bad "zrok: extraction failed (got: $(cat "$WORK/tunnel.url" 2>/dev/null))"
+"$REPO/claude-bridge" stop-share >/dev/null 2>&1
+stop_test_bridge
+
 echo ""; echo "test-providers: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

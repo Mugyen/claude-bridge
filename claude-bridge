@@ -902,6 +902,34 @@ provider_pinggy_extract() {
   printf '%s' "$url"
 }
 
+provider_zrok_ensure() {
+  install_release_binary "openziti/zrok" "zrok" "$(release_pattern)" || return 1
+  # zrok needs a ONE-TIME account enable (free): zrok invite → zrok enable <token>.
+  if ! zrok status 2>/dev/null | grep -qi "enabled"; then
+    fail "zrok is installed but this machine isn't enabled yet (one-time, free):"
+    echo "      1. Create an account:   zrok invite     (or https://myzrok.io)"
+    echo "      2. Enable this machine: zrok enable <your-account-token>"
+    echo "      Then re-run: claude-bridge share --provider zrok"
+    return 1
+  fi
+}
+provider_zrok_warn() {
+  warn "zrok free SaaS: bandwidth capped per rolling 24h + public shares rate-limited"
+  warn "(~6.6 req/s). Fine for bridge traffic; self-host zrok to lift the caps."
+}
+provider_zrok_launch() {
+  launch_tunnel "$1" zrok share public --headless "http://127.0.0.1:${FED_PORT}"
+}
+provider_zrok_extract() {
+  local url=""
+  for _ in $(seq 1 30); do
+    url=$(grep -oE 'https://[a-z0-9]+\.share\.zrok\.io' "$1" 2>/dev/null | head -1 || true)
+    [ -n "$url" ] && break
+    sleep 1
+  done
+  printf '%s' "$url"
+}
+
 # Launch a tunnel/forwarder process FULLY DETACHED so it outlives the launching
 # shell — an interactive terminal that's later closed, OR a non-interactive/automated
 # shell (an agent, a script) that reaps its foreground command's children on exit.
