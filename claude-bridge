@@ -574,10 +574,14 @@ start_bridge() {
 
 stop_bridge() {
   # Target the actual LISTENER on the port (handles a foreign/unmanaged bridge —
-  # BUG-2), falling back to the PID file. NEVER `lsof -ti:PORT` without
-  # -sTCP:LISTEN — that also returns connected-client PIDs (Claude sessions!).
+  # BUG-2), falling back to the PID file. Uses port_listener_pid (lsof→ss
+  # fallback): raw lsof is blind/absent on some hosts (the GCP VM has no lsof),
+  # which made stop silently no-op → restart/update never replaced the server
+  # (field bug report from node agent-sandbox, 2026-06-10). NEVER raw
+  # `lsof -ti:PORT` without -sTCP:LISTEN — that also returns connected-client
+  # PIDs (Claude sessions!).
   local listener pid target
-  listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+  listener=$(port_listener_pid "$PORT")
   [ -f "$PID_FILE" ] && pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
   target="${listener:-${pid:-}}"
   if [ -z "$target" ] || ! kill -0 "$target" 2>/dev/null; then
@@ -1424,8 +1428,17 @@ doctor() {
     else warn "Hub mode but no tunnel process — 'claude-bridge share' to (re)open one"; fi
   fi
   echo "" ; echo "Ports:"
-  local n; n=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | sort -u | wc -l | tr -d ' ')
-  [ "$n" -le 1 ] && ok "Port $PORT: ${n} listener" || fail "Port $PORT: $n listeners (conflict!)"
+  # lsof is absent on some hosts (exit-127 noise) — count via lsof when present,
+  # else degrade to a single-listener presence check via port_listener_pid (ss).
+  local n
+  if command -v lsof >/dev/null 2>&1; then
+    n=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | sort -u | wc -l | tr -d ' ')
+    [ "$n" -le 1 ] && ok "Port $PORT: ${n} listener" || fail "Port $PORT: $n listeners (conflict!)"
+  elif [ -n "$(port_listener_pid "$PORT")" ]; then
+    ok "Port $PORT: listener present (no lsof — count unavailable, used ss)"
+  else
+    ok "Port $PORT: no listener"
+  fi
   echo "" ; echo "Recent CLI errors:"
   if [ -f "$CLI_LOG" ]; then grep -E '→ (FAIL|error)' "$CLI_LOG" 2>/dev/null | tail -3 | sed 's/^/    /' || true; ok "log: $CLI_LOG"; else ok "no CLI log yet"; fi
   echo ""
@@ -1708,14 +1721,14 @@ case "$ACTION" in
     if [ "$tunnel_prov" = "tailscale" ] && command -v tailscale &>/dev/null; then
       tailscale serve --tcp "${FED_PORT}" off 2>/dev/null && ok "tailscale serve for :${FED_PORT} removed" || true
     fi
-    listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+    listener=$(port_listener_pid "$PORT")   # lsof→ss fallback (lsof absent on some hosts)
     if [ -n "$listener" ]; then
       warn "Stopping the running bridge (PID $listener) — connected sessions will disconnect"
       kill "$listener" 2>/dev/null || true          # SIGTERM → graceful SSE close in the server
       for _ in 1 2 3 4 5 6; do kill -0 "$listener" 2>/dev/null || break; sleep 0.3; done
       kill -0 "$listener" 2>/dev/null && { kill -9 "$listener" 2>/dev/null || true; }
-      if lsof -ti:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-        warn "Bridge still on :$PORT — stop it manually:  lsof -ti:$PORT | xargs kill"
+      if [ -n "$(port_listener_pid "$PORT")" ]; then
+        warn "Bridge still on :$PORT — stop it manually:  kill \$(port pid via lsof/ss)"
       else
         ok "Bridge stopped (port $PORT free)"
       fi

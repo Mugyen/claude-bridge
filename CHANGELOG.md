@@ -23,6 +23,7 @@ heading when you tag the release and bump `package.json` + the banner in
 - Release-asset patterns broadened to real-world names (`darwin-aarch64`/`linux-x86_64` for dumbpipe); installer falls back to a prefix match when the binary is versioned inside the tarball (zrok v2 ships `zrok2`).
 - pinggy extractor matches the real free-tier tunnel domains (`*.free.pinggy.net`, `*.run.pinggy-free.link`) and no longer grabs the `dashboard.pinggy.io` banner link.
 - A failed URL/ticket extraction now kills the just-launched detached process instead of leaking it (hit live with pinggy).
+- **`stop`/`restart`/`update`/uninstall now find the server on hosts without `lsof`.** `stop_bridge` and the uninstall stop path used raw `lsof` (no `ss` fallback), so on an lsof-less host with no pid file, `restart` printed the contradictory "Bridge is not running" + "Bridge already running" and silently left the OLD server serving — `update` could never actually replace the running code (field report from a GCP VM pinned on v2.7.0 since Jun 02). Both now use `port_listener_pid` (lsof→ss), and `doctor`'s Ports section degrades gracefully instead of leaking exit-127.
 - **Headless `update` no longer crashes.** `update` skips `check_prereqs`, so `HAS_CLAUDE` was unset and defaulted to 1 — on a box without the Claude CLI (a headless hub/VM) the reinstall step died on `claude mcp`. `run_install_steps` now derives `HAS_CLAUDE` itself.
 
 ### Changed (v2.8.0)
