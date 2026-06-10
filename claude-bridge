@@ -36,6 +36,14 @@ NODE_FILE="$HOME/.claude/.cc-bridge-node"
 # production tunnel — a real incident.) Production always uses the /tmp defaults.
 TUNNEL_PID_FILE="${CC_BRIDGE_TUNNEL_PID:-/tmp/claude-bridge-tunnel.pid}"
 TUNNEL_URL_FILE="${CC_BRIDGE_TUNNEL_URL:-/tmp/claude-bridge-tunnel.url}"
+# Which provider opened the current share (cloudflared-quick|cloudflared-named|p2p|
+# bore|pinggy|zrok|tailscale). stop-share/status read it to tear down / report the
+# right thing — update EVERY reader if you add a writer (DEVELOPER.md lesson #32).
+TUNNEL_PROVIDER_FILE="${CC_BRIDGE_TUNNEL_PROVIDER:-/tmp/claude-bridge-tunnel.provider}"
+# P2P spoke-side forwarder state (dumbpipe connect-tcp), same env-override pattern.
+SPOKE_PIPE_PID_FILE="${CC_BRIDGE_SPOKE_PIPE_PID:-/tmp/claude-bridge-spoke-pipe.pid}"
+SPOKE_PIPE_PORT_FILE="${CC_BRIDGE_SPOKE_PIPE_PORT:-/tmp/claude-bridge-spoke-pipe.port}"
+SPOKE_PIPE_TICKET_FILE="${CC_BRIDGE_SPOKE_PIPE_TICKET:-/tmp/claude-bridge-spoke-pipe.ticket}"
 
 # Read version from package.json
 VERSION=$(jq -r '.version // "unknown"' "$REPO_DIR/package.json" 2>/dev/null || echo "unknown")
@@ -606,8 +614,19 @@ check_bridge() {
       if [ "$role" = "hub" ]; then
         ok "Link surface (loopback): http://127.0.0.1:${FED_PORT} (the tunnel points here, NOT the main port $PORT)"
       fi
-      if [ -f "$TUNNEL_URL_FILE" ] && [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null; then
-        ok "Tunnel open: $(cat "$TUNNEL_URL_FILE") → 127.0.0.1:${FED_PORT}"
+      if [ -s "$TUNNEL_URL_FILE" ]; then
+        local prov; prov=$(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null || echo "tunnel")
+        local share_alive=""
+        if [ "$prov" = "tailscale" ]; then
+          tailscale serve status 2>/dev/null | grep -q ":${FED_PORT}" && share_alive=1
+        elif [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null; then
+          share_alive=1
+        fi
+        if [ -n "$share_alive" ]; then
+          ok "EXPOSED via $prov: $(cat "$TUNNEL_URL_FILE") → 127.0.0.1:${FED_PORT}"
+        else
+          fail "Share recorded ($prov: $(cat "$TUNNEL_URL_FILE")) but it is DOWN — re-run: claude-bridge share"
+        fi
       elif [ "$role" = "hub" ]; then
         warn "Hub mode on but no tunnel running — run ./claude-bridge --share to open one"
       fi
@@ -735,13 +754,13 @@ ensure_cloudflared() {
   return 1
 }
 
-# Launch cloudflared FULLY DETACHED so the tunnel outlives the launching shell —
-# an interactive terminal that's later closed, OR a non-interactive/automated shell
-# (an agent, a script) that reaps its foreground command's children on exit. Linux:
-# `setsid` gives it its own session. macOS has no `setsid`, so use nohup + stdin off
-# the tty + `disown` (drop it from the shell's job table). Records the PID in
-# $TUNNEL_PID_FILE. ($1 = log file, rest = the cloudflared command.)
-launch_cloudflared() {
+# Launch a tunnel/forwarder process FULLY DETACHED so it outlives the launching
+# shell — an interactive terminal that's later closed, OR a non-interactive/automated
+# shell (an agent, a script) that reaps its foreground command's children on exit.
+# Linux: `setsid` gives it its own session. macOS has no `setsid`, so use nohup +
+# stdin off the tty + `disown` (drop it from the shell's job table). Records the PID
+# in $TUNNEL_PID_FILE. ($1 = log file, rest = the provider command.)
+launch_tunnel() {
   local log="$1"; shift
   if command -v setsid >/dev/null 2>&1; then
     setsid "$@" >> "$log" 2>&1 < /dev/null &
@@ -751,6 +770,25 @@ launch_cloudflared() {
   local pid=$!
   echo "$pid" > "$TUNNEL_PID_FILE"
   disown "$pid" 2>/dev/null || true
+}
+
+# Kill a recorded tunnel/forwarder PID and VERIFY it died (SIGTERM → wait → SIGKILL).
+# $1 = pid file, $2 = human label. Returns 0 if dead/absent. The verification matters:
+# a share that LOOKS closed but whose process survived is silently still exposed.
+kill_recorded() {
+  local pidf="$1" label="$2" tp
+  [ -f "$pidf" ] || return 0
+  tp=$(cat "$pidf" 2>/dev/null || echo "")
+  rm -f "$pidf"
+  if [ -z "$tp" ] || ! kill -0 "$tp" 2>/dev/null; then return 0; fi
+  kill "$tp" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$tp" 2>/dev/null || { ok "$label closed (PID $tp)"; return 0; }
+    sleep 0.3
+  done
+  kill -9 "$tp" 2>/dev/null || true; sleep 0.3
+  if kill -0 "$tp" 2>/dev/null; then warn "$label (PID $tp) did not die — kill it manually"; return 1; fi
+  ok "$label closed (PID $tp, forced)"
 }
 
 share_hub() {
@@ -813,7 +851,7 @@ share_hub() {
     # Named tunnel: stable hostname on the user's own domain. The user must have
     # configured the tunnel + DNS route already (cloudflared tunnel route dns ...).
     # Tunnel the FED PORT (loopback-only link surface), never the main bridge port.
-    launch_cloudflared "$tunnel_log" cloudflared tunnel --url "http://localhost:${FED_PORT}" run "$named_tunnel"
+    launch_tunnel "$tunnel_log" cloudflared tunnel --url "http://localhost:${FED_PORT}" run "$named_tunnel"
     printf '%s' "https://${named_tunnel}" > "$TUNNEL_URL_FILE"
     ok "Named tunnel started ($named_tunnel)"
     echo ""
@@ -834,7 +872,7 @@ share_hub() {
     echo -e "${RED}  ╚══════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     # Tunnel the FED PORT (loopback-only link surface), never the main bridge port.
-    launch_cloudflared "$tunnel_log" cloudflared tunnel --url "http://localhost:${FED_PORT}"
+    launch_tunnel "$tunnel_log" cloudflared tunnel --url "http://localhost:${FED_PORT}"
     ok "Opening Cloudflare quick tunnel..."
     # NB: `set -e` + `pipefail` would abort on an empty grep (the pipeline exits
     # non-zero), so guard the substitution with `|| true`.
@@ -921,16 +959,18 @@ unlink_hub() {
 }
 
 stop_share() {
-  if [ -f "$TUNNEL_PID_FILE" ]; then
-    local tp
-    tp=$(cat "$TUNNEL_PID_FILE")
-    if kill -0 "$tp" 2>/dev/null; then
-      kill "$tp" 2>/dev/null && ok "Tunnel closed (PID $tp)"
-    fi
-    rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE"
+  local provider
+  provider=$(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null || echo "")
+  if [ "$provider" = "tailscale" ]; then
+    # tailscale mode has no tunnel process of ours — tailscaled owns the serve
+    # config, which PERSISTS across reboots and must be torn down explicitly.
+    provider_tailscale_teardown
+  elif [ -f "$TUNNEL_PID_FILE" ]; then
+    kill_recorded "$TUNNEL_PID_FILE" "Tunnel${provider:+ ($provider)}"
   else
     warn "No tunnel PID file — nothing to close (the bridge keeps running)"
   fi
+  rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_PROVIDER_FILE"
   # Drop to standalone but KEEP the token so re-sharing is fast.
   printf '%s' "standalone" > "$ROLE_FILE"
   fed_reload && ok "Hub mode disabled (token kept; bridge still running, sessions preserved)"
@@ -1056,7 +1096,11 @@ doctor() {
     elif [ -n "$hub" ]; then warn "Hub NOT reachable: $hub (outage, or tunnel down on the hub)"; fi
   fi
   if [ "$drole" = "hub" ]; then
-    if [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE" 2>/dev/null)" 2>/dev/null; then ok "Tunnel process up: $(cat "$TUNNEL_URL_FILE" 2>/dev/null)"
+    local dprov; dprov=$(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null || echo "tunnel")
+    if [ "$dprov" = "tailscale" ]; then
+      if tailscale serve status 2>/dev/null | grep -q ":${FED_PORT}"; then ok "EXPOSED via tailscale: $(cat "$TUNNEL_URL_FILE" 2>/dev/null)"
+      else warn "Hub mode but tailscale serve is not forwarding :${FED_PORT} — 'claude-bridge share --tailscale' to re-open"; fi
+    elif [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE" 2>/dev/null)" 2>/dev/null; then ok "EXPOSED via $dprov: $(cat "$TUNNEL_URL_FILE" 2>/dev/null)"
     else warn "Hub mode but no tunnel process — 'claude-bridge share' to (re)open one"; fi
   fi
   echo "" ; echo "Ports:"
@@ -1113,17 +1157,27 @@ health_cmd() {
     # Tunnel: URL + whether the cloudflared PROCESS is alive + whether the URL is
     # actually reachable end-to-end. (Previously only printed the recorded URL, so
     # a dead/flapping tunnel looked the same as a healthy one.)
-    local turl tpid
+    local turl tpid tprov
     turl=$(cat "$TUNNEL_URL_FILE" 2>/dev/null || true)
     tpid=$(cat "$TUNNEL_PID_FILE" 2>/dev/null || true)
+    tprov=$(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null || echo "tunnel")
     if [ -z "$turl" ]; then
-      warn "Tunnel: none recorded — hub isn't exposed. Run: claude-bridge share --named-tunnel <host>"
+      warn "Tunnel: none recorded — hub isn't exposed. Run: claude-bridge share"
     else
-      if [ -n "$tpid" ] && kill -0 "$tpid" 2>/dev/null; then ok "Tunnel URL: $turl"; ok "Tunnel process: UP (cloudflared PID $tpid)"
-      else fail "Tunnel URL: $turl"; fail "Tunnel process: DOWN (cloudflared not running) — re-run share"; fi
-      # End-to-end reachability through Cloudflare (the real test).
-      if curl -sf --max-time 8 "$turl/health/ping" >/dev/null 2>&1; then ok "Tunnel reachable: $turl/health/ping → 200"
-      else fail "Tunnel NOT reachable: $turl returns an error (530/timeout) — spokes can't connect"; fi
+      if [ "$tprov" = "tailscale" ]; then
+        if tailscale serve status 2>/dev/null | grep -q ":${FED_PORT}"; then ok "EXPOSED via tailscale: $turl"
+        else fail "Share URL: $turl"; fail "tailscale serve is NOT forwarding :${FED_PORT} — re-run share --tailscale"; fi
+      elif [ -n "$tpid" ] && kill -0 "$tpid" 2>/dev/null; then ok "EXPOSED via $tprov: $turl"; ok "Share process: UP ($tprov PID $tpid)"
+      else fail "Share URL: $turl"; fail "Share process: DOWN ($tprov not running) — re-run share"; fi
+      # End-to-end reachability (the real test) — only meaningful for http(s) URLs;
+      # a p2p ticket is verified on the SPOKE side (its local forwarder), not here.
+      case "$turl" in
+        http://*|https://*)
+          if curl -sf --max-time 8 "$turl/health/ping" >/dev/null 2>&1; then ok "Share reachable: $turl/health/ping → 200"
+          else fail "Share NOT reachable: $turl returns an error (530/timeout) — spokes can't connect"; fi ;;
+        p2p:*)
+          ok "p2p share: spokes verify reachability via their local forwarder (doctor on the spoke)" ;;
+      esac
     fi
     local spokes; spokes=$(echo "$resp" | jq -r '[.sessions[]?|.node]|map(select(.!="local" and .!=null))|unique|.[]' 2>/dev/null || true)
     if [ -n "$spokes" ]; then echo "  Connected spokes:"; echo "$spokes" | sed 's/^/    • /'
@@ -1305,6 +1359,8 @@ case "$ACTION" in
     done
     # Capture runtime PIDs BEFORE we wipe the /tmp markers that record them.
     tunnel_pid=$(cat "$TUNNEL_PID_FILE" 2>/dev/null || echo "")
+    pipe_pid=$(cat "$SPOKE_PIPE_PID_FILE" 2>/dev/null || echo "")
+    tunnel_prov=$(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null || echo "")
     rm -f /tmp/claude-bridge-* /tmp/cc-bridge-* /tmp/claude-bridge.pid /tmp/cc-bridge.pid
     ok "Temp files cleaned (/tmp/{claude,cc}-bridge-* incl. session state + pid/url)"
     rm -f "$VERSION_FILE"
@@ -1314,6 +1370,13 @@ case "$ACTION" in
     # disconnect can only land AFTER every other cleanup step has completed.
     if [ -n "$tunnel_pid" ] && kill -0 "$tunnel_pid" 2>/dev/null; then
       kill "$tunnel_pid" 2>/dev/null && ok "Closed federation tunnel (PID $tunnel_pid)" || true
+    fi
+    if [ -n "$pipe_pid" ] && kill -0 "$pipe_pid" 2>/dev/null; then
+      kill "$pipe_pid" 2>/dev/null && ok "Closed p2p forwarder (PID $pipe_pid)" || true
+    fi
+    # tailscale serve config persists across reboots — tear it down if we set it up.
+    if [ "$tunnel_prov" = "tailscale" ] && command -v tailscale &>/dev/null; then
+      tailscale serve --tcp "${FED_PORT}" off 2>/dev/null && ok "tailscale serve for :${FED_PORT} removed" || true
     fi
     listener=$(lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
     if [ -n "$listener" ]; then
