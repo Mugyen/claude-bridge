@@ -77,5 +77,20 @@ start_test_bridge
 "$REPO/claude-bridge" stop-share >/dev/null 2>&1
 stop_test_bridge
 
+# ── Case 4: pinggy — fake ssh prints a pinggy URL; extractor picks the https one
+cat > "$WORK/bin/ssh" <<'FAKE'
+#!/bin/bash
+( sleep 1; echo "http://abc123.a.free.pinggy.link"; echo "https://abc123.a.free.pinggy.link" )
+exec sleep 300
+FAKE
+chmod +x "$WORK/bin/ssh"
+start_test_bridge
+"$REPO/claude-bridge" share --provider pinggy >/dev/null 2>&1
+[ "$(cat "$WORK/tunnel.url" 2>/dev/null)" = "https://abc123.a.free.pinggy.link" ] \
+  && ok "pinggy: https URL extracted" || bad "pinggy: extraction failed (got: $(cat "$WORK/tunnel.url" 2>/dev/null))"
+"$REPO/claude-bridge" stop-share >/dev/null 2>&1
+rm -f "$WORK/bin/ssh"   # IMPORTANT: don't leave a fake ssh on PATH for later cases
+stop_test_bridge
+
 echo ""; echo "test-providers: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
