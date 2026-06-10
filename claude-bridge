@@ -754,6 +754,56 @@ ensure_cloudflared() {
   return 1
 }
 
+# ── Tunnel providers ─────────────────────────────────────────────────────────
+# Contract — each provider implements (dispatched via computed names, bash-3.2 safe):
+#   provider_<p>_ensure    : binary present (auto-install unless CC_BRIDGE_NO_AUTOINSTALL=1) → 0/1
+#   provider_<p>_launch    : start detached via launch_tunnel; write TUNNEL_PID_FILE ($1 = log)
+#   provider_<p>_extract   : poll the log; print the public URL (or p2p:<ticket>) to stdout, empty = fail
+#   provider_<p>_warn      : print provider-specific caveats (free-tier limits, plaintext, etc.)
+# Shared state: TUNNEL_{PID,URL,PROVIDER}_FILE + the tunnel log. The URL file holds
+# whatever `join` consumes: https://host, http://host:port, or p2p:<ticket>.
+# Every provider tunnels FED_PORT (the loopback link surface) — NEVER the main port.
+
+provider_cloudflared_quick_ensure()  { ensure_cloudflared; }
+provider_cloudflared_named_ensure()  { ensure_cloudflared; }
+
+provider_cloudflared_quick_warn() {
+  echo ""
+  echo -e "${RED}  ⚠  QUICK TUNNEL — BROKEN FOR THE BRIDGE, DEMO ONLY${NC}"
+  echo -e "${RED}     Cloudflare quick tunnels BUFFER Server-Sent Events: spokes will register${NC}"
+  echo -e "${RED}     but NEVER receive forwarded messages (cloudflared#1449; official docs:${NC}"
+  echo -e "${RED}     'Quick Tunnels do not support SSE'). Use instead:${NC}"
+  echo -e "${RED}       claude-bridge share                    # p2p — no account, encrypted${NC}"
+  echo -e "${RED}       claude-bridge share --stable <host>    # your own domain (named tunnel)${NC}"
+  echo ""
+}
+provider_cloudflared_named_warn() {
+  warn "Named tunnel: run exactly ONE connector for this hostname — two connectors on one"
+  warn "named tunnel get load-balanced by Cloudflare and the link flaps (530/1033)."
+}
+
+provider_cloudflared_quick_launch() {
+  launch_tunnel "$1" cloudflared tunnel --url "http://localhost:${FED_PORT}"
+}
+provider_cloudflared_named_launch() {
+  # The user must have configured the tunnel + DNS route already
+  # (cloudflared tunnel route dns ...). NAMED_TUNNEL_HOST is set by share_hub.
+  launch_tunnel "$1" cloudflared tunnel --url "http://localhost:${FED_PORT}" run "$NAMED_TUNNEL_HOST"
+}
+
+provider_cloudflared_quick_extract() {
+  # NB: `set -e` + `pipefail` would abort on an empty grep (the pipeline exits
+  # non-zero), so guard the substitution with `|| true`.
+  local url=""
+  for _ in $(seq 1 30); do
+    url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$1" 2>/dev/null | head -1 || true)
+    [ -n "$url" ] && break
+    sleep 1
+  done
+  printf '%s' "$url"
+}
+provider_cloudflared_named_extract() { printf 'https://%s' "$NAMED_TUNNEL_HOST"; }
+
 # Launch a tunnel/forwarder process FULLY DETACHED so it outlives the launching
 # shell — an interactive terminal that's later closed, OR a non-interactive/automated
 # shell (an agent, a script) that reaps its foreground command's children on exit.
@@ -793,20 +843,36 @@ kill_recorded() {
 
 share_hub() {
   # Parse optional flags: --named-tunnel <hostname>, --node <id>
-  local named_tunnel="" node_override=""
+  local provider="" named_tunnel="" node_override=""
   shift_args=("$@")
   local i=0
   while [ $i -lt ${#shift_args[@]} ]; do
     case "${shift_args[$i]}" in
-      --named-tunnel) i=$((i+1)); named_tunnel="${shift_args[$i]:-}" ;;
+      --provider)     i=$((i+1)); provider="${shift_args[$i]:-}" ;;
+      --p2p)          provider="p2p" ;;
+      --tailscale)    provider="tailscale" ;;
+      --stable)       i=$((i+1)); provider="cloudflared-named"; named_tunnel="${shift_args[$i]:-}" ;;
+      --named-tunnel) i=$((i+1)); provider="cloudflared-named"; named_tunnel="${shift_args[$i]:-}" ;;  # back-compat
       --node)         i=$((i+1)); node_override="${shift_args[$i]:-}" ;;
     esac
     i=$((i+1))
   done
+  # Default provider. (Flips to p2p once the dumbpipe provider lands — Task 8.)
+  [ -z "$provider" ] && provider="${CC_BRIDGE_PROVIDER:-cloudflared-quick}"
+  case "$provider" in
+    cloudflared-named)
+      if [ -z "$named_tunnel" ]; then
+        fail "--stable needs a hostname: claude-bridge share --stable <host>"
+        exit 1
+      fi ;;
+    cloudflared) provider="cloudflared-quick" ;;   # alias
+    cloudflared-quick|p2p|bore|pinggy|zrok|tailscale) ;;
+    *) fail "Unknown provider '$provider'. Available: p2p, cloudflared-named (--stable <host>), cloudflared-quick, bore, pinggy, zrok, tailscale"; exit 1 ;;
+  esac
 
-  # Install cloudflared for this OS (or update it if present). Hub-only; the
-  # bridge server itself stays zero-dependency. Opt out: CC_BRIDGE_NO_AUTOINSTALL=1.
-  ensure_cloudflared || exit 1
+  # Provider preflight: binary present / account enabled (auto-install unless
+  # CC_BRIDGE_NO_AUTOINSTALL=1). The bridge server itself stays zero-dependency.
+  "provider_$(printf '%s' "$provider" | tr '-' '_')_ensure" || exit 1
 
   ensure_token
   ensure_node "$node_override"
@@ -822,82 +888,75 @@ share_hub() {
 
   local token
   token=$(cat "$TOKEN_FILE")
+  local pfn; pfn=$(printf '%s' "$provider" | tr '-' '_')
 
-  # If a tunnel is already running, reuse it ONLY if it matches the request
-  # (BUG-4): no --named-tunnel → reuse any; --named-tunnel H → reuse only if the
-  # running URL is already https://H, otherwise close it and start the requested
-  # one (the old guard reused any tunnel and silently ignored --named-tunnel).
-  if [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null && [ -s "$TUNNEL_URL_FILE" ]; then
-    local existing
+  # If a share is already open, reuse it ONLY if it matches the request (BUG-4):
+  # same provider, and for named tunnels the same hostname. Otherwise close the
+  # running one and start the requested one.
+  if [ -s "$TUNNEL_URL_FILE" ] && [ "$(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null)" = "$provider" ]; then
+    local existing share_alive=""
     existing=$(cat "$TUNNEL_URL_FILE")
-    if [ -z "$named_tunnel" ] || [ "$existing" = "https://${named_tunnel}" ]; then
-      ok "Tunnel already open: $existing"
-      echo ""
-      echo "  Share this ONE command:"
-      echo "    ./claude-bridge --join '${existing}#${token}'"
-      echo ""
-      return
+    if [ "$provider" = "tailscale" ]; then
+      tailscale serve status 2>/dev/null | grep -q ":${FED_PORT}" && share_alive=1
+    elif [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null; then
+      share_alive=1
     fi
-    warn "A different tunnel is open ($existing) — closing it to start the requested named tunnel ($named_tunnel)"
-    kill "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null || true
-    rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE"
-    sleep 1
+    if [ -n "$share_alive" ]; then
+      if [ -z "$named_tunnel" ] || [ "$existing" = "https://${named_tunnel}" ]; then
+        ok "Share already open ($provider): $existing"
+        print_join_link "$existing" "$token"
+        return
+      fi
+    fi
+    if [ -n "$share_alive" ]; then
+      warn "A different share is open ($existing) — closing it to start the requested one"
+      stop_share_tunnel_only
+    fi
+  elif [ -s "$TUNNEL_URL_FILE" ]; then
+    # A share from a DIFFERENT provider is recorded — close it before switching.
+    warn "A $(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null || echo previous) share is open — closing it to start $provider"
+    stop_share_tunnel_only
   fi
 
   local tunnel_log="${CC_BRIDGE_TUNNEL_LOG:-/tmp/claude-bridge-tunnel.log}"
   : > "$tunnel_log"
 
-  if [ -n "$named_tunnel" ]; then
-    # Named tunnel: stable hostname on the user's own domain. The user must have
-    # configured the tunnel + DNS route already (cloudflared tunnel route dns ...).
-    # Tunnel the FED PORT (loopback-only link surface), never the main bridge port.
-    launch_tunnel "$tunnel_log" cloudflared tunnel --url "http://localhost:${FED_PORT}" run "$named_tunnel"
-    printf '%s' "https://${named_tunnel}" > "$TUNNEL_URL_FILE"
-    ok "Named tunnel started ($named_tunnel)"
-    echo ""
-    echo "  Share this ONE command:"
-    echo "    ./claude-bridge --join 'https://${named_tunnel}#${token}'"
-    echo ""
-  else
-    # Quick tunnel: ephemeral *.trycloudflare.com URL, zero setup — but UNRELIABLE.
-    echo ""
-    echo -e "${RED}  ╔══════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${RED}  ║  ⚠  QUICK TUNNEL — NOT RECOMMENDED                                    ║${NC}"
-    echo -e "${RED}  ║  Cloudflare *.trycloudflare.com quick tunnels are FLAPPY: they drop   ║${NC}"
-    echo -e "${RED}  ║  and rotate, the URL changes, and long-lived links (replies coming    ║${NC}"
-    echo -e "${RED}  ║  back to spokes) get silently dropped. This is a Cloudflare-side      ║${NC}"
-    echo -e "${RED}  ║  limitation of quick tunnels, not a bridge bug — it WILL be unstable. ║${NC}"
-    echo -e "${RED}  ║  Use a NAMED tunnel instead:                                          ║${NC}"
-    echo -e "${RED}  ║      claude-bridge share --named-tunnel <your-hostname>               ║${NC}"
-    echo -e "${RED}  ╚══════════════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    # Tunnel the FED PORT (loopback-only link surface), never the main bridge port.
-    launch_tunnel "$tunnel_log" cloudflared tunnel --url "http://localhost:${FED_PORT}"
-    ok "Opening Cloudflare quick tunnel..."
-    # NB: `set -e` + `pipefail` would abort on an empty grep (the pipeline exits
-    # non-zero), so guard the substitution with `|| true`.
-    local url=""
-    for _ in $(seq 1 30); do
-      url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$tunnel_log" 2>/dev/null | head -1 || true)
-      [ -n "$url" ] && break
-      sleep 1
-    done
-    if [ -z "$url" ]; then
-      fail "Tunnel did not report a URL — check $tunnel_log"
-      exit 1
-    fi
-    printf '%s' "$url" > "$TUNNEL_URL_FILE"
-    ok "Secure tunnel open (Cloudflare): $url"
-    echo ""
-    echo "  Share this ONE command:"
-    echo "    ./claude-bridge --join '${url}#${token}'"
-    echo ""
-    echo "  Note: quick-tunnel URLs are ephemeral. If cloudflared restarts the URL"
-    echo "  rotates — re-run ./claude-bridge --share to reprint the new join link, and"
-    echo "  spokes must re-join. For an always-on URL, use --named-tunnel <hostname>."
-    echo ""
+  "provider_${pfn}_warn"
+  if ! NAMED_TUNNEL_HOST="$named_tunnel" "provider_${pfn}_launch" "$tunnel_log"; then
+    fail "share failed to launch ($provider) — check $tunnel_log"
+    exit 1
   fi
-  warn "Keep this set up while you want the link open. --stop-share closes the tunnel."
+  local url
+  url=$(NAMED_TUNNEL_HOST="$named_tunnel" "provider_${pfn}_extract" "$tunnel_log")
+  if [ -z "$url" ]; then
+    fail "Share did not report a URL/ticket — check $tunnel_log"
+    exit 1
+  fi
+  printf '%s' "$url" > "$TUNNEL_URL_FILE"
+  printf '%s' "$provider" > "$TUNNEL_PROVIDER_FILE"
+  ok "EXPOSED via $provider: $url → 127.0.0.1:${FED_PORT}"
+  print_join_link "$url" "$token"
+  warn "Keep this machine on while you want the link open. 'claude-bridge stop-share' closes it (verified)."
+}
+
+print_join_link() {
+  echo ""
+  echo "  Share this ONE command:"
+  echo "    claude-bridge join '$1#$2'"
+  echo ""
+}
+
+# Close just the share process/state (used when switching providers mid-share)
+# WITHOUT dropping hub role — unlike stop_share, which goes standalone.
+stop_share_tunnel_only() {
+  local prov; prov=$(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null || echo "")
+  if [ "$prov" = "tailscale" ]; then
+    provider_tailscale_teardown 2>/dev/null || true
+  else
+    kill_recorded "$TUNNEL_PID_FILE" "Tunnel${prov:+ ($prov)}"
+  fi
+  rm -f "$TUNNEL_PID_FILE" "$TUNNEL_URL_FILE" "$TUNNEL_PROVIDER_FILE"
+  sleep 1
 }
 
 join_hub() {

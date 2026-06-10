@@ -31,5 +31,37 @@ if kill -0 "$SLEEPER" 2>/dev/null; then bad "stop-share: tunnel process still al
 [ ! -f "$WORK/tunnel.pid" ] && [ ! -f "$WORK/tunnel.url" ] && [ ! -f "$WORK/tunnel.provider" ] \
   && ok "stop-share: state files cleared" || bad "stop-share: state files remain"
 
+# Shared helper: start a throwaway bridge on 7497 with scratch fed-config files.
+FED_ENV=(CC_BRIDGE_TOKEN_FILE="$HOME/.claude/.cc-bridge-token"
+         CC_BRIDGE_ROLE_FILE="$HOME/.claude/.cc-bridge-role"
+         CC_BRIDGE_HUB_FILE="$HOME/.claude/.cc-bridge-hub"
+         CC_BRIDGE_NODE_FILE="$HOME/.claude/.cc-bridge-node")
+start_test_bridge() {
+  env "${FED_ENV[@]}" node "$REPO/bridge-server.mjs" --port 7497 >/dev/null 2>&1 &
+  BRIDGE_PID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    curl -sf --max-time 1 "http://localhost:7497/health/ping" >/dev/null 2>&1 && return 0
+    sleep 0.3
+  done
+  echo "  ! test bridge failed to start"; return 1
+}
+stop_test_bridge() { kill "$BRIDGE_PID" 2>/dev/null; wait "$BRIDGE_PID" 2>/dev/null; }
+
+# ── Case 2: share --provider cloudflared-quick uses the fake binary, records provider+URL
+cat > "$WORK/bin/cloudflared" <<'FAKE'
+#!/bin/bash
+( sleep 1; echo "INF +-- https://fake-test.trycloudflare.com" >&2 )
+exec sleep 300
+FAKE
+chmod +x "$WORK/bin/cloudflared"
+start_test_bridge
+"$REPO/claude-bridge" share --provider cloudflared-quick >/dev/null 2>&1
+[ "$(cat "$WORK/tunnel.provider" 2>/dev/null)" = "cloudflared-quick" ] \
+  && ok "share: provider recorded" || bad "share: provider file wrong/missing (got: $(cat "$WORK/tunnel.provider" 2>/dev/null))"
+grep -q "trycloudflare.com" "$WORK/tunnel.url" 2>/dev/null \
+  && ok "share: URL extracted from fake" || bad "share: URL not extracted"
+"$REPO/claude-bridge" stop-share >/dev/null 2>&1
+stop_test_bridge
+
 echo ""; echo "test-providers: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

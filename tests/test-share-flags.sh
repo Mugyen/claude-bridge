@@ -88,7 +88,7 @@ chmod +x "$FAKEBIN/cloudflared"
 # We DO start a real bridge here (on 7408) so fed_reload/start works.
 OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/claude-bridge" --share 2>&1; echo "RC=$?")
 if echo "$OUT" | grep -q "fake-tunnel-9.trycloudflare.com"; then ok "--share parses the quick-tunnel URL from cloudflared output"; else bad "--share URL parse ($(echo "$OUT" | tail -3))"; fi
-if echo "$OUT" | grep -q "claude-bridge --join 'https://fake-tunnel-9.trycloudflare.com#"; then ok "--share prints the join link with token fragment"; else bad "--share join link print"; fi
+if echo "$OUT" | grep -q "claude-bridge join 'https://fake-tunnel-9.trycloudflare.com#"; then ok "--share prints the join link with token fragment"; else bad "--share join link print"; fi
 if [ -s "$TOKEN_FILE" ]; then ok "--share generated a token"; else bad "--share token generation"; fi
 if [ "$(cat "$ROLE_FILE" 2>/dev/null)" = "hub" ]; then ok "--share sets role=hub"; else bad "--share role (got: $(cat "$ROLE_FILE" 2>/dev/null))"; fi
 
@@ -101,7 +101,7 @@ if [ "$(cat /tmp/claude-bridge-tunnel.url 2>/dev/null || echo __absent__)" = "$R
 
 # ── 5. --stop-share closes the tunnel + drops to standalone ─────────────────
 OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/claude-bridge" --stop-share 2>&1 || true)
-if echo "$OUT" | grep -qi "tunnel closed"; then ok "--stop-share closes the tunnel"; else bad "--stop-share tunnel close ($OUT)"; fi
+if echo "$OUT" | grep -qiE "tunnel.*closed"; then ok "--stop-share closes the tunnel"; else bad "--stop-share tunnel close ($OUT)"; fi
 if [ "$(cat "$ROLE_FILE" 2>/dev/null)" = "standalone" ]; then ok "--stop-share drops role to standalone"; else bad "--stop-share role reset"; fi
 if [ -s "$TOKEN_FILE" ]; then ok "--stop-share keeps the token (fast re-share)"; else bad "--stop-share kept token"; fi
 
