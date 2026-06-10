@@ -17,11 +17,13 @@ heading when you tag the release and bump `package.json` + the banner in
 - **Verified teardown**: `stop-share` confirms the tunnel process actually died (SIGTERM → wait → SIGKILL) and tears down persistent `tailscale serve` config (which survives reboots otherwise).
 - **EXPOSED status line** in `share`/`status`/`health`/`doctor` showing provider + URL/ticket + liveness (tailscale checked via `serve status`, not process checks).
 - Generic GitHub-release binary auto-installer (bore, dumbpipe, zrok); honors `CC_BRIDGE_NO_AUTOINSTALL=1`.
+- **`update [branch]`** — `claude-bridge update <branch>` fetches, switches to, and tracks that branch (beta-testing a feature branch in one command); bare `update` now always returns to the repo's default branch (main). Unknown branches fail with the remote branch list. Test: `tests/test-update-branch.sh`.
 
 ### Fixed (v2.8.0 — found by live Mac↔GCP-VM testing)
 - Release-asset patterns broadened to real-world names (`darwin-aarch64`/`linux-x86_64` for dumbpipe); installer falls back to a prefix match when the binary is versioned inside the tarball (zrok v2 ships `zrok2`).
 - pinggy extractor matches the real free-tier tunnel domains (`*.free.pinggy.net`, `*.run.pinggy-free.link`) and no longer grabs the `dashboard.pinggy.io` banner link.
 - A failed URL/ticket extraction now kills the just-launched detached process instead of leaking it (hit live with pinggy).
+- **Headless `update` no longer crashes.** `update` skips `check_prereqs`, so `HAS_CLAUDE` was unset and defaulted to 1 — on a box without the Claude CLI (a headless hub/VM) the reinstall step died on `claude mcp`. `run_install_steps` now derives `HAS_CLAUDE` itself.
 
 ### Changed (v2.8.0)
 - **Default share transport is now p2p (dumbpipe)** — no account, no public URL, end-to-end encrypted, SSE-safe, any number of spokes through one ticket.

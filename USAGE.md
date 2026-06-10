@@ -62,6 +62,8 @@ cd claude-bridge
 ./claude-bridge
 ```
 
+> **Installing a beta/feature branch?** Clone with `git clone -b <branch> …` (or install normally and run `claude-bridge update <branch>`). A plain `claude-bridge update` later switches you back to the stable main branch.
+
 Then start the bridge:
 
 ```bash
@@ -143,7 +145,7 @@ Only `share`/`join`/`unlink`/`stop-share` involve hub/spoke/fed-port. If you nev
 |---|---|
 | `claude-bridge install` | Install hooks, MCP server, skill, Desktop config + put the `claude-bridge` CLI on PATH. Idempotent. |
 | `claude-bridge reinstall` | Same as `install` (re-run after editing hooks/skill). |
-| `claude-bridge update` | `git pull` → reinstall → **restart** the bridge. Use this to ship code changes — a plain `git pull` won't reload the running server. |
+| `claude-bridge update [branch]` | Fetch + pull + reinstall + **restart**. Bare `update` always lands on the **default branch** (main); `update <branch>` switches to and tracks that branch — handy for beta-testing a feature branch, and a later plain `update` returns to main. A plain `git pull` won't reload the running server. |
 | `claude-bridge uninstall` | Full teardown — see [Uninstalling](#uninstalling). Removes config **and stops the running bridge**. |
 | `claude-bridge doctor` | Deep health check: prereqs, running bridge, version/role drift, tunnel, ports, log. The go-to "is everything wired up?" check. |
 | `claude-bridge health` | Live server health: role, topology, connected clients (hub + spokes), and pending/answered/notice counts. Reads the token for you when sharing is on (so it works even when `/health` is 401-gated). |

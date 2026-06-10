@@ -1299,7 +1299,16 @@ symlink_cli() {
   case ":$PATH:" in *":$(dirname "$target"):"*) ;; *) warn "Add $(dirname "$target") to your PATH to use 'claude-bridge' from anywhere";; esac
 }
 
+# claude-bridge update [branch]
+#   update            → switch to the repo's DEFAULT branch (origin/HEAD, normally
+#                       main), pull, reinstall, restart. Always lands you back on
+#                       the stable line.
+#   update <branch>   → fetch + switch to + pull that branch, reinstall, restart.
+#                       Lets beta users run a feature branch with one command;
+#                       a later plain `update` returns them to the default branch.
 do_update() {
+  local want="${1:-}"
+  case "$want" in --force|-*) want="" ;; esac   # flags are not branch names
   echo ""
   echo "claude-bridge update (repo v$VERSION)"
   echo "===================="
@@ -1308,10 +1317,35 @@ do_update() {
     fail "Not a git checkout ($REPO_DIR) — can't pull. Update manually."
     return 1
   fi
-  local branch; branch=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
-  ok "Pulling latest on '$branch'..."
-  git -C "$REPO_DIR" pull --ff-only 2>&1 | sed 's/^/    /' || { fail "git pull failed (local changes? resolve and retry)"; return 1; }
+  local default_branch target current
+  default_branch=$(git -C "$REPO_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)
+  [ -z "$default_branch" ] && default_branch="main"
+  target="${want:-$default_branch}"
+  ok "Fetching origin..."
+  git -C "$REPO_DIR" fetch origin --prune 2>&1 | sed 's/^/    /' || { fail "git fetch failed (offline? no origin?)"; return 1; }
+  if ! git -C "$REPO_DIR" rev-parse --verify -q "origin/$target" >/dev/null 2>&1 \
+     && ! git -C "$REPO_DIR" rev-parse --verify -q "refs/heads/$target" >/dev/null 2>&1; then
+    fail "Branch '$target' not found on origin. Remote branches:"
+    git -C "$REPO_DIR" branch -r 2>/dev/null | grep -v HEAD | sed 's|origin/||;s/^/      /' | head -10
+    return 1
+  fi
+  current=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  if [ "$current" != "$target" ]; then
+    warn "Switching branch: $current → $target"
+    if ! git -C "$REPO_DIR" checkout "$target" 2>&1 | sed 's/^/    /'; then
+      fail "checkout failed (local changes? stash/commit them and retry)"
+      return 1
+    fi
+  fi
+  ok "Pulling latest on '$target'..."
+  git -C "$REPO_DIR" pull --ff-only origin "$target" 2>&1 | sed 's/^/    /' || { fail "git pull failed (local changes/diverged history? resolve and retry)"; return 1; }
+  if [ "$target" != "$default_branch" ]; then
+    warn "Now tracking branch '$target' (not '$default_branch'). Plain 'claude-bridge update' returns to '$default_branch'."
+  fi
   echo ""
+  # The pull may have changed package.json — re-read so the version marker and
+  # banner reflect what we just installed, not what we started from.
+  VERSION=$(jq -r '.version // "unknown"' "$REPO_DIR/package.json" 2>/dev/null || echo "unknown")
   # Reinstall hooks/MCP/skill/symlink, then restart so the SERVER picks up the new
   # code — a pull updates files, NOT the running process (OPS-4).
   ACTION="install" run_install_steps
@@ -1522,7 +1556,8 @@ USAGE
 SETUP & MAINTENANCE
   install                 Install hooks, MCP, skill, Desktop config + the CLI on PATH
   reinstall               Same as install (idempotent)
-  update                  git pull → reinstall → restart the bridge (pull alone won't reload the server)
+  update [branch]         Pull + reinstall + restart. Bare = the DEFAULT branch (main); 'update <branch>' switches
+                          to and tracks that branch (beta testing) — plain 'update' later returns to main.
   uninstall               Remove skill, MCP, hooks, configs, dotfiles, PATH symlink (leaves a running bridge — stop it explicitly)
   doctor                  Deep health check (prereqs, running bridge, version/role drift, tunnel, ports, log)
   health                  Live server health: role, topology, connected clients (hub+spokes), message counts
@@ -1559,6 +1594,11 @@ run_install_steps() {
   # The hooks/MCP/skill/Desktop steps all wire into the Claude Code CLI — skip
   # them on a headless hub/server node (no `claude`), but still install the
   # CLI-on-PATH so the box can be driven with `claude-bridge start/share/doctor`.
+  # `update` reaches here WITHOUT check_prereqs, so derive HAS_CLAUDE if unset —
+  # otherwise the old `:-1` default made headless `update` crash on `claude mcp`.
+  if [ -z "${HAS_CLAUDE:-}" ]; then
+    if command -v claude &>/dev/null; then HAS_CLAUDE=1; else HAS_CLAUDE=0; fi
+  fi
   if [ "${HAS_CLAUDE:-1}" = 1 ]; then
     install_hooks; install_mcp; install_skill; remove_claude_md_legacy
     install_desktop
@@ -1779,7 +1819,7 @@ case "$ACTION" in
     ;;
 
   update)
-    do_update
+    do_update "$ARG2"
     ;;
 
   logs)
