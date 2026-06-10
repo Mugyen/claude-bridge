@@ -207,6 +207,21 @@ claude-bridge room delete team                   # typed-name confirmation; all 
 
 Joiners run the printed link as-is, or `claude-bridge join '<share-url>' --password` for password-gated rooms (prompted — passwords never travel in links). Rooms persist in `~/.claude/.cc-bridge-rooms.json` until deleted (`--ttl 2h` makes a self-expiring room). One active room per hub for now.
 
+### Privacy zones (exposure + the airlock)
+
+When your bridge is linked to a room, every local session is either **🌐 EXPOSED** (in the room: visible, reachable, can message it) or **🔒 hidden** (sealed off). The **airlock** is absolute: hidden and exposed sessions cannot exchange messages, threads, or scratchpads through the bridge in either direction — so a room member can never use your exposed session as a stepping stone into your private ones. Each zone works normally within itself.
+
+```bash
+claude-bridge join '<link>' --expose none   # privacy-first: join with everything hidden
+claude-bridge sessions                      # 🌐/🔒 overview
+claude-bridge expose research               # put one session in the room
+claude-bridge hide research                 # pull it back behind the airlock
+```
+
+Two honest notes: (1) exposure is not amnesia — a session that worked privately and is then exposed carries everything it learned (expose fresh sessions); (2) an exposed session can still be *socially engineered into revealing what it itself knows* — the airlock only guarantees it cannot fetch anything from the hidden zone.
+
+**Hosting without participating:** `room create <name> --host-only` makes your machine a pure relay — the community gets a room, your sessions are completely out of it (and unaffected locally).
+
 ### Using the commands in scripts
 
 Every command sets a meaningful **exit code** (0 = success), so you can gate scripts on them:

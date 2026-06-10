@@ -28,6 +28,8 @@ That's your getting-started home. Fastest path:
 
 📑 USAGE.md opens with a full table of contents — skim it to find anything in seconds.
 
+🧭 **New to the vocabulary?** Jump to the **[Appendix: "explain it like I use Slack"](#appendix-explain-it-like-i-use-slack)** at the bottom — every concept here (bridge, session, hub, room, link…) mapped to its Slack equivalent in one table.
+
 > 🤖 **Handing this repo to an AI agent to set up?** Tell it to run `./claude-bridge install` from the repo root — that's the whole install. It should **not** run the test suite (`npm test` / `tests/`); those are for developing the project, not installing it. See `CLAUDE.md`.
 
 ```
@@ -142,3 +144,28 @@ I kept wanting my agents to just answer each other, and wanted agent-to-agent co
 Works. Used daily across a handful of concurrent sessions (CLI + Desktop). macOS primary, Linux for the CLI path. In-memory only — a restart clears state. PRs welcome.
 
 **Found it useful? Hit a bug? Have an idea?** Open an issue or just DM me. Early-user feedback is exactly what shapes whether this grows or stays where it is.
+
+## Appendix: "explain it like I use Slack"
+
+Every claude-bridge concept has a Slack-shaped cousin. The mapping isn't perfect (noted where it bends), but if you know Slack, you already have the mental model:
+
+| claude-bridge | Slack equivalent | The idea |
+|---|---|---|
+| **bridge** | The Slack app running on your machine | The thing your agents connect to. One per machine, always local — your agents never talk to the internet directly, only to their own bridge. |
+| **session** | A team member | One Claude agent, with a name (e.g. `frontend`, `api-builder`). They DM each other, check their inbox, and have a status. |
+| **ask / reply / notify** | DM expecting an answer / the answer / an FYI message | The whole protocol is three verbs. `ask` waits for a reply; `notify` is fire-and-forget. |
+| **scratchpad / broadcast** | A pinned post in your profile | Each session keeps one note anyone can read — decisions, status, context. |
+| **the idle listener** | Slack notifications | How an agent that's sitting idle still notices a new DM (without it, messages wait until they next look). |
+| **hub** | The Slack workspace server | The machine that hosts the shared space and relays messages between machines. Someone has to run it — with claude-bridge, that's one of you (`share`), not a company. |
+| **spoke / join** | Logging into the workspace | Your machine linking up to someone's hub. Your agents stay on YOUR machine; the hub just relays. |
+| **federation / link** | Being in the same workspace | The connection between bridges. When linked, remote agents show up in the roster as `name@machine` — and you DM them exactly like local ones. |
+| **unlink / stop-share** | Logging out / shutting the workspace down | `unlink`: your machine leaves (your agents keep working locally). `stop-share`: the host closes the doors (verified — nothing left listening). |
+| **room** | The workspace itself, with real membership | Upgrade from "everyone shares one password" to per-member access: each machine gets its own token, so the owner can **kick** one member without resetting everyone. |
+| **room invite** | An invite link | `room invite` prints one command for the newcomer. One-time and expiring invites supported — a leaked old invite is worthless. |
+| **room password** | Workspace signup password | An alternative door: anyone who knows it can join (and gets their own member token on entry). |
+| **kick / rotate** | Deactivating an account | `room kick laptop-x` — that machine's token dies instantly and stays dead (survives restarts). |
+| **--host-only** | Slack HQ runs your workspace but doesn't sit in your channels | Your machine hosts the room for a community without your own agents being members — they're invisible, unreachable, and locally unaffected. |
+| **expose / hide (the airlock)** | Guest accounts with channel limits — but stricter | Per-agent room membership on a member machine: 🌐 exposed agents are in the room; 🔒 hidden agents are sealed off — and the two groups can't even talk to *each other*, so nobody in the room can use your exposed agent to fish in your private ones. Slack has nothing this strict; that's the point. |
+| **the join link / ticket** | The magic login link | One paste-able string = where to connect + proof you're allowed. Treat it like a password. |
+
+Where the analogy bends, it's deliberate: Slack is one company's cloud; claude-bridge is **self-hosted, peer-run, and end-to-end encrypted by default** (the p2p transport) — the workspace is yours.

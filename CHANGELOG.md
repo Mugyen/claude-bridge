@@ -18,6 +18,12 @@ heading when you tag the release and bump `package.json` + the banner in
 - **Room lifecycle**: `room members/info/rotate <node>/rotate-password/delete <name>` (typed-name confirmation); TTL rooms self-expire (lazy + GC sweep). Kick/rotate/delete sever the member's live stream immediately. `health`/`doctor` show a room line.
 - **E2EE envelope reserved (3b)**: messages can carry an opaque `enc` payload end-to-end through every relay/queue path without the hub reading it — the 3b encryption work slots in without protocol changes.
 
+### Added (v2.9.0 — privacy)
+- **`room create --host-only`** — host a room for a community WITHOUT participating: the hub relays everything, but its own sessions are never advertised, can't be reached from the room (even by forged forwards), and can't message it. Local sessions keep full normal bridge life with each other.
+- **Per-session exposure + the AIRLOCK** — when linked to a room, each local session is 🌐 EXPOSED or 🔒 hidden. Hidden sessions: invisible in the roster, unreachable (enforced at delivery, not just by roster filtering), and mute toward the room. **Airlock (always on): exposed and hidden sessions cannot exchange ANYTHING through the bridge (ask/notify/threads/scratchpads, both directions)** — the room→gateway→private-sessions social-engineering path is mechanically impossible. Zones are fully functional within themselves.
+- New CLI: `claude-bridge sessions` (zone overview with 🌐/🔒), `expose <name>` / `hide <name>` (instant toggle, roster updates ripple to the room), `join '<link>' --expose none` (privacy-first join: everything hidden until exposed). `register()` gains an optional `expose` boolean.
+- Honest caveat, documented: exposure is not retroactive amnesia — a session exposed after working privately carries what it learned. Expose fresh sessions.
+
 ### Changed (v2.9.0)
 - **Back-compat: legacy shared-token federation works UNTIL the first `room create`** — bit-identical behavior before that; afterwards the fed surface accepts only member tokens (old links get a clear 401 + re-invite hint). `room delete` returns to legacy mode.
 
