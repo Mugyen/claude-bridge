@@ -47,6 +47,10 @@ export class TestBridge {
       CC_BRIDGE_ROLE_FILE: role,
       CC_BRIDGE_HUB_FILE: hub,
       CC_BRIDGE_NODE_FILE: node,
+      // Rooms store is ALWAYS isolated (same rationale as the token files): a
+      // developer with a real room on their machine must not gate test bridges,
+      // and tests must never write the real ~/.claude/.cc-bridge-rooms.json.
+      CC_BRIDGE_ROOMS_FILE: `${this._tmp}.rooms`,
     };
   }
 
@@ -256,6 +260,9 @@ export class TestBridge {
     this.server.kill(signal);
     await new Promise((r) => this.server.on("close", () => r()));
     this.server = null;
+    // NB: `.rooms` is deliberately NOT deleted here — stop()+start() models a
+    // restart, and room persistence across restarts is a tested guarantee.
+    // The file is tiny and the path is pid-unique, so the tmpdir leak is benign.
     for (const ext of [".token", ".role", ".hub", ".node"]) {
       try { fs.unlinkSync(`${this._tmp}${ext}`); } catch {}
     }
