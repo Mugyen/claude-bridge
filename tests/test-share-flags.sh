@@ -62,7 +62,7 @@ if echo "$OUT" | grep -q "token fragment"; then ok "--join rejects a link with n
 # exercises the detect-and-instruct fallback. (The auto-install path itself uses
 # brew/curl — an external tool — and is verified live, not in CI.)
 rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE"
-OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:/usr/bin:/bin" bash "$REPO_DIR/claude-bridge" --share 2>&1; echo "RC=$?")
+OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:/usr/bin:/bin" bash "$REPO_DIR/claude-bridge" --share --provider cloudflared-quick 2>&1; echo "RC=$?")
 if echo "$OUT" | grep -q "cloudflared not found"; then ok "--share without cloudflared (auto-install off) prints not-found"; else bad "--share missing-cloudflared message ($(echo "$OUT" | tail -3))"; fi
 if echo "$OUT" | grep -q "RC=1"; then ok "--share without cloudflared exits non-zero"; else bad "--share missing-cloudflared exit code"; fi
 
@@ -86,7 +86,7 @@ EOF
 chmod +x "$FAKEBIN/cloudflared"
 # Fake node/openssl already on real PATH; need jq + node + curl for start_bridge.
 # We DO start a real bridge here (on 7408) so fed_reload/start works.
-OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/claude-bridge" --share 2>&1; echo "RC=$?")
+OUT=$(CC_BRIDGE_PORT=$PORT CC_BRIDGE_NO_AUTOINSTALL=1 PATH="$FAKEBIN:$PATH" bash "$REPO_DIR/claude-bridge" --share --provider cloudflared-quick 2>&1; echo "RC=$?")
 if echo "$OUT" | grep -q "fake-tunnel-9.trycloudflare.com"; then ok "--share parses the quick-tunnel URL from cloudflared output"; else bad "--share URL parse ($(echo "$OUT" | tail -3))"; fi
 if echo "$OUT" | grep -q "claude-bridge join 'https://fake-tunnel-9.trycloudflare.com#"; then ok "--share prints the join link with token fragment"; else bad "--share join link print"; fi
 if [ -s "$TOKEN_FILE" ]; then ok "--share generated a token"; else bad "--share token generation"; fi

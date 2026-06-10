@@ -1039,8 +1039,11 @@ share_hub() {
     esac
     i=$((i+1))
   done
-  # Default provider. (Flips to p2p once the dumbpipe provider lands — Task 8.)
-  [ -z "$provider" ] && provider="${CC_BRIDGE_PROVIDER:-cloudflared-quick}"
+  # Default provider: p2p (dumbpipe) — zero-account, end-to-end encrypted, SSE-safe,
+  # any number of spokes through one ticket. Override per-machine with
+  # CC_BRIDGE_PROVIDER, or per-invocation with --provider/--stable/--tailscale.
+  # (cloudflared QUICK tunnels are SSE-broken and demoted to explicit opt-in.)
+  [ -z "$provider" ] && provider="${CC_BRIDGE_PROVIDER:-p2p}"
   case "$provider" in
     cloudflared-named)
       if [ -z "$named_tunnel" ]; then
@@ -1544,10 +1547,14 @@ BRIDGE LIFECYCLE  (run from a SEPARATE terminal — not a Claude session on the 
   restart [--force]       Stop + start. --force replaces a foreign/stale listener on the port.
 
 FEDERATION (link bridges across machines)
-  share [--named-tunnel <host>] [--node <id>]   Become a hub (auto-installs cloudflared, opens a tunnel, prints a join link)
-  join 'https://<host>#<token>'                 Become a spoke (link to a hub; sessions stay local)
-  unlink                  Spoke leaves its hub → standalone
-  stop-share              Hub stops sharing (closes the tunnel, keeps the bridge + token)
+  share                                Become a hub over an encrypted P2P pipe (default; no account, no public URL)
+  share --stable <host>                Stable HTTPS URL on your own domain (cloudflared named tunnel; ONE connector only)
+  share --tailscale                    Tailnet-only (both machines on your Tailscale network; no extra process)
+  share --provider <p>                 Other tunnels: bore | pinggy | zrok | cloudflared-quick (see USAGE.md for trade-offs)
+  share [--node <id>]                  --node sets this machine's federation id (default: hostname)
+  join '<link>'                        Become a spoke. Accepts https://<host>#<token> AND p2p:<ticket>#<token>
+  unlink                               Spoke leaves its hub → standalone (kills the p2p forwarder too)
+  stop-share                           Hub stops sharing — verified teardown (kills tunnel / serve off), keeps bridge + token
 
 Every command is logged to ~/.claude/claude-bridge.log. Old --flags still work.
 HELP

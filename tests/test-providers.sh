@@ -180,5 +180,13 @@ fi
 unset CC_BRIDGE_FED_PORT
 stop_test_bridge
 
+# ── Case 8: bare `share` defaults to p2p (fake dumbpipe from case 6 still on PATH)
+start_test_bridge
+"$REPO/claude-bridge" share >/dev/null 2>&1
+[ "$(cat "$WORK/tunnel.provider" 2>/dev/null)" = "p2p" ] \
+  && ok "default provider is p2p" || bad "default provider is '$(cat "$WORK/tunnel.provider" 2>/dev/null)', expected p2p"
+"$REPO/claude-bridge" stop-share >/dev/null 2>&1
+stop_test_bridge
+
 echo ""; echo "test-providers: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
