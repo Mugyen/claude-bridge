@@ -18,6 +18,9 @@ heading when you tag the release and bump `package.json` + the banner in
 - **Room lifecycle**: `room members/info/rotate <node>/rotate-password/delete <name>` (typed-name confirmation); TTL rooms self-expire (lazy + GC sweep). Kick/rotate/delete sever the member's live stream immediately. `health`/`doctor` show a room line.
 - **E2EE envelope reserved (3b)**: messages can carry an opaque `enc` payload end-to-end through every relay/queue path without the hub reading it — the 3b encryption work slots in without protocol changes.
 
+### Fixed (v2.9.0 — security)
+- **Command-injection via bash arithmetic on a network value** (flagged HIGH by automated review). The expiry display did `date -r $(( <jq .expires_at from the rendezvous/bridge response> / 1000 ))` — bash `$(( ))` evaluates its contents, so a crafted `expires_at` like `a[$(cmd)]` would have executed. Now routed through `expiry_human()`, which validates the value is a pure integer before any arithmetic. Regression test in `tests/test-rendezvous-cli.sh`.
+
 ### Added (v2.9.0 — rendezvous codes, phase 4)
 - **Speakable join codes**: `claude-bridge join mugyen-team` instead of pasting long links. `room invite --code [name]` (default name: the room's) and `share --code [name]` (default: the node id) publish the join link to a rendezvous service; `join <code>` resolves it. Codes are pure sugar — long links always work, and an unreachable rendezvous degrades to a warning.
 - **The rendezvous itself** ships in `rendezvous/` — a ~100-line Cloudflare Worker + KV ("a phone book, not a relay"): open namespace (anyone publishes any code, first-come), per-code owner tokens (no hijacking while alive; renew/update/release), TTL'd (default 7d — an unrenewed dead hub's name frees up), rate-limited lookups. Deploy once with `wrangler deploy` (free tier, ~$0). Tested by running the REAL worker handler in-process (16 assertions) and the CLI against it served locally (8 assertions).

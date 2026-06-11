@@ -102,5 +102,13 @@ OUT=$(hub room invite --code 2>&1)
 echo "$OUT" | grep -q "#invite:" && echo "$OUT" | grep -qi "not published" \
   && ok "rendezvous down: link printed, code skipped with warning" || bad "degradation: $(echo "$OUT" | tail -3)"
 
+# ── 7. SECURITY: a malicious expires_at must NOT execute (bash arithmetic
+#    injection — was a HIGH finding; expiry_human validates pure-int first).
+INJ="$WORK/injected-$$"; rm -f "$INJ"
+( set -e; source <(sed -n "/^expiry_human()/,/^}/p" "$REPO/claude-bridge"); ok(){ :; }
+  expiry_human "{\"expires_at\":\"a[\$(touch $INJ)]\"}" ".expires_at" >/dev/null 2>&1
+  expiry_human "{\"expires_at\":\"\$(touch $INJ)\"}" ".expires_at" >/dev/null 2>&1 ) || true
+[ ! -f "$INJ" ] && ok "SECURITY: crafted expires_at does not execute (arith injection blocked)" || { bad "INJECTION EXECUTED"; rm -f "$INJ"; }
+
 echo ""; echo "test-rendezvous-cli: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

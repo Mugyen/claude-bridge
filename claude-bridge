@@ -1233,6 +1233,20 @@ room_err() { # render a server error from a /room response and exit 1
   exit 1
 }
 
+# Human-readable expiry from a JSON response's epoch-MS field, SAFELY. The value
+# comes off the network (the rendezvous, or a local bridge response) — NEVER feed
+# it to bash `$(( ))`: arithmetic expansion evaluates its contents, so a crafted
+# value like `a[$(cmd)]` would execute. Validate pure-integer first, then divide.
+# $1 = json, $2 = jq path (e.g. .expires_at). Echoes a date string or a fallback.
+expiry_human() {
+  local ms
+  ms=$(printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null)
+  case "$ms" in
+    ''|*[!0-9]*) echo "unknown" ;;
+    *) date -r "$((ms / 1000))" 2>/dev/null || echo "unknown" ;;   # $ms is digits-only here
+  esac
+}
+
 room_cmd() {
   local sub="${1:-}"; shift 2>/dev/null || true
   # Room verbs need the RUNNING bridge (the server owns the store) and a token
@@ -1318,7 +1332,7 @@ room_cmd() {
         keyfrag=":$(cat "$ROOM_KEY_FILE")"
         warn "E2EE room: this link includes the room key — the WHOLE link is the secret."
       fi
-      ok "Invite minted${one:+ (one-time)} — expires $(date -r $(($(printf '%s' "$resp" | jq -r '.expires_at') / 1000)) 2>/dev/null || printf '%s' "$resp" | jq -r '.expires_at')"
+      ok "Invite minted${one:+ (one-time)} — expires $(expiry_human "$resp" '.expires_at')"
       echo ""
       echo "  Share this ONE command:"
       echo "    claude-bridge join '${url}#invite:${code}${keyfrag}'"
@@ -1407,7 +1421,7 @@ publish_code() {
     jq -nc --arg c "$got_code" --arg o "$new_owner" --slurpfile cur <(cat "$CODES_FILE" 2>/dev/null || echo '{}')       '($cur[0] // {}) + {($c): $o}' > "$CODES_FILE.tmp" && mv "$CODES_FILE.tmp" "$CODES_FILE" && chmod 600 "$CODES_FILE"
   fi
   echo ""
-  ok "Code published at $RENDEZVOUS (expires $(date -r $(($(printf '%s' "$resp" | jq -r '.expires_at') / 1000)) 2>/dev/null || echo "see worker"))"
+  ok "Code published at $RENDEZVOUS (expires $(expiry_human "$resp" '.expires_at'))"
   echo ""
   echo "  Or just tell them:"
   echo "    claude-bridge join $got_code"
