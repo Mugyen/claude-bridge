@@ -11,6 +11,13 @@ _Add entries here as you work on the next version. Move them under a dated
 heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
+### Changed (v2.10.0 — room-first UX, BREAKING)
+- **The room is now the single user-facing primitive.** `room start` opens a room (auto-creating a password-protected default named after the machine the first time) and `room stop` closes it — these replace `share`/`stop-share`, which are removed along with `unlink` (→ `room leave`). Hub/spoke/standalone vocabulary is hidden from all output. One room per machine (tier-0).
+- **Password by default.** `room create`/`room start` generate and show a strong password once; `--open` makes a no-password room (credential-less join). Creating a room prints a tip to use `room invite` for one-time tokens instead of resharing the password.
+- **Connectivity + the join code are managed by the room lifecycle.** `start`/`create` open the transport (p2p default; `--stable`/`--tailscale`/`--provider` to override) and auto-publish the speakable join code; `stop`/`delete` release it (fixes the earlier stale-code gap). `join <code>` resolves it and prompts for the password.
+- **Room-aware `status`/`health`/`doctor`** — lead with "what room, is it working, who am I", distinguishing ACTIVE vs PAUSED (owner) and reachable vs unreachable (member); no hub/spoke jargon.
+- `expose`/`hide` accept a comma-separated list or `--all`.
+
 ### Added (v2.9.0 — rooms, phase 3a)
 - **Rooms with per-member tokens**: `room create <name> [--ttl <dur>] [--password [value]]` turns the flat shared-token group into real membership — each joining machine gets its OWN token, so `room kick <node>` revokes one machine without rotating everyone. Member = a bridge/machine; sessions stay local and oblivious.
 - **Invites + password gate**: `room invite [--one-time] [--expires <dur>]` prints a complete join link (`…#invite:<code>`, default 7d); `join '<url>' --password` joins a password-gated room (scrypt-hashed; password never rides in a link). `/link/join` is the only unauthenticated link endpoint, behind a strict global rate bucket (10/min) against brute force.

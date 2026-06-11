@@ -171,16 +171,18 @@ See [Part 4](#part-4-cross-network-talk-to-agents-on-other-machines) and [docs/C
 
 | Command | What it does |
 |---|---|
-| `claude-bridge share [--node <id>]` | Become a **hub** over an encrypted P2P pipe (default — auto-installs dumbpipe, prints a one-line join link). Fresh ticket each share (a leaked link dies on restart). |
-| `claude-bridge share --reuse` | P2P with a **persistent identity**: a key in `~/.claude/.cc-bridge-p2p-key` makes the ticket identical across restarts/reboots — spokes never need a new link. Trade-off: an old link stays valid until you rotate (delete the key file, or share without `--reuse`). |
-| `claude-bridge share --stable <host>` | Hub with a stable HTTPS URL on your own domain (cloudflared **named** tunnel; `--named-tunnel <host>` still works). |
-| `claude-bridge share --tailscale` | Hub reachable tailnet-only (no public exposure, no extra process; uses `tailscale serve --tcp`). |
-| `claude-bridge share --provider <p>` | Pick a transport explicitly: `p2p`, `cloudflared-named`, `bore`, `pinggy`, `zrok`, `tailscale`. |
-| `claude-bridge join '<link>'` | Become a **spoke**: link to a hub. Accepts `https://<host>#<token>` and `p2p:<ticket>#<token>`. Your sessions stay on localhost. |
-| `claude-bridge unlink` | Spoke leaves its hub → back to standalone (notifies the hub first, then kills the local p2p forwarder). |
-| `claude-bridge stop-share` | Hub stops sharing: **verified** teardown (process confirmed dead / `tailscale serve` config removed), keeps the bridge + token. |
+| `claude-bridge room start [name]` | Open your room — the everyday "on" (was `share`). Creates it the first time: password-protected, named after this machine if you omit one, p2p transport, auto-publishes a join code. One room per machine. |
+| `claude-bridge room stop` | Close the room — the everyday "off" (was `stop-share`). Keeps members + password; releases the join code. `room start` reopens it. |
+| `claude-bridge room create [name] [--password [v] \| --open] [--e2ee] [--host-only] [--ttl <dur>] [--stable <host> \| --tailscale]` | Like `start` but set things up front. `--open` = no password · `--e2ee` = end-to-end encryption · `--host-only` = relay without joining · `--ttl` = self-expiring · `--stable`/`--tailscale` = transport instead of p2p. |
+| `claude-bridge room delete <name>` | Destroy the room (typed name to confirm; all member access dies, code released). |
+| `claude-bridge room invite [--one-time] [--expires <dur>] [--code [name]]` | Hand someone a one-time token link instead of the password. |
+| `claude-bridge room members \| info` | Who's in the room · room summary. |
+| `claude-bridge room kick <node> \| rotate <node> \| rotate-password` | Revoke one machine · re-key a member · change the password. |
+| `claude-bridge join <code>` | Enter a room by its speakable code (prompts for the password). |
+| `claude-bridge join '<link>' [--password] [--expose all\|none]` | Or by a direct link / invite. `--expose none` = join with all your agents hidden. |
+| `claude-bridge room leave` | Leave a room you joined (was `unlink`). |
 
-#### Picking a share transport
+#### Picking a share transport#### Picking a share transport
 
 The default needs zero setup: no account, no domain, nothing public. The others trade setup for different properties. `CC_BRIDGE_PROVIDER` sets a per-machine default.
 

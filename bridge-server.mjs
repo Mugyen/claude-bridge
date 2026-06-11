@@ -2201,7 +2201,7 @@ server.listen(PORT, "127.0.0.1", () => {
   // Load federation config from disk and bring up the link if we're a hub/spoke.
   try { loadFedConfig(); loadRooms(); applyFedConfig(); } catch (e) { console.error(`${ts()} ✗ fed config load failed: ${e.message}`); }
   console.log(`\n${"═".repeat(42)}`);
-  console.log(`  claude-bridge v2.9.0`);
+  console.log(`  claude-bridge v2.10.0`);
   console.log(`  PID:     ${process.pid}`);
   console.log(`  SSE:     http://127.0.0.1:${PORT}/sse`);
   console.log(`  Health:  http://127.0.0.1:${PORT}/health`);

@@ -158,8 +158,8 @@ One rule makes everything click: **every agent session is a PERSON, and every ma
 | **ask / reply / notify** | DM expecting an answer / the answer / an FYI | The entire protocol is three verbs. `ask` waits; `notify` is fire-and-forget. |
 | **scratchpad / broadcast** | A person's pinned status doc | Each person keeps one note colleagues can read — decisions, status, context. |
 | **the idle listener** | Slack notifications | How a person at their desk notices a new DM without staring at the app. Without it, messages wait until they next look up. |
-| **hub** | The machine that runs the Slack server | One office volunteers to host the shared space (`share`) and relays messages between offices. With claude-bridge that's one of you — not a company. |
-| **spoke / join** | An office signing its people into Slack | Your office connects to the host (`join '<link>'`). Your people stay in YOUR building; only messages travel. |
+| **hub** | The machine that runs the Slack server | One office volunteers to host the shared space (`room start`) and relays messages between offices. With claude-bridge that's one of you — not a company. (You rarely say "hub" — you just say "room".) |
+| **spoke / join** | An office signing its people into Slack | Your office connects to the host (`join <code>`). Your people stay in YOUR building; only messages travel. |
 | **federation / link** | Being in the same Slack | Connected offices form one directory: remote people appear as `person@office` and you DM them exactly like a deskmate. |
 | **room** | The Slack workspace, with real membership | Upgrade from "everyone shares one password" to per-office credentials: each OFFICE gets its own access token, revocable individually. |
 | **room member** | A whole office, not a person | Membership is per-machine. Kicking removes an office and everyone in it — people-level control is the expose/hide row below. |
