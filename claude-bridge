@@ -111,10 +111,7 @@ case "${1:-}" in
   --start|start)            ACTION="start" ;;
   --stop|stop)              ACTION="stop" ;;
   --restart|restart)        ACTION="restart" ;;
-  --share|share)            ACTION="share" ;;
   --join|join)              ACTION="join" ;;
-  --unlink|unlink)          ACTION="unlink" ;;
-  --stop-share|stop-share)  ACTION="stop-share" ;;
   doctor)                   ACTION="doctor" ;;
   update|upgrade)           ACTION="update" ;;
   logs|log)                 ACTION="logs" ;;
@@ -622,44 +619,65 @@ stop_bridge() {
   fi
 }
 
+# Room-first status block — the user-facing "what room am I in, is it working".
+# Hides hub/spoke vocabulary; distinguishes active/paused (owner) and
+# reachable/unreachable (member). Shared by status, health, doctor.
+room_status() {
+  local ping role node info name members
+  ping=$(curl -sf --max-time 1 "http://localhost:${PORT}/health/ping" 2>/dev/null)
+  role=$(echo "$ping" | jq -r '.role // "standalone"' 2>/dev/null)
+  info=$(room_api GET /room/info 2>/dev/null)
+  name=$(printf '%s' "$info" | jq -r '.room.name // empty' 2>/dev/null)
+
+  if [ "$role" = "spoke" ]; then
+    # We joined someone else's room.
+    local rn hub reachable
+    rn=$(room_api GET /sessions/exposure 2>/dev/null >/dev/null; echo "${name:-a room}")
+    hub=$(cat "$HUB_FILE" 2>/dev/null || echo "")
+    if [ -n "$hub" ] && curl -sf --max-time 6 "${hub}/health/ping" >/dev/null 2>&1; then
+      ok "In a room as \"$(cat "$NODE_FILE" 2>/dev/null)\" — owner ● reachable"
+    else
+      warn "In a room as \"$(cat "$NODE_FILE" 2>/dev/null)\" — owner ○ UNREACHABLE (they're offline, or you were removed)"
+    fi
+    local ex hd
+    ex=$(printf '%s' "$(room_api GET /sessions/exposure 2>/dev/null)" | jq -r '[.sessions[]|select(.expose)]|length' 2>/dev/null || echo 0)
+    hd=$(printf '%s' "$(room_api GET /sessions/exposure 2>/dev/null)" | jq -r '[.sessions[]|select(.expose|not)]|length' 2>/dev/null || echo 0)
+    ok "Your agents: 🌐 ${ex:-0} in the room · 🔒 ${hd:-0} hidden   (claude-bridge sessions)"
+    return
+  fi
+
+  if [ -n "$name" ]; then
+    # We host a room (record exists). Active iff connectivity is live.
+    local prov alive=""
+    prov=$(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null || echo "")
+    if [ "$prov" = "tailscale" ]; then
+      tailscale serve status 2>/dev/null | grep -q ":${FED_PORT}" && alive=1
+    elif [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE" 2>/dev/null)" 2>/dev/null; then alive=1; fi
+    if [ -n "$alive" ]; then
+      ok "Room \"$name\"  ● ACTIVE — you're hosting"
+      members=$(printf '%s' "$info" | jq -r '[.room.members[]|select(.role!="owner")]|length' 2>/dev/null)
+      ok "Join:     claude-bridge join $name   ·   members: ${members:-0}   ·   $(printf '%s' "$info" | jq -r '"\(if .room.open then "OPEN (no password)" else "password" end)\(if .room.e2ee then " · 🔐 E2EE" else "" end)"' 2>/dev/null)"
+    else
+      warn "Room \"$name\"  ⏸ PAUSED — members can't reach it. Run: claude-bridge room start"
+    fi
+    return
+  fi
+
+  if [ -z "$ping" ]; then return; fi   # bridge-down handled by caller
+  ok "Not in a room.  Host one: claude-bridge room start   ·   Join one: claude-bridge join <code>"
+}
+
 check_bridge() {
   # Use the UNGATED /health/ping so this works even when sharing is on (the full
   # /health requires the token then). Ping reports role + node + sharing state.
   local ping
   ping=$(curl -sf --max-time 1 "http://localhost:${PORT}/health/ping" 2>/dev/null)
   if [ -n "$ping" ]; then
-    local pid_info role node sharing
-    role=$(echo "$ping" | jq -r '.role // "standalone"')
-    node=$(echo "$ping" | jq -r '.node // "?"')
-    sharing=$(echo "$ping" | jq -r '.sharing // false')
-    if [ -f "$PID_FILE" ]; then pid_info=" (PID $(cat "$PID_FILE"))"; else pid_info=""; fi
+    local pid_info; if [ -f "$PID_FILE" ]; then pid_info=" (PID $(cat "$PID_FILE"))"; else pid_info=""; fi
     ok "Bridge running on port $PORT${pid_info}"
-    if [ "$sharing" = "true" ]; then
-      ok "Federation: role=$role node=$node (sharing ON)"
-      if [ "$role" = "hub" ]; then
-        ok "Link surface (loopback): http://127.0.0.1:${FED_PORT} (the tunnel points here, NOT the main port $PORT)"
-      fi
-      if [ -s "$TUNNEL_URL_FILE" ]; then
-        local prov; prov=$(cat "$TUNNEL_PROVIDER_FILE" 2>/dev/null || echo "tunnel")
-        local share_alive=""
-        if [ "$prov" = "tailscale" ]; then
-          tailscale serve status 2>/dev/null | grep -q ":${FED_PORT}" && share_alive=1
-        elif [ -f "$TUNNEL_PID_FILE" ] && kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null; then
-          share_alive=1
-        fi
-        if [ -n "$share_alive" ]; then
-          ok "EXPOSED via $prov: $(cat "$TUNNEL_URL_FILE") → 127.0.0.1:${FED_PORT}"
-        else
-          fail "Share recorded ($prov: $(cat "$TUNNEL_URL_FILE")) but it is DOWN — re-run: claude-bridge share"
-        fi
-      elif [ "$role" = "hub" ]; then
-        warn "Hub mode on but no tunnel running — run ./claude-bridge --share to open one"
-      fi
-    else
-      ok "Federation: standalone (local only)"
-    fi
+    room_status
   else
-    warn "Bridge not running (start with: ./claude-bridge --start)"
+    warn "Bridge not running (start with: claude-bridge start)"
   fi
 }
 
@@ -1134,7 +1152,7 @@ share_hub() {
     if [ -n "$share_alive" ]; then
       if [ -z "$named_tunnel" ] || [ "$existing" = "https://${named_tunnel}" ]; then
         ok "Share already open ($provider): $existing"
-        print_join_link "$existing" "$token"
+        [ "${ROOM_MODE:-0}" = "1" ] || print_join_link "$existing" "$token"
         return
       fi
     fi
@@ -1168,13 +1186,17 @@ share_hub() {
   printf '%s' "$url" > "$TUNNEL_URL_FILE"
   printf '%s' "$provider" > "$TUNNEL_PROVIDER_FILE"
   ok "EXPOSED via $provider: $url → 127.0.0.1:${FED_PORT}"
-  print_join_link "$url" "$token"
-  if [ "${SHARE_CODE:-0}" = "1" ]; then
-    # Plain-hub code (pre-room sharing): the link carries the bearer token, so
-    # the code's TTL is real security — default name is this machine's node id.
-    publish_code "${SHARE_CODE_NAME:-$(cat "$NODE_FILE" 2>/dev/null)}" "${url}#${token}" "" || true
+  # In ROOM_MODE the caller (room start/create) owns the join messaging + code —
+  # the bare bridge token here is NOT a valid room credential, so don't print it.
+  if [ "${ROOM_MODE:-0}" != "1" ]; then
+    print_join_link "$url" "$token"
+    if [ "${SHARE_CODE:-0}" = "1" ]; then
+      # Plain-hub code (pre-room sharing): the link carries the bearer token, so
+      # the code's TTL is real security — default name is this machine's node id.
+      publish_code "${SHARE_CODE_NAME:-$(cat "$NODE_FILE" 2>/dev/null)}" "${url}#${token}" "" || true
+    fi
+    warn "Keep this machine on while you want the link open. 'claude-bridge stop-share' closes it (verified)."
   fi
-  warn "Keep this machine on while you want the link open. 'claude-bridge stop-share' closes it (verified)."
 }
 
 print_join_link() {
@@ -1255,52 +1277,73 @@ room_cmd() {
   if ! fed_bridge_running; then start_bridge || exit 1; fi
   local resp
   case "$sub" in
-    create)
-      local name="" ttl_s="" pw="" pw_set=0 host_only="" e2ee="" args=("$@") i=0
+    create|start)
+      # create = explicit setup (name/flags); start = open the room, auto-creating
+      # a DEFAULT (named after this machine, generated password) if none exists yet.
+      # Both then OPEN connectivity (p2p default) and PUBLISH the join code. Daily
+      # use is just `room start` / `room stop` — the share/stop-share you knew.
+      local name="" ttl_s="" pw="" open="" host_only="" e2ee="" share_args=() args=("$@") i=0
       while [ $i -lt ${#args[@]} ]; do
         case "${args[$i]}" in
+          --open) open=true ;;
           --host-only) host_only=true ;;
           --e2ee) e2ee=true ;;
           --ttl) i=$((i+1)); ttl_s=$(parse_duration "${args[$i]:-}") || { fail "bad --ttl (use 90s/15m/2h/7d)"; exit 1; } ;;
-          --password)
-            pw_set=1
-            # value may follow; omitted → GENERATE (strong passwords by default)
-            local nxt="${args[$((i+1))]:-}"
-            case "$nxt" in ""|--*) ;; *) i=$((i+1)); pw="$nxt" ;; esac ;;
-          --*) fail "unknown flag '${args[$i]}' for room create"; exit 1 ;;
+          --password) local nxt="${args[$((i+1))]:-}"; case "$nxt" in ""|--*) pw="__GEN__" ;; *) i=$((i+1)); pw="$nxt" ;; esac ;;
+          --stable)    i=$((i+1)); share_args+=(--stable "${args[$i]:-}") ;;
+          --tailscale) share_args+=(--tailscale) ;;
+          --provider)  i=$((i+1)); share_args+=(--provider "${args[$i]:-}") ;;
+          --reuse)     share_args+=(--reuse) ;;   # persistent p2p identity (stable ticket)
+          --p2p)       ;;                          # explicit default; no-op
+          --*) fail "unknown flag '${args[$i]}' for room $sub"; exit 1 ;;
           *) [ -z "$name" ] && name="${args[$i]}" ;;
         esac
         i=$((i+1))
       done
-      [ -z "$name" ] && { fail "Usage: claude-bridge room create <name> [--ttl <dur>] [--password [value]]"; exit 1; }
-      if [ "$pw_set" = 1 ] && [ -z "$pw" ]; then
-        pw=$(openssl rand -hex 12 2>/dev/null || node -e "console.log(require('crypto').randomBytes(12).toString('hex'))")
+
+      local existing_name
+      existing_name=$(room_active_name)
+      if [ -n "$existing_name" ]; then
+        # A room already exists. `start` re-opens it; `create` refuses (one room).
+        if [ "$sub" = "create" ]; then
+          fail "A room already exists (\"$existing_name\"). Use 'claude-bridge room start' to open it, or 'room delete $existing_name' first."
+          exit 1
+        fi
+        name="$existing_name"
+        ROOM_MODE=1 share_hub "${share_args[@]:-}"
+        room_publish_and_print "$name" ""
+      else
+        # No room yet → create one. Default name = node id; password ON by default.
+        [ -z "$name" ] && name=$(cat "$NODE_FILE" 2>/dev/null || hostname | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+        if [ -z "$open" ]; then
+          [ -z "$pw" ] || [ "$pw" = "__GEN__" ] && pw=$(openssl rand -hex 12 2>/dev/null || node -e "console.log(require('crypto').randomBytes(12).toString('hex'))")
+        fi
+        local body
+        body=$(jq -nc --arg n "$name" --arg p "$pw" --arg t "${ttl_s:-}" --arg h "$host_only" --arg e "$e2ee" --arg o "$open" \
+          '{name:$n} + (if $p != "" then {password:$p} else {} end) + (if $t != "" then {ttl_seconds:($t|tonumber)} else {} end) + (if $h != "" then {host_only:true} else {} end) + (if $e != "" then {e2ee:true} else {} end) + (if $o != "" then {open:true} else {} end)')
+        resp=$(room_api POST /room/create "$body")
+        printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
+        ok "Room \"$name\" created"
+        if [ -n "$e2ee" ]; then
+          printf '%s' "$(printf '%s' "$resp" | jq -r '.room_key')" > "$ROOM_KEY_FILE"; chmod 600 "$ROOM_KEY_FILE"
+          ok "E2EE ON 🔐 — member↔member messages are sealed end-to-end (key: $ROOM_KEY_FILE)"
+          warn "Kick revokes ACCESS, not knowledge — a kicked member keeps the key. Recreate the room to rotate."
+        fi
+        [ -n "$host_only" ] && ok "HOST-ONLY: this machine relays the room; its own sessions are NOT participants"
+        ROOM_MODE=1 share_hub "${share_args[@]:-}"
+        room_publish_and_print "$name" "$pw"
       fi
-      local body
-      body=$(jq -nc --arg n "$name" --arg p "$pw" --arg t "${ttl_s:-}" --arg h "$host_only" --arg e "$e2ee" \
-        '{name:$n} + (if $p != "" then {password:$p} else {} end) + (if $t != "" then {ttl_seconds:($t|tonumber)} else {} end) + (if $h != "" then {host_only:true} else {} end) + (if $e != "" then {e2ee:true} else {} end)')
-      resp=$(room_api POST /room/create "$body")
-      printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
-      ok "Room \"$name\" created ($(printf '%s' "$resp" | jq -r '.room.id'))"
-      warn "member-token auth is now ACTIVE: the old shared-token join links no longer work."
-      warn "Hand out invites instead:  claude-bridge room invite"
-      if [ -n "$host_only" ]; then
-        ok "HOST-ONLY: this machine relays the room but its own sessions are NOT participants"
-        ok "(invisible to members, unable to message the room; local sessions unaffected locally)"
-      fi
-      if [ -n "$e2ee" ]; then
-        printf '%s' "$(printf '%s' "$resp" | jq -r '.room_key')" > "$ROOM_KEY_FILE"
-        chmod 600 "$ROOM_KEY_FILE"
-        ok "E2EE ON 🔐 — messages between members are sealed end-to-end (room key saved: $ROOM_KEY_FILE)"
-        warn "Members get the key automatically (invite links carry it; password joiners unwrap it)."
-        warn "Note: kick revokes ACCESS, not knowledge — a kicked member still holds the key. Recreate the room to rotate."
-      fi
-      if [ "$pw_set" = 1 ]; then
-        echo ""
-        echo "  Room password (shown ONCE — share it over a safe channel):"
-        echo "    $pw"
-        echo "  Joiners run:  claude-bridge join '<share-url>' --password"
-      fi
+      ;;
+    stop)
+      # Pause: close connectivity + release the code, but KEEP the room (members,
+      # password, key all preserved). === old stop-share. `room start` reopens.
+      local nm; nm=$(room_active_name)
+      stop_share
+      [ -n "$nm" ] && { release_code "$nm"; ok "Join code \"$nm\" released (room is now unreachable but NOT deleted)"; }
+      ok "Room paused — run 'claude-bridge room start' to reopen it (same members, same code)."
+      ;;
+    leave)
+      unlink_hub
       ;;
     invite)
       local one="" exp="" want_code=0 code_name="" args=("$@") i=0
@@ -1386,12 +1429,15 @@ room_cmd() {
       printf '%s' "$resp" | jq -r '.room | "Room: \(.name) (\(.id))\nOwner: \(.owner)\(if .host_participates then "" else "  [HOST-ONLY: relay, not a participant]" end)\nMembers: \(.members|length) · Invites open: \(.invites|length) · Password gate: \(if .password_set then "on" else "off" end)\nExpires: \(if .expires_at then (.expires_at/1000 | todate) else "never (persistent)" end)"'
       ;;
     delete)
+      local nm; nm=$(room_active_name)
       resp=$(room_api POST /room/delete "$(jq -nc --arg c "${1:-}" '{confirm:$c}')")
       printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
-      ok "Room \"$(printf '%s' "$resp" | jq -r '.deleted')\" deleted — every member token is dead; legacy shared-token mode resumes"
+      [ -n "$nm" ] && release_code "$nm"
+      rm -f "$ROOM_KEY_FILE"
+      ok "Room \"$(printf '%s' "$resp" | jq -r '.deleted')\" deleted — every member token is dead, join code released."
       ;;
     *)
-      fail "Usage: claude-bridge room <create|invite|members|kick|rotate|rotate-password|info|delete>"
+      fail "Usage: claude-bridge room <create|start|stop|delete|invite|members|kick|rotate|rotate-password|info|leave>"
       exit 1
       ;;
   esac
@@ -1428,6 +1474,65 @@ publish_code() {
   echo ""
 }
 
+# Release a published code (room stop/delete) using our stored owner token, so a
+# paused/destroyed room stops being discoverable and frees the name. Best-effort.
+release_code() {
+  local code="$1" owner
+  [ -z "$code" ] && return 0
+  [ -s "$CODES_FILE" ] || return 0   # no codes file → nothing was ever published
+  # `|| true`: under `set -e`, a failing jq in $(...) would abort the caller
+  # silently (this swallowed `room delete`'s output when no code existed).
+  owner=$(jq -r --arg c "$code" '.[$c] // empty' "$CODES_FILE" 2>/dev/null || true)
+  [ -z "$owner" ] && return 0   # we never published it / no token → nothing to do
+  curl -s --max-time 8 -X DELETE "$RENDEZVOUS/v1/rooms/$code" -H "Content-Type: application/json" \
+    -d "$(jq -nc --arg o "$owner" '{owner_token:$o}')" >/dev/null 2>&1 || true
+  # Drop it from our local store either way (released, or already gone/expired).
+  # NB: feed the file as INPUT and del a rooted path — `jq -n 'del((expr)[$c])'`
+  # is NOT a valid del path and silently leaves the entry (was the bug).
+  local cur; cur=$(cat "$CODES_FILE" 2>/dev/null || echo '{}')
+  printf '%s' "$cur" | jq --arg c "$code" 'del(.[$c])' > "$CODES_FILE.tmp" 2>/dev/null && mv "$CODES_FILE.tmp" "$CODES_FILE" 2>/dev/null || true
+}
+
+# The active room's name (lowercased join-handle), or empty if none. Used by the
+# lifecycle verbs to publish/release the right code without the user repeating it.
+room_active_name() {
+  room_api GET /room/info 2>/dev/null | jq -r '.room.name // empty' 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g'
+}
+
+# After connectivity is open (share_hub recorded TUNNEL_URL_FILE): publish the
+# room's join code and print the friendly join instructions. $1=room name,
+# $2=password (only when JUST generated, to show once; empty otherwise).
+room_publish_and_print() {
+  local name="$1" pw="$2" url info pw_set open_room
+  url=$(cat "$TUNNEL_URL_FILE" 2>/dev/null || echo "")
+  info=$(room_api GET /room/info 2>/dev/null)
+  pw_set=$(printf '%s' "$info" | jq -r '.room.password_set // false' 2>/dev/null)
+  open_room=$(printf '%s' "$info" | jq -r '.room.open // false' 2>/dev/null)
+  echo ""
+  ok "Room \"$name\" is ● ACTIVE — you're hosting"
+  if [ -n "$url" ]; then
+    # The join CODE (name) maps to this URL at the rendezvous; bare URL = the
+    # joiner authenticates with the password (or just joins, if --open).
+    publish_code "$name" "$url" "" || warn "Others can still join with the long link below."
+    echo "  Direct link (if codes are unavailable):  claude-bridge join '$url'"
+  fi
+  if [ "$pw_set" = "true" ]; then
+    if [ -n "$pw" ]; then
+      echo ""
+      echo "  Room password (shown ONCE — share over a safe channel):"
+      echo "    $pw"
+    else
+      echo "  (password-protected — joiners are prompted for it)"
+    fi
+    echo ""
+    warn "TIP: to add someone WITHOUT sharing the password, run 'claude-bridge room invite'"
+    warn "     for a one-time token instead."
+  elif [ "$open_room" = "true" ]; then
+    warn "OPEN room: anyone with the code/link can join (no password)."
+  fi
+  echo ""
+}
+
 # `claude-bridge sessions` — who's on this bridge, and which privacy zone.
 sessions_cmd() {
   if ! fed_bridge_running; then fail "Bridge not running — claude-bridge start"; exit 1; fi
@@ -1450,18 +1555,31 @@ sessions_cmd() {
 }
 
 # `claude-bridge expose <name>` / `hide <name>` — move a session across the airlock.
-expose_cmd() { # $1 = name, $2 = true|false
-  [ -z "${1:-}" ] && { fail "Usage: claude-bridge ${3:-expose} <session-name>   (see names: claude-bridge sessions)"; exit 1; }
+expose_cmd() { # $1 = name(s): one, comma-separated, or --all · $2 = true|false · $3 = verb label
+  local arg="${1:-}" want="$2" verb="${3:-expose}"
+  [ -z "$arg" ] && { fail "Usage: claude-bridge $verb <name>[,<name>...] | --all   (see: claude-bridge sessions)"; exit 1; }
   if ! fed_bridge_running; then fail "Bridge not running — claude-bridge start"; exit 1; fi
-  local resp
-  resp=$(room_api POST /sessions/expose "$(jq -nc --arg n "$1" --argjson e "$2" '{name:$n, expose:$e}')")
-  printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
-  if [ "$2" = "true" ]; then
-    ok "\"$1\" is now EXPOSED 🌐 — visible and reachable from the room (and cut off from hidden local sessions)"
-    warn "Exposure is not amnesia: anything this session learned while hidden is now one question away."
+  # Build the target list: --all → every current session; else split on commas.
+  local names=()
+  if [ "$arg" = "--all" ]; then
+    local raw; raw=$(room_api GET /sessions/exposure 2>/dev/null | jq -r '.sessions[].name' 2>/dev/null)
+    [ -z "$raw" ] && { warn "No active sessions to $verb."; return 0; }
+    while IFS= read -r n; do [ -n "$n" ] && names+=("$n"); done <<< "$raw"
   else
-    ok "\"$1\" is now HIDDEN 🔒 — invisible to the room, sealed behind the airlock"
+    local oldifs="$IFS"; IFS=','; for n in $arg; do [ -n "$n" ] && names+=("$n"); done; IFS="$oldifs"
   fi
+  local any_fail=0 nm resp
+  for nm in "${names[@]}"; do
+    resp=$(room_api POST /sessions/expose "$(jq -nc --arg n "$nm" --argjson e "$want" '{name:$n, expose:$e}')")
+    if printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1; then
+      if [ "$want" = "true" ]; then ok "\"$nm\" → EXPOSED 🌐 (in the room; cut off from hidden sessions)"
+      else ok "\"$nm\" → HIDDEN 🔒 (out of the room, behind the airlock)"; fi
+    else
+      any_fail=1; fail "$nm: $(printf '%s' "$resp" | jq -r '.error // "failed"' 2>/dev/null)"
+    fi
+  done
+  [ "$want" = "true" ] && warn "Exposure isn't amnesia: anything a session learned while hidden is now one question away."
+  return $any_fail
 }
 
 join_hub() {
@@ -2003,39 +2121,30 @@ BRIDGE LIFECYCLE  (run from a SEPARATE terminal — not a Claude session on the 
   stop [--force]          Graceful stop (SIGTERM). --force = SIGKILL the listener.
   restart [--force]       Stop + start. --force replaces a foreign/stale listener on the port.
 
-FEDERATION (link bridges across machines)
-  share                                Become a hub over an encrypted P2P pipe (default; no account, no public URL)
-  share --reuse                        P2P with a PERSISTENT identity: the ticket survives restarts (spokes never re-join);
-                                       trade-off: old links stay valid until you rotate (delete ~/.claude/.cc-bridge-p2p-key)
-  share --stable <host>                Stable HTTPS URL on your own domain (cloudflared named tunnel; ONE connector only)
-  share --tailscale                    Tailnet-only (both machines on your Tailscale network; no extra process)
-  share --provider <p>                 Other tunnels: bore | pinggy | zrok (see USAGE.md for trade-offs)
-  share [--node <id>] [--code [name]]  --node sets the federation id · --code publishes the join link as a speakable code
-  join '<link-or-code>' [--password] [--expose all|none]
-                                       Become a spoke. Links: https://<host>#<token> · p2p:<ticket>#<token> · …#invite:<code>
-                                       --password joins a password-gated room (prompts) · --expose none = privacy-first
-                                       (sessions hidden from the room until you expose them)
-  unlink                               Spoke leaves its hub → standalone (kills the p2p forwarder too)
-  stop-share                           Hub stops sharing — verified teardown (kills tunnel / serve off), keeps bridge + token
-
-ROOMS (per-member tokens on the hub — kick one machine without rotating everyone)
-  room create <name> [--ttl <dur>] [--password [value]] [--host-only] [--e2ee]
-                                                          Create the room (owner = this machine; auth switches to member tokens).
-                                                          --host-only: relay without your sessions participating
-                                                          --e2ee: seal member↔member messages end-to-end (zero-dep chacha20)
+ROOMS — talk to agents on other machines (host one, others join it)
+  room start [name]                    Open your room (the everyday "on"). Creates it the first time —
+                                       password-protected by default, named after this machine if you omit one.
+                                       Publishes a speakable join code automatically. One room per machine.
+  room stop                            Close the room (the everyday "off"). Keeps members + password; releases the code.
+  room delete <name>                   Destroy it for good (typed name to confirm; every member's access dies).
+  room create [name] [--password [v] | --open] [--e2ee] [--host-only] [--ttl <dur>] [--stable <host> | --tailscale]
+                                       Like start, but set things up front: --open = no password ·
+                                       --e2ee = seal messages end-to-end · --host-only = relay without joining ·
+                                       --ttl = self-expiring room · --stable/--tailscale = transport instead of p2p
   room invite [--one-time] [--expires <dur>] [--code [name]]
-                                                          Mint an invite + print the join link. --code also publishes it as a
-                                                          speakable code (default name: the room's) → joiners run: join <code>
-  room members | info                                     Roster with online state · room summary
-  room kick <node> | rotate <node> | rotate-password      Revoke one machine · re-key one member · re-key the password gate
-  room delete <name>                                      Tear the room down (typed name = confirmation; all tokens die)
+                                       Hand someone a one-time token link instead of the password
+  room members | info                  Who's in the room (with online state) · room summary
+  room kick <node> | rotate <node> | rotate-password    Revoke one machine · re-key a member · change the password
 
-PRIVACY ZONES (when linked to a room — the AIRLOCK)
-  sessions                             Who's on this bridge: 🌐 EXPOSED (room can see+reach) vs 🔒 hidden (sealed off)
-  expose <name> | hide <name>          Move a session across the airlock. Hidden sessions and exposed sessions can
-                                       NEVER message each other through the bridge — that's the point.
+JOINING & PER-MACHINE PRIVACY
+  join <code>                          Enter a room by its speakable code (prompts for the password)
+  join '<link>' [--password] [--expose all|none]   Or by a direct link / invite. --expose none = join with everything hidden
+  room leave                           Leave a room you joined
+  sessions                             Your agents' zones: 🌐 EXPOSED to the room vs 🔒 hidden
+  expose <name>[,<name>...] | --all    Put agents IN the room (comma-separated or --all)
+  hide   <name>[,<name>...] | --all    Pull them OUT. Exposed and hidden agents can NEVER reach each other (the airlock).
 
-Every command is logged to ~/.claude/claude-bridge.log. Old --flags still work.
+Every command is logged to ~/.claude/claude-bridge.log.
 HELP
 }
 
@@ -2244,18 +2353,10 @@ case "$ACTION" in
     start_bridge
     ;;
 
-  share)
-    echo ""
-    echo "claude-bridge --share (become a hub)"
-    echo "===================================="
-    echo ""
-    share_hub "$@"
-    ;;
-
   join)
     echo ""
-    echo "claude-bridge --join (become a spoke)"
-    echo "====================================="
+    echo "claude-bridge join (enter a room)"
+    echo "================================="
     echo ""
     # support: join '<link>' [--node <id>] [--password [value]]
     ARG3_NODE=""; JOIN_PW_MODE=0; JOIN_PASSWORD=""; JOIN_EXPOSE=""
@@ -2295,14 +2396,6 @@ case "$ACTION" in
 
   hide)
     expose_cmd "$ARG2" false hide
-    ;;
-
-  unlink)
-    unlink_hub
-    ;;
-
-  stop-share)
-    stop_share
     ;;
 
   doctor)

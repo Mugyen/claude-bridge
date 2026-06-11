@@ -1535,8 +1535,18 @@ async function handleLinkRequest(req, res, url) {
       }
     } else if (typeof jp.password === "string" && jp.password && room.password) {
       if (safeEqHex(room.password.hash, pwHash(jp.password, room.password.salt))) via = "password";
+    } else if (!jp.invite_code && !jp.password && room.open === true && !room.password) {
+      // --open room: no credential required, anyone with the code/link joins.
+      via = "open";
     }
-    if (!via) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "invalid or expired invite/password" })); return; }
+    if (!via) {
+      // Signal the joiner whether a password would help, so `join <code>` knows
+      // to prompt (vs. an open room that just needs a node, vs. invite-only).
+      const needsPw = !!room.password && !jp.password && !jp.invite_code;
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: needsPw ? "this room requires a password" : "invalid or expired invite/password", password_required: needsPw }));
+      return;
+    }
     // Mint the member token. Re-join by an existing member ROTATES their token
     // (lost-token recovery) — the old one dies the moment the file is saved.
     const memberToken = crypto.randomBytes(32).toString("hex");
@@ -1998,6 +2008,7 @@ const server = http.createServer(async (req, res) => {
           expires_at: Number(rp.ttl_seconds) > 0 ? Date.now() + Number(rp.ttl_seconds) * 1000 : null,
           owner: { node: FED.node, pubkey: (typeof rp.owner_pubkey === "string" && rp.owner_pubkey) || null },
           host_participates: rp.host_only === true ? false : true,
+          open: rp.open === true,   // --open: credential-less join (no password)
           password: null,
           members: {
             // The owner's entry is bookkeeping (role/roster) — the hub never
@@ -2024,7 +2035,7 @@ const server = http.createServer(async (req, res) => {
         ROOMS.rooms[id] = rec;
         saveRooms();
         console.log(`${ts()} 🚪 room "${rec.name}" created (${id}) — member-token auth now ACTIVE (legacy shared token retired)`);
-        return jres(200, { ok: true, room: { id, name: rec.name, owner: FED.node, expires_at: rec.expires_at, password_set: !!rec.password, e2ee: !!rec.e2ee }, ...(roomKeyHex ? { room_key: roomKeyHex } : {}) });
+        return jres(200, { ok: true, room: { id, name: rec.name, owner: FED.node, expires_at: rec.expires_at, password_set: !!rec.password, open: !!rec.open, e2ee: !!rec.e2ee }, ...(roomKeyHex ? { room_key: roomKeyHex } : {}) });
       }
 
       // Everything below operates on the existing room.
@@ -2048,7 +2059,7 @@ const server = http.createServer(async (req, res) => {
           has_token: !!m.token_hash,
         }));
         const invites = Object.entries(room.invites || {}).map(([id, i]) => ({ id, expires_at: i.expires_at, max_uses: i.max_uses, uses: i.uses }));
-        return jres(200, { ok: true, room: { id: room.id, name: room.name, created_at: room.created_at, expires_at: room.expires_at, owner: room.owner.node, host_participates: room.host_participates !== false, password_set: !!room.password, e2ee: !!room.e2ee, members, invites } });
+        return jres(200, { ok: true, room: { id: room.id, name: room.name, created_at: room.created_at, expires_at: room.expires_at, owner: room.owner.node, host_participates: room.host_participates !== false, password_set: !!room.password, open: !!room.open, e2ee: !!room.e2ee, members, invites } });
       }
 
       if (req.method === "POST" && url.pathname === "/room/kick") {

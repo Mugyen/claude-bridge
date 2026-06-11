@@ -65,13 +65,11 @@ trap cleanup EXIT
 mkdir -p "$WORK/bin"
 printf '#!/bin/bash\n( echo "listening at bore.pub:22222" )\nexec sleep 300\n' > "$WORK/bin/bore"
 chmod +x "$WORK/bin/bore"
-PATH="$WORK/bin:$PATH" hub share --provider bore >/dev/null 2>&1
+# ── 1. room create opens connectivity itself; --code publishes under the room name
+PATH="$WORK/bin:$PATH" hub room create code-room --password rdvtestpw1234 --provider bore >/dev/null 2>&1
 # The fake bore URL isn't joinable — point the recorded share URL at the real
 # fed listener so published codes resolve to a WORKING link.
 printf 'http://127.0.0.1:%s' "$HUB_FED" > "$WORK/h-t.url"
-
-# ── 1. room invite --code (default name = room name)
-hub room create code-room --password rdvtestpw1234 >/dev/null 2>&1
 OUT=$(hub room invite --code 2>&1)
 echo "$OUT" | grep -q "join code-room" && ok "invite --code publishes under the ROOM name" || bad "invite --code: $(echo "$OUT" | tail -4)"
 [ -s "$WORK/hub.codes" ] && jq -e '."code-room"' "$WORK/hub.codes" >/dev/null 2>&1 && ok "owner token persisted for renewals" || bad "codes file missing owner token"

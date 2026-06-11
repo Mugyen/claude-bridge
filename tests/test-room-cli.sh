@@ -13,21 +13,31 @@ HUBHOME="$WORK/hub-home"; SPOKEHOME="$WORK/spoke-home"
 mkdir -p "$HUBHOME/.claude" "$SPOKEHOME/.claude"
 HUB_PORT=7493; HUB_FED=7494; SPOKE_PORT=7495
 
+# Dead rendezvous + scratch codes so room create's auto-publish never hits prod.
+RDV_ENV='CC_BRIDGE_RENDEZVOUS=http://127.0.0.1:9'
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/bore" <<'FAKE'
+#!/bin/bash
+( echo "listening at bore.pub:11111" )
+exec sleep 300
+FAKE
+chmod +x "$WORK/bin/bore"
+
 hub() {
   HOME="$HUBHOME" CC_BRIDGE_PORT=$HUB_PORT CC_BRIDGE_FED_PORT=$HUB_FED \
-  CC_BRIDGE_ROOMS_FILE="$WORK/hub.rooms" \
+  CC_BRIDGE_ROOMS_FILE="$WORK/hub.rooms" CC_BRIDGE_CODES_FILE="$WORK/hub.codes" CC_BRIDGE_RENDEZVOUS="http://127.0.0.1:9" \
   CC_BRIDGE_TUNNEL_PID="$WORK/h-t.pid" CC_BRIDGE_TUNNEL_URL="$WORK/h-t.url" \
   CC_BRIDGE_TUNNEL_LOG="$WORK/h-t.log" CC_BRIDGE_TUNNEL_PROVIDER="$WORK/h-t.provider" \
-  bash "$REPO/claude-bridge" "$@"
+  PATH="$WORK/bin:$PATH" bash "$REPO/claude-bridge" "$@"
 }
 spoke() {
   HOME="$SPOKEHOME" CC_BRIDGE_PORT=$SPOKE_PORT \
-  CC_BRIDGE_ROOMS_FILE="$WORK/spoke.rooms" \
+  CC_BRIDGE_ROOMS_FILE="$WORK/spoke.rooms" CC_BRIDGE_CODES_FILE="$WORK/spoke.codes" CC_BRIDGE_RENDEZVOUS="http://127.0.0.1:9" \
   CC_BRIDGE_TUNNEL_PID="$WORK/s-t.pid" CC_BRIDGE_TUNNEL_URL="$WORK/s-t.url" \
   CC_BRIDGE_TUNNEL_LOG="$WORK/s-t.log" CC_BRIDGE_TUNNEL_PROVIDER="$WORK/s-t.provider" \
   CC_BRIDGE_SPOKE_PIPE_PID="$WORK/s-p.pid" CC_BRIDGE_SPOKE_PIPE_PORT="$WORK/s-p.port" \
   CC_BRIDGE_SPOKE_PIPE_TICKET="$WORK/s-p.ticket" \
-  bash "$REPO/claude-bridge" "$@"
+  PATH="$WORK/bin:$PATH" bash "$REPO/claude-bridge" "$@"
 }
 cleanup() {
   kill "$(lsof -ti:$HUB_PORT -sTCP:LISTEN 2>/dev/null | head -1)" 2>/dev/null
@@ -36,23 +46,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Hub: become a hub (no tunnel needed — spoke reaches the fed port directly).
-hub share --provider cloudflared-quick >/dev/null 2>&1   # rejected provider — just ensures token+role exist? NO: use stop after
-# Simpler: start bridge + set hub role via share with a FAKE provider is messy.
-# ensure_token+role happen inside `room create` flow? No — do it via share with bore fake:
-mkdir -p "$WORK/bin"
-cat > "$WORK/bin/bore" <<'FAKE'
-#!/bin/bash
-( echo "listening at bore.pub:11111" )
-exec sleep 300
-FAKE
-chmod +x "$WORK/bin/bore"
-PATH="$WORK/bin:$PATH" hub share --provider bore >/dev/null 2>&1
-
-# ── 1. room create
-OUT=$(hub room create team-x --password secretpw12345 2>&1)
-echo "$OUT" | grep -q "r_[a-f0-9]" && ok "room create prints the room id" || bad "room create output: $(echo "$OUT" | tail -2)"
-echo "$OUT" | grep -qi "member-token auth" && ok "room create announces the auth switch" || bad "no auth-switch notice"
+# ── 1. room create — now opens connectivity itself (bore fake) + publishes a code
+OUT=$(hub room create team-x --password secretpw12345 --provider bore 2>&1)
+echo "$OUT" | grep -qi "Room \"team-x\" created" && ok "room create makes the room" || bad "room create output: $(echo "$OUT" | tail -3)"
+echo "$OUT" | grep -qi "ACTIVE — you're hosting" && ok "room create reports the room ACTIVE" || bad "no ACTIVE line"
 
 # ── 2. room invite prints a complete join link with #invite: fragment
 OUT=$(hub room invite --one-time 2>&1)
@@ -94,7 +91,7 @@ echo "$OUT" | grep -qi "deleted" && ok "room delete works with typed name" || ba
 
 # ── 8. E2EE room: key file written, invite link carries the key, joiner installs it
 export CC_BRIDGE_ROOM_KEY_FILE_HUB="$WORK/hub.roomkey" CC_BRIDGE_ROOM_KEY_FILE_SPOKE="$WORK/spoke.roomkey"
-OUT=$(CC_BRIDGE_ROOM_KEY_FILE="$WORK/hub.roomkey" hub room create vault-x --password secretpw12345 --e2ee 2>&1)
+OUT=$(CC_BRIDGE_ROOM_KEY_FILE="$WORK/hub.roomkey" hub room create vault-x --password secretpw12345 --e2ee --provider bore 2>&1)
 echo "$OUT" | grep -q "E2EE ON" && ok "e2ee create announces" || bad "e2ee create: $(echo "$OUT" | tail -2)"
 [ -s "$WORK/hub.roomkey" ] && grep -qE "^[a-f0-9]{64}$" "$WORK/hub.roomkey" && ok "e2ee: owner key file written (64-hex)" || bad "e2ee: hub key file bad"
 OUT=$(CC_BRIDGE_ROOM_KEY_FILE="$WORK/hub.roomkey" hub room invite 2>&1)

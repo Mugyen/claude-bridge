@@ -16,7 +16,7 @@ SH() { bash "$REPO_DIR/claude-bridge" "$@" 2>&1; }
 
 # help → exit 0, grouped, mentions key verbs
 OUT=$(SH help); RC=$?
-if [ $RC -eq 0 ] && echo "$OUT" | grep -q "claude-bridge" && echo "$OUT" | grep -q "doctor" && echo "$OUT" | grep -q "share"; then
+if [ $RC -eq 0 ] && echo "$OUT" | grep -q "claude-bridge" && echo "$OUT" | grep -q "doctor" && echo "$OUT" | grep -q "room"; then
   ok "help → exit 0, lists commands"
 else bad "help (rc=$RC)"; fi
 
