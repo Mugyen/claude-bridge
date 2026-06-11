@@ -103,6 +103,7 @@ case "${1:-}" in
   --uninstall|uninstall)    ACTION="uninstall" ;;
   --check|check|status)     ACTION="check" ;;
   room)                     ACTION="room" ;;
+  node|name|rename)         ACTION="node" ;;
   sessions)                 ACTION="sessions" ;;
   expose)                   ACTION="expose" ;;
   hide)                     ACTION="hide" ;;
@@ -713,6 +714,30 @@ ensure_token() {
     ok "Generated access token ($TOKEN_FILE)"
   else
     ok "Reusing existing access token"
+  fi
+}
+
+# `claude-bridge node [new-name]` — view or set THIS machine's name (the node id
+# shown as name@<node> across the room). No arg = print it; arg = set it.
+node_cmd() {
+  local want="${1:-}"
+  if [ -z "$want" ]; then
+    echo "This machine's name: $(cat "$NODE_FILE" 2>/dev/null || echo '(unset → defaults to hostname)')"
+    echo "  Change it:  claude-bridge node <new-name>"
+    return 0
+  fi
+  local clean
+  clean=$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/^-*//;s/-*$//')
+  [ -z "$clean" ] && { fail "name must contain letters/numbers (a-z, 0-9, hyphen)"; exit 1; }
+  local old; old=$(cat "$NODE_FILE" 2>/dev/null || echo "")
+  mkdir -p "$(dirname "$NODE_FILE")"; printf '%s' "$clean" > "$NODE_FILE"
+  ok "Machine name set to \"$clean\"${old:+ (was \"$old\")}"
+  [ "$clean" != "$want" ] && warn "(normalized from \"$want\" — lowercase, a-z/0-9/hyphen only)"
+  if fed_bridge_running; then fed_reload >/dev/null 2>&1 && ok "Applied to the running bridge."; fi
+  # The node id is the room MEMBERSHIP key — changing it after joining a room
+  # means the room still knows your OLD name until you re-join.
+  if [ "$(cat "$ROLE_FILE" 2>/dev/null)" = "spoke" ] && [ -n "$old" ] && [ "$old" != "$clean" ]; then
+    warn "You're in a room as \"$old\". Re-join (claude-bridge join <code>) for the room to see \"$clean\"."
   fi
 }
 
@@ -2066,9 +2091,18 @@ health_cmd() {
           ok "p2p share: spokes verify reachability via their local forwarder (doctor on the spoke)" ;;
       esac
     fi
-    local spokes; spokes=$(echo "$resp" | jq -r '[.sessions[]?|.node]|map(select(.!="local" and .!=null))|unique|.[]' 2>/dev/null || true)
-    if [ -n "$spokes" ]; then echo "  Connected spokes:"; echo "$spokes" | sed 's/^/    • /'
-    else warn "No spokes connected"; fi
+    # Member machines from the ROOM (link-based) — a joined machine shows here
+    # even with zero active sessions (session-derived lists miss those). Falls
+    # back to the session-derived view if there's no room (legacy hub).
+    local rinfo; rinfo=$(room_api GET /room/info 2>/dev/null)
+    if printf '%s' "$rinfo" | jq -e '.ok' >/dev/null 2>&1; then
+      echo "  Room members (machines):"
+      printf '%s' "$rinfo" | jq -r '.room.members[] | "    \(if .online then "●" else "○" end) \(.node)\(if .role=="owner" then " [you, owner]" else "" end)"' 2>/dev/null
+    else
+      local spokes; spokes=$(echo "$resp" | jq -r '[.sessions[]?|.node]|map(select(.!="local" and .!=null))|unique|.[]' 2>/dev/null || true)
+      if [ -n "$spokes" ]; then echo "  Connected machines:"; echo "$spokes" | sed 's/^/    • /'
+      else warn "No other machines connected"; fi
+    fi
   fi
 
   echo ""
@@ -2157,6 +2191,7 @@ JOINING & PER-MACHINE PRIVACY
   join <code>                          Enter a room by its speakable code (prompts for the password)
   join '<link>' [--password] [--expose all|none]   Or by a direct link / invite. --expose none = join with everything hidden
   room leave                           Leave a room you joined
+  node [new-name]                      Show or set THIS machine's name (shown as name@<node> across the room)
   sessions                             Your agents' zones: 🌐 EXPOSED to the room vs 🔒 hidden
   expose <name>[,<name>...] | --all    Put agents IN the room (comma-separated or --all)
   hide   <name>[,<name>...] | --all    Pull them OUT. Exposed and hidden agents can NEVER reach each other (the airlock).
@@ -2401,6 +2436,10 @@ case "$ACTION" in
 
   room)
     room_cmd "$ARG2" "${@:3}"
+    ;;
+
+  node)
+    node_cmd "$ARG2"
     ;;
 
   sessions)

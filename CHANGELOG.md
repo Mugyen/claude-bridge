@@ -11,6 +11,12 @@ _Add entries here as you work on the next version. Move them under a dated
 heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
+### Added (v2.10.0)
+- **`claude-bridge node [name]`** — view or set this machine's name (the node id shown as `name@<node>` across the room). Normalizes to lowercase a-z/0-9/hyphen; warns if you change it while in a room (re-join for the room to see the new name).
+
+### Fixed (v2.10.0)
+- **`health` now lists room MEMBER MACHINES (link-based), not session-derived spokes.** A machine that joined a room with zero active sessions used to be invisible in `health` ("No spokes connected") until a session registered; it now shows with ●/○ online state from the link layer (matching `room members`). Session naming reminder: set `CC_BRIDGE_SESSION=<name>` for a stable session name, or tell the agent to re-register under a new name.
+
 ### Changed (v2.10.0 — room-first UX, BREAKING)
 - **The room is now the single user-facing primitive.** `room start` opens a room (auto-creating a password-protected default named after the machine the first time) and `room stop` closes it — these replace `share`/`stop-share`, which are removed along with `unlink` (→ `room leave`). Hub/spoke/standalone vocabulary is hidden from all output. One room per machine (tier-0).
 - **Password by default.** `room create`/`room start` generate and show a strong password once; `--open` makes a no-password room (credential-less join). Creating a room prints a tip to use `room invite` for one-time tokens instead of resharing the password.

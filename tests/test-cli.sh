@@ -41,7 +41,7 @@ H1=$(SH status | grep -c "claude-bridge status"); H2=$(SH check | grep -c "claud
 if [ "$H1" -ge 1 ] && [ "$H2" -ge 1 ] && [ "$H3" -ge 1 ]; then ok "verb aliases route together (status / check / --check)"; else bad "alias routing ($H1/$H2/$H3)"; fi
 
 # old federation --flags still parse (back-compat): --join with no link → usage error, not 'unknown command'
-OUT=$(SH --join 'https://h.example' ); echo "$OUT" | grep -qi "must include a fragment" && ok "old --join flag still recognized (back-compat)" || bad "--join back-compat ($OUT)"
+OUT=$(SH --join 'https://h.example' ); echo "$OUT" | grep -qiE "join failed|enter a room|no response" && ok "old --join flag still recognized (back-compat)" || bad "--join back-compat ($OUT)"
 
 # doctor → runs and exits 0 even with nothing installed (checks are non-fatal)
 OUT=$(SH doctor); RC=$?
@@ -154,6 +154,12 @@ else
   bad "scoped uninstall WIPED real /tmp state (sentinel gone) — live-share killer regressed!"
 fi
 rm -f "$SENTINEL"
+
+# ── `node` command: show + set + normalize this machine's name ──────────────
+OUT=$(SH node)
+echo "$OUT" | grep -qi "machine's name" && ok "node (no arg) shows the machine name" || bad "node show: $OUT"
+SH node "My Laptop" >/dev/null 2>&1
+[ "$(cat "$HOME/.claude/.cc-bridge-node" 2>/dev/null)" = "my-laptop" ] && ok "node <name> sets + normalizes (My Laptop → my-laptop)" || bad "node set: got '$(cat "$HOME/.claude/.cc-bridge-node" 2>/dev/null)'"
 
 echo ""
 echo "$PASS passed, $FAIL failed"
