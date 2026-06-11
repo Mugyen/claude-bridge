@@ -64,6 +64,10 @@ const NODE_FILE = process.env.CC_BRIDGE_NODE_FILE ?? `${HOME}/.claude/.cc-bridge
 // Written by `join --expose <all|none>`; per-session override via register() or
 // the loopback /sessions/expose endpoint (CLI: claude-bridge expose/hide <name>).
 const EXPOSE_FILE = process.env.CC_BRIDGE_EXPOSE_FILE ?? `${HOME}/.claude/.cc-bridge-expose`;
+// E2EE room key (3b): 32-byte hex. Members get it via the invite-link fragment
+// or password-unwrapped from /link/join; the CLI writes it here (0600). The hub
+// keeps its copy inside rooms.json (the owner is a participant in 3b).
+const ROOM_KEY_FILE = process.env.CC_BRIDGE_ROOM_KEY_FILE ?? `${HOME}/.claude/.cc-bridge-room-key`;
 
 function sanitizeNode(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "") || "node";
@@ -80,6 +84,7 @@ const FED = {
   node: sanitizeNode(process.env.CC_BRIDGE_NODE ?? os.hostname()),
   hubUrl: null, // spoke only
   exposeDefault: "all", // "all" | "none" — see EXPOSE_FILE
+  roomKey: null, // Buffer(32) when this member holds an E2EE room key
 };
 
 // HUB side: node → { res:SSEResponse|null, sessions:[{name,description}], lastSeen:number }
@@ -138,6 +143,8 @@ function loadFedConfig() {
   FED.node = sanitizeNode(node ?? process.env.CC_BRIDGE_NODE ?? os.hostname());
   FED.hubUrl = hubUrl;
   FED.exposeDefault = readFileTrim(EXPOSE_FILE) === "none" ? "none" : "all";
+  const rk = readFileTrim(ROOM_KEY_FILE);
+  FED.roomKey = rk && /^[a-f0-9]{64}$/.test(rk) ? Buffer.from(rk, "hex") : null;
 
   // Role inference: explicit role file wins; else token+hubUrl ⇒ spoke, token alone ⇒ hub.
   if (role === "hub" || role === "spoke" || role === "standalone") {
@@ -443,6 +450,43 @@ function joinRateOk() {
   return _join.count <= JOIN_MAX;
 }
 
+// ── E2EE (3b): chacha20-poly1305 via node:crypto — ZERO dependencies ─────────
+// Messages bound for another machine are sealed by the ORIGIN bridge and opened
+// by the DESTINATION bridge; a relaying hub passes `enc` blobs it never opens
+// (in 3b the hub holds the key as room owner, but the relay path doesn't use it
+// for spoke↔spoke traffic — and phase 6's blind hosting needs exactly that).
+// Sessions/hooks never touch crypto. Wire shape: enc = { alg, n, ct } (hex).
+function e2eeKey() {
+  if (FED.roomKey) return FED.roomKey;
+  const r = activeRoom();
+  if (r && r.e2ee && typeof r.key === "string" && /^[a-f0-9]{64}$/.test(r.key)) return Buffer.from(r.key, "hex");
+  return null;
+}
+function encPayload(text, key) {
+  const n = crypto.randomBytes(12);
+  const ci = crypto.createCipheriv("chacha20-poly1305", key, n, { authTagLength: 16 });
+  const ct = Buffer.concat([ci.update(String(text), "utf8"), ci.final(), ci.getAuthTag()]);
+  return { alg: "chacha20-poly1305", n: n.toString("hex"), ct: ct.toString("hex") };
+}
+function decPayload(enc, key) {
+  try {
+    if (!enc || enc.alg !== "chacha20-poly1305") return null;
+    const n = Buffer.from(enc.n, "hex");
+    const buf = Buffer.from(enc.ct, "hex");
+    const di = crypto.createDecipheriv("chacha20-poly1305", key, n, { authTagLength: 16 });
+    di.setAuthTag(buf.subarray(buf.length - 16));
+    return Buffer.concat([di.update(buf.subarray(0, buf.length - 16)), di.final()]).toString("utf8");
+  } catch { return null; }
+}
+// Wrap/unwrap the ROOM KEY itself under a password-derived key (scrypt, with a
+// DIFFERENT salt than the join-gate hash — the hub knows the gate hash but can
+// never derive the wrap key without the password).
+function wrapRoomKey(roomKeyHex, password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const wk = crypto.scryptSync(String(password), Buffer.from(salt, "hex"), 32, SCRYPT_PARAMS);
+  return { salt, ...encPayload(roomKeyHex, wk) };
+}
+
 /** Drop a node's live link (kick/rotate/delete): close stream, prune queues. */
 function severSpoke(node, reason) {
   const sp = spokes.get(node);
@@ -541,6 +585,20 @@ function injectRemote(fwd) {
     console.log(`${ts()} 🛡 dropped inbound ${fwd.kind} for HIDDEN session "${fwd.to}" (not exposed to the room)`);
     return;
   }
+  // E2EE unwrap: if the payload is sealed and we hold the room key, open it so
+  // local delivery (hooks, /pending, check_inbox) sees plaintext. No key / bad
+  // key → the message stays opaque (renders as "[encrypted]").
+  if (fwd.enc) {
+    const k = e2eeKey();
+    const plain = k ? decPayload(fwd.enc, k) : null;
+    if (plain !== null) {
+      if (fwd.kind === "question") { fwd = { ...fwd, question: plain }; delete fwd.enc; }
+      else if (fwd.kind === "notice") { fwd = { ...fwd, content: plain }; delete fwd.enc; }
+      else if (fwd.kind === "answer") { fwd = { ...fwd, answer: plain }; delete fwd.enc; }
+    } else if (k) {
+      console.log(`${ts()} 🔐 inbound ${fwd.kind} ${fwd.id} failed to decrypt (wrong room key?) — kept opaque`);
+    }
+  }
   if (fwd.kind === "question") {
     if (messages.has(fwd.id)) return; // idempotent re-forward
     const msg = {
@@ -567,6 +625,7 @@ function injectRemote(fwd) {
     pushThread(fwd.from, fwd.to, msg.id);
     console.log(`${ts()} ⇄ injected remote notice ${msg.id} ${fwd.from}@${fwd.originNode} → ${fwd.to}`);
   } else if (fwd.kind === "answer") {
+    if (typeof fwd.answer !== "string") return; // enc answer we couldn't open — leave pending
     const msg = messages.get(fwd.id); // the original question, queued on this node
     if (msg && msg.answer === null) { // idempotent: already-answered is a no-op
       msg.answer = fwd.answer;
@@ -627,7 +686,9 @@ function routeForward(payload) {
       } else {
         const sp = spokes.get(dest);
         if (sp && sp.res && !sp.res.destroyed) {
-          linkSend(sp, "forward", { kind: "answer", id: payload.id, answer: payload.answer, ts: payload.ts });
+          // Preserve `enc` — a sealed answer must reach the asker sealed (the
+          // hub relay never opens spoke↔spoke traffic).
+          linkSend(sp, "forward", { kind: "answer", id: payload.id, ts: payload.ts, ...(payload.enc ? { enc: payload.enc } : { answer: payload.answer }) });
         }
         // If the asker's spoke is gone, the answer is dropped (asker timed out).
       }
@@ -710,10 +771,15 @@ function markPendingRelay(payload, node) {
 }
 
 function pushForwardToSpoke(sp, m) {
+  // E2EE: locally-stored messages are plaintext (decrypted at inject) — re-seal
+  // fresh on every push (never reuse a nonce). Already-opaque ones pass as-is.
+  const k = e2eeKey();
   if (m.kind === "notice") {
-    linkSend(sp, "forward", { kind: "notice", id: m.id, from: m.from, to: m.to, content: m.content, ts: m.ts, originNode: m.origin?.node ?? FED.node, ...(m.enc ? { enc: m.enc } : {}) });
+    const body = m.enc ? { enc: m.enc } : (k && m.content != null ? { enc: encPayload(m.content, k) } : { content: m.content });
+    linkSend(sp, "forward", { kind: "notice", id: m.id, from: m.from, to: m.to, ts: m.ts, originNode: m.origin?.node ?? FED.node, ...body });
   } else {
-    linkSend(sp, "forward", { kind: "question", id: m.id, from: m.from, to: m.to, question: m.question, ts: m.ts, originNode: m.origin?.node ?? FED.node, ...(m.enc ? { enc: m.enc } : {}) });
+    const body = m.enc ? { enc: m.enc } : (k && m.question != null ? { enc: encPayload(m.question, k) } : { question: m.question });
+    linkSend(sp, "forward", { kind: "question", id: m.id, from: m.from, to: m.to, ts: m.ts, originNode: m.origin?.node ?? FED.node, ...body });
   }
 }
 
@@ -957,12 +1023,15 @@ function flushSpokeOutbound() {
     if (!originLocal) continue;
     const t = resolveTarget(m.to);
     if (t.kind !== "remote") continue;
+    const k = e2eeKey();
     if (m.kind === "notice") {
       if (m.delivered) continue;
-      hubPost("/link/forward", { kind: "notice", id: m.id, from: m.from, to: m.to, content: m.content, ts: m.ts, originNode: FED.node });
+      const body = k && m.content != null ? { enc: encPayload(m.content, k) } : { content: m.content };
+      hubPost("/link/forward", { kind: "notice", id: m.id, from: m.from, to: m.to, ts: m.ts, originNode: FED.node, ...body });
     } else {
       if (m.answer !== null) continue;
-      hubPost("/link/forward", { kind: "question", id: m.id, from: m.from, to: m.to, question: m.question, ts: m.ts, originNode: FED.node });
+      const body = k && m.question != null ? { enc: encPayload(m.question, k) } : { question: m.question };
+      hubPost("/link/forward", { kind: "question", id: m.id, from: m.from, to: m.to, ts: m.ts, originNode: FED.node, ...body });
     }
   }
 }
@@ -1226,8 +1295,13 @@ async function executeTool(sseId, name, args) {
 
       if (target.kind === "remote") {
         // Relay toward the owning node; the answer routes home via relayAnswer.
-        console.log(`${ts()} ? ${myName} → ${target.name}@${target.node} (remote, ${question.length} chars) ${id}`);
-        relayForward(target.node, { kind: "question", id, from: myName, to: target.name, question, ts: msg.ts, originNode: FED.node });
+        // E2EE: seal the question — only `enc` crosses the wire.
+        const k = e2eeKey();
+        const fwdQ = k
+          ? { kind: "question", id, from: myName, to: target.name, enc: encPayload(question, k), ts: msg.ts, originNode: FED.node }
+          : { kind: "question", id, from: myName, to: target.name, question, ts: msg.ts, originNode: FED.node };
+        console.log(`${ts()} ? ${myName} → ${target.name}@${target.node} (remote${k ? ", e2ee" : ""}, ${question.length} chars) ${id}`);
+        relayForward(target.node, fwdQ);
       } else {
         console.log(`${ts()} ? ${myName} → ${target.name} (${question.length} chars) ${id}`);
       }
@@ -1267,7 +1341,10 @@ async function executeTool(sseId, name, args) {
       console.log(`${ts()} ← reply to ${msg.id} (${args.answer.length} chars)`);
       // If the question originated on another node, route the answer home.
       if (msg.origin && msg.origin.node && msg.origin.node !== FED.node) {
-        relayAnswer(msg.origin.node, { kind: "answer", id: msg.id, answer: msg.answer, ts: msg.answeredAt });
+        const k = e2eeKey();
+        relayAnswer(msg.origin.node, k
+          ? { kind: "answer", id: msg.id, enc: encPayload(msg.answer, k), ts: msg.answeredAt }
+          : { kind: "answer", id: msg.id, answer: msg.answer, ts: msg.answeredAt });
       }
       return { ok: true, message_id: msg.id };
     }
@@ -1295,8 +1372,12 @@ async function executeTool(sseId, name, args) {
       pushThread(myName, msg.to, id);
 
       if (target.kind === "remote") {
-        console.log(`${ts()} 📨 ${myName} → ${target.name}@${target.node} (remote notice, ${content.length} chars) ${id}`);
-        relayForward(target.node, { kind: "notice", id, from: myName, to: target.name, content, ts: msg.ts, originNode: FED.node });
+        const k = e2eeKey();
+        const fwdN = k
+          ? { kind: "notice", id, from: myName, to: target.name, enc: encPayload(content, k), ts: msg.ts, originNode: FED.node }
+          : { kind: "notice", id, from: myName, to: target.name, content, ts: msg.ts, originNode: FED.node };
+        console.log(`${ts()} 📨 ${myName} → ${target.name}@${target.node} (remote notice${k ? ", e2ee" : ""}, ${content.length} chars) ${id}`);
+        relayForward(target.node, fwdN);
         return { ok: true, message_id: id, to: `${target.name}@${target.node}`, target_online: true };
       }
 
@@ -1470,7 +1551,15 @@ async function handleLinkRequest(req, res, url) {
     saveRooms();
     console.log(`${ts()} 🚪 "${jnode}" joined room "${room.name}" via ${via.split(":")[0]}${existing ? " (token rotated)" : ""}`);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, member_token: memberToken, room: { id: room.id, name: room.name }, node: FED.node }));
+    res.end(JSON.stringify({
+      ok: true, member_token: memberToken,
+      room: { id: room.id, name: room.name, e2ee: !!room.e2ee },
+      node: FED.node,
+      // Password joiners can unwrap this locally (scrypt of the password they
+      // just typed, salt included). Invite joiners get the key in the link
+      // fragment instead — it never touches any server.
+      ...(room.e2ee && via === "password" && room.wrapped_key ? { wrapped_key: room.wrapped_key } : {}),
+    }));
     return;
   }
 
@@ -1921,10 +2010,21 @@ const server = http.createServer(async (req, res) => {
           const salt = crypto.randomBytes(16).toString("hex");
           rec.password = { salt, hash: pwHash(rp.password, salt) };
         }
+        let roomKeyHex = null;
+        if (rp.e2ee === true) {
+          // Random key (not password-derived — stronger, and rotatable later).
+          // The hub stores it raw in rooms.json: in 3b the owner IS a participant
+          // (0600 file on their own disk). Members receive it via the invite-link
+          // fragment, or password-wrapped (scrypt, separate salt) at /link/join.
+          roomKeyHex = crypto.randomBytes(32).toString("hex");
+          rec.e2ee = true;
+          rec.key = roomKeyHex;
+          if (typeof rp.password === "string" && rp.password) rec.wrapped_key = wrapRoomKey(roomKeyHex, rp.password);
+        }
         ROOMS.rooms[id] = rec;
         saveRooms();
         console.log(`${ts()} 🚪 room "${rec.name}" created (${id}) — member-token auth now ACTIVE (legacy shared token retired)`);
-        return jres(200, { ok: true, room: { id, name: rec.name, owner: FED.node, expires_at: rec.expires_at, password_set: !!rec.password } });
+        return jres(200, { ok: true, room: { id, name: rec.name, owner: FED.node, expires_at: rec.expires_at, password_set: !!rec.password, e2ee: !!rec.e2ee }, ...(roomKeyHex ? { room_key: roomKeyHex } : {}) });
       }
 
       // Everything below operates on the existing room.
@@ -1948,7 +2048,7 @@ const server = http.createServer(async (req, res) => {
           has_token: !!m.token_hash,
         }));
         const invites = Object.entries(room.invites || {}).map(([id, i]) => ({ id, expires_at: i.expires_at, max_uses: i.max_uses, uses: i.uses }));
-        return jres(200, { ok: true, room: { id: room.id, name: room.name, created_at: room.created_at, expires_at: room.expires_at, owner: room.owner.node, host_participates: room.host_participates !== false, password_set: !!room.password, members, invites } });
+        return jres(200, { ok: true, room: { id: room.id, name: room.name, created_at: room.created_at, expires_at: room.expires_at, owner: room.owner.node, host_participates: room.host_participates !== false, password_set: !!room.password, e2ee: !!room.e2ee, members, invites } });
       }
 
       if (req.method === "POST" && url.pathname === "/room/kick") {

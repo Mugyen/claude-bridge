@@ -18,6 +18,12 @@ heading when you tag the release and bump `package.json` + the banner in
 - **Room lifecycle**: `room members/info/rotate <node>/rotate-password/delete <name>` (typed-name confirmation); TTL rooms self-expire (lazy + GC sweep). Kick/rotate/delete sever the member's live stream immediately. `health`/`doctor` show a room line.
 - **E2EE envelope reserved (3b)**: messages can carry an opaque `enc` payload end-to-end through every relay/queue path without the hub reading it — the 3b encryption work slots in without protocol changes.
 
+### Added (v2.9.0 — E2EE rooms, phase 3b)
+- **`room create --e2ee`** — member↔member messages are sealed end-to-end (chacha20-poly1305): the origin bridge encrypts, the destination bridge decrypts, and a relaying hub passes opaque `enc` blobs — verified: a spoke↔spoke exchange leaves NOTHING readable in the hub's store. **Zero new dependencies** (node:crypto AEAD + scrypt; the researched libsodium/Argon2id route proved unnecessary).
+- **Key distribution without servers seeing it**: invite links carry the room key in the URL fragment (`#invite:<code>:<key>` — fragments never reach servers); password joiners receive the key wrapped under a scrypt-derived key (separate salt from the join gate — the hub stores the wrapped blob it cannot open). Keys live in `~/.claude/.cc-bridge-room-key` (0600), installed automatically by `join`, removed on `unlink`/uninstall.
+- Wrong-key members degrade safely: messages surface as `[encrypted]`, plaintext never appears. Non-E2EE rooms are byte-for-byte unaffected.
+- Documented limitation: kick revokes access, not knowledge — a kicked member still holds the key (transport 401s keep them out); recreate the room to rotate.
+
 ### Added (v2.9.0 — privacy)
 - **`room create --host-only`** — host a room for a community WITHOUT participating: the hub relays everything, but its own sessions are never advertised, can't be reached from the room (even by forged forwards), and can't message it. Local sessions keep full normal bridge life with each other.
 - **Per-session exposure + the AIRLOCK** — when linked to a room, each local session is 🌐 EXPOSED or 🔒 hidden. Hidden sessions: invisible in the roster, unreachable (enforced at delivery, not just by roster filtering), and mute toward the room. **Airlock (always on): exposed and hidden sessions cannot exchange ANYTHING through the bridge (ask/notify/threads/scratchpads, both directions)** — the room→gateway→private-sessions social-engineering path is mechanically impossible. Zones are fully functional within themselves.

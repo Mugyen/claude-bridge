@@ -39,11 +39,13 @@ export class TestBridge {
     const hub = `${this._tmp}.hub`;
     const node = `${this._tmp}.node`;
     const expose = `${this._tmp}.expose`;
+    const roomkey = `${this._tmp}.roomkey`;
     fs.writeFileSync(tok, f.token || "");
     fs.writeFileSync(role, f.role || "");
     fs.writeFileSync(hub, f.hub || "");
     fs.writeFileSync(node, f.node || "");
     fs.writeFileSync(expose, f.expose || "");
+    fs.writeFileSync(roomkey, f.roomKey || "");
     return {
       CC_BRIDGE_TOKEN_FILE: f.token ? tok : `${this._tmp}.notoken`,
       CC_BRIDGE_ROLE_FILE: role,
@@ -54,6 +56,7 @@ export class TestBridge {
       // and tests must never write the real ~/.claude/.cc-bridge-rooms.json.
       CC_BRIDGE_ROOMS_FILE: `${this._tmp}.rooms`,
       CC_BRIDGE_EXPOSE_FILE: expose,
+      CC_BRIDGE_ROOM_KEY_FILE: roomkey,
     };
   }
 
@@ -266,7 +269,7 @@ export class TestBridge {
     // NB: `.rooms` is deliberately NOT deleted here — stop()+start() models a
     // restart, and room persistence across restarts is a tested guarantee.
     // The file is tiny and the path is pid-unique, so the tmpdir leak is benign.
-    for (const ext of [".token", ".role", ".hub", ".node", ".expose"]) {
+    for (const ext of [".token", ".role", ".hub", ".node", ".expose", ".roomkey"]) {
       try { fs.unlinkSync(`${this._tmp}${ext}`); } catch {}
     }
   }

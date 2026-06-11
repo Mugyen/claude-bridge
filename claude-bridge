@@ -51,6 +51,9 @@ P2P_KEY_FILE="${CC_BRIDGE_P2P_KEY:-$HOME/.claude/.cc-bridge-p2p-key}"
 # Default exposure policy for sessions when this bridge is federated: "all"
 # (legacy) or "none" (privacy-first). Written by `join --expose <all|none>`.
 EXPOSE_FILE="${CC_BRIDGE_EXPOSE_FILE:-$HOME/.claude/.cc-bridge-expose}"
+# E2EE room key (3b): written at `room create --e2ee` (owner) or at join (members:
+# from the invite-link fragment, or password-unwrapped). chmod 600.
+ROOM_KEY_FILE="${CC_BRIDGE_ROOM_KEY_FILE:-$HOME/.claude/.cc-bridge-room-key}"
 
 # Read version from package.json
 VERSION=$(jq -r '.version // "unknown"' "$REPO_DIR/package.json" 2>/dev/null || echo "unknown")
@@ -1224,10 +1227,11 @@ room_cmd() {
   local resp
   case "$sub" in
     create)
-      local name="" ttl_s="" pw="" pw_set=0 host_only="" args=("$@") i=0
+      local name="" ttl_s="" pw="" pw_set=0 host_only="" e2ee="" args=("$@") i=0
       while [ $i -lt ${#args[@]} ]; do
         case "${args[$i]}" in
           --host-only) host_only=true ;;
+          --e2ee) e2ee=true ;;
           --ttl) i=$((i+1)); ttl_s=$(parse_duration "${args[$i]:-}") || { fail "bad --ttl (use 90s/15m/2h/7d)"; exit 1; } ;;
           --password)
             pw_set=1
@@ -1244,8 +1248,8 @@ room_cmd() {
         pw=$(openssl rand -hex 12 2>/dev/null || node -e "console.log(require('crypto').randomBytes(12).toString('hex'))")
       fi
       local body
-      body=$(jq -nc --arg n "$name" --arg p "$pw" --arg t "${ttl_s:-}" --arg h "$host_only" \
-        '{name:$n} + (if $p != "" then {password:$p} else {} end) + (if $t != "" then {ttl_seconds:($t|tonumber)} else {} end) + (if $h != "" then {host_only:true} else {} end)')
+      body=$(jq -nc --arg n "$name" --arg p "$pw" --arg t "${ttl_s:-}" --arg h "$host_only" --arg e "$e2ee" \
+        '{name:$n} + (if $p != "" then {password:$p} else {} end) + (if $t != "" then {ttl_seconds:($t|tonumber)} else {} end) + (if $h != "" then {host_only:true} else {} end) + (if $e != "" then {e2ee:true} else {} end)')
       resp=$(room_api POST /room/create "$body")
       printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
       ok "Room \"$name\" created ($(printf '%s' "$resp" | jq -r '.room.id'))"
@@ -1254,6 +1258,13 @@ room_cmd() {
       if [ -n "$host_only" ]; then
         ok "HOST-ONLY: this machine relays the room but its own sessions are NOT participants"
         ok "(invisible to members, unable to message the room; local sessions unaffected locally)"
+      fi
+      if [ -n "$e2ee" ]; then
+        printf '%s' "$(printf '%s' "$resp" | jq -r '.room_key')" > "$ROOM_KEY_FILE"
+        chmod 600 "$ROOM_KEY_FILE"
+        ok "E2EE ON 🔐 — messages between members are sealed end-to-end (room key saved: $ROOM_KEY_FILE)"
+        warn "Members get the key automatically (invite links carry it; password joiners unwrap it)."
+        warn "Note: kick revokes ACCESS, not knowledge — a kicked member still holds the key. Recreate the room to rotate."
       fi
       if [ "$pw_set" = 1 ]; then
         echo ""
@@ -1276,17 +1287,22 @@ room_cmd() {
         '(if $o != "" then {one_time:true} else {} end) + (if $e != "" then {expires_in_seconds:($e|tonumber)} else {} end)')
       resp=$(room_api POST /room/invite "$body")
       printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
-      local code url
+      local code url keyfrag=""
       code=$(printf '%s' "$resp" | jq -r '.invite_code')
       url=$(cat "$TUNNEL_URL_FILE" 2>/dev/null || echo "")
       if [ -z "$url" ]; then
         warn "Not currently sharing — run 'claude-bridge share' first, then send this link"
         url="<your-share-url>"
       fi
+      # E2EE room: the key rides the link FRAGMENT (never sent to any server).
+      if room_api GET /room/info | jq -e '.room.e2ee' >/dev/null 2>&1 && [ -s "$ROOM_KEY_FILE" ]; then
+        keyfrag=":$(cat "$ROOM_KEY_FILE")"
+        warn "E2EE room: this link includes the room key — the WHOLE link is the secret."
+      fi
       ok "Invite minted${one:+ (one-time)} — expires $(date -r $(($(printf '%s' "$resp" | jq -r '.expires_at') / 1000)) 2>/dev/null || printf '%s' "$resp" | jq -r '.expires_at')"
       echo ""
       echo "  Share this ONE command:"
-      echo "    claude-bridge join '${url}#invite:${code}'"
+      echo "    claude-bridge join '${url}#invite:${code}${keyfrag}'"
       echo ""
       ;;
     members|list)
@@ -1433,8 +1449,16 @@ join_hub() {
   # Room joins: exchange an invite code ('#invite:<code>' fragment) or a password
   # (--password; never carried in a link) for this machine's PER-MEMBER token via
   # POST /link/join. Legacy links ('#<token>') skip this and use the token as-is.
-  local join_kind="" join_val=""
-  case "$token" in invite:*) join_kind="invite_code"; join_val="${token#invite:}" ;; esac
+  local join_kind="" join_val="" link_room_key=""
+  case "$token" in
+    invite:*)
+      join_kind="invite_code"
+      join_val="${token#invite:}"
+      # '#invite:<code>:<roomkey>' — E2EE rooms carry the key in the fragment.
+      case "$join_val" in
+        *:*) link_room_key="${join_val#*:}"; join_val="${join_val%%:*}" ;;
+      esac ;;
+  esac
   if [ "${JOIN_PW_MODE:-0}" = "1" ]; then
     join_kind="password"
     join_val="${JOIN_PASSWORD:-}"
@@ -1458,6 +1482,30 @@ join_hub() {
       exit 1
     fi
     ok "Joined room \"$(printf '%s' "$resp" | jq -r '.room.name // "?"')\" as member \"$jnode\" (received a personal token)"
+    # E2EE key handling: link fragment (invite) or password-unwrap (wrapped_key).
+    if [ -n "$link_room_key" ]; then
+      printf '%s' "$link_room_key" > "$ROOM_KEY_FILE"; chmod 600 "$ROOM_KEY_FILE"
+      ok "E2EE 🔐 room key installed from the invite link"
+    elif printf '%s' "$resp" | jq -e '.wrapped_key' >/dev/null 2>&1; then
+      local rk
+      rk=$(printf '%s' "$resp" | jq -c '.wrapped_key' | JOIN_PW="$join_val" node -e '
+        const c = require("crypto");
+        const w = JSON.parse(require("fs").readFileSync(0, "utf8"));
+        const wk = c.scryptSync(process.env.JOIN_PW, Buffer.from(w.salt, "hex"), 32, {N:16384, r:8, p:1, maxmem: 64*1024*1024});
+        const buf = Buffer.from(w.ct, "hex");
+        const di = c.createDecipheriv("chacha20-poly1305", wk, Buffer.from(w.n, "hex"), {authTagLength:16});
+        di.setAuthTag(buf.subarray(buf.length-16));
+        process.stdout.write(Buffer.concat([di.update(buf.subarray(0, buf.length-16)), di.final()]).toString("utf8"));
+      ' 2>/dev/null || true)
+      if [ -n "$rk" ]; then
+        printf '%s' "$rk" > "$ROOM_KEY_FILE"; chmod 600 "$ROOM_KEY_FILE"
+        ok "E2EE 🔐 room key unwrapped with your password and installed"
+      else
+        warn "E2EE room, but the key could not be unwrapped — encrypted messages will show as [encrypted]"
+      fi
+    elif [ "$(printf '%s' "$resp" | jq -r '.room.e2ee')" = "true" ]; then
+      warn "E2EE room, but this invite link carries no key — ask the owner for a fresh 'room invite' link"
+    fi
     token="$mtok"
   fi
 
@@ -1504,7 +1552,7 @@ unlink_hub() {
   # ORDER MATTERS: the hub was notified ABOVE (over the still-alive forwarder for
   # p2p links) — only now is it safe to kill the local pipe.
   kill_recorded "$SPOKE_PIPE_PID_FILE" "p2p forwarder"
-  rm -f "$SPOKE_PIPE_PORT_FILE" "$SPOKE_PIPE_TICKET_FILE"
+  rm -f "$SPOKE_PIPE_PORT_FILE" "$SPOKE_PIPE_TICKET_FILE" "$ROOM_KEY_FILE"
   fed_reload && ok "Unlinked — back to standalone (local sessions unaffected)"
 }
 
@@ -1880,9 +1928,10 @@ FEDERATION (link bridges across machines)
   stop-share                           Hub stops sharing — verified teardown (kills tunnel / serve off), keeps bridge + token
 
 ROOMS (per-member tokens on the hub — kick one machine without rotating everyone)
-  room create <name> [--ttl <dur>] [--password [value]] [--host-only]
+  room create <name> [--ttl <dur>] [--password [value]] [--host-only] [--e2ee]
                                                           Create the room (owner = this machine; auth switches to member tokens).
-                                                          --host-only: relay for the community WITHOUT your sessions participating
+                                                          --host-only: relay without your sessions participating
+                                                          --e2ee: seal member↔member messages end-to-end (zero-dep chacha20)
   room invite [--one-time] [--expires <dur>]              Mint an invite + print the full join link (default 7d, unlimited uses)
   room members | info                                     Roster with online state · room summary
   room kick <node> | rotate <node> | rotate-password      Revoke one machine · re-key one member · re-key the password gate
@@ -1989,7 +2038,7 @@ case "$ACTION" in
     remove_claude_md_legacy
     remove_desktop
     # Federation config files (hardcoded fallback in case the manifest is missing).
-    rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" "$P2P_KEY_FILE" "$EXPOSE_FILE" && ok "Federation config removed (token, role, hub, node, p2p key, expose policy)"
+    rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" "$P2P_KEY_FILE" "$EXPOSE_FILE" "$ROOM_KEY_FILE" && ok "Federation config removed (token, role, hub, node, p2p key, expose policy, room key)"
     # Remove the claude-bridge CLI symlink from PATH (manifest handles the tracked
     # one; this hardcoded fallback covers both install locations).
     UNSUDO="sudo"; [ -t 0 ] || UNSUDO="sudo -n"   # never hang on a password prompt non-interactively

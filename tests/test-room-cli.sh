@@ -92,5 +92,19 @@ echo "$OUT" | grep -qi "confirm" && ok "delete with wrong name refused" || bad "
 OUT=$(hub room delete team-x 2>&1)
 echo "$OUT" | grep -qi "deleted" && ok "room delete works with typed name" || bad "delete: $OUT"
 
+# ── 8. E2EE room: key file written, invite link carries the key, joiner installs it
+export CC_BRIDGE_ROOM_KEY_FILE_HUB="$WORK/hub.roomkey" CC_BRIDGE_ROOM_KEY_FILE_SPOKE="$WORK/spoke.roomkey"
+OUT=$(CC_BRIDGE_ROOM_KEY_FILE="$WORK/hub.roomkey" hub room create vault-x --password secretpw12345 --e2ee 2>&1)
+echo "$OUT" | grep -q "E2EE ON" && ok "e2ee create announces" || bad "e2ee create: $(echo "$OUT" | tail -2)"
+[ -s "$WORK/hub.roomkey" ] && grep -qE "^[a-f0-9]{64}$" "$WORK/hub.roomkey" && ok "e2ee: owner key file written (64-hex)" || bad "e2ee: hub key file bad"
+OUT=$(CC_BRIDGE_ROOM_KEY_FILE="$WORK/hub.roomkey" hub room invite 2>&1)
+ELINK=$(echo "$OUT" | grep -oE "'[^']+#invite:[a-f0-9]+:[a-f0-9]{64}'" | head -1 | tr -d "'")
+[ -n "$ELINK" ] && ok "e2ee: invite link carries code AND key in the fragment" || bad "e2ee link missing key: $(echo "$OUT" | tail -3)"
+EJOIN="http://127.0.0.1:${HUB_FED}#${ELINK#*#}"
+OUT=$(CC_BRIDGE_ROOM_KEY_FILE="$WORK/spoke.roomkey" spoke join "$EJOIN" --node spokee2ee 2>&1)
+echo "$OUT" | grep -q "room key installed" && ok "e2ee: joiner installed the key from the link" || bad "e2ee join: $(echo "$OUT" | tail -3)"
+[ "$(cat "$WORK/spoke.roomkey" 2>/dev/null)" = "$(cat "$WORK/hub.roomkey")" ] && ok "e2ee: spoke key matches owner key" || bad "e2ee: key mismatch"
+CC_BRIDGE_ROOM_KEY_FILE="$WORK/hub.roomkey" hub room delete vault-x >/dev/null 2>&1
+
 echo ""; echo "test-room-cli: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
