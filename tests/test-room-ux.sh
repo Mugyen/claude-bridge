@@ -76,10 +76,18 @@ OUT=$(hub room delete "$RN" 2>&1)
 echo "$OUT" | grep -qi "deleted" && ok "room delete works" || bad "delete: $OUT"
 [ -z "$(codeget)" ] && ok "delete released the join code (no stale code left)" || bad "stale code after delete"
 
-# ── 8. --open room: no password
+# ── 8. --open room: no password; bare join (no creds) succeeds via the auto path
 OUT=$(hub room create openroom --open --provider bore 2>&1)
 echo "$OUT" | grep -qi "OPEN room" && ok "--open room announces no-password" || bad "open: $(echo "$OUT"|tail -3)"
+OUT=$(spoke join "http://127.0.0.1:${HUB_FED}" --node spokeopen 2>&1)
+echo "$OUT" | grep -qi "joined room" && ok "bare join (no password) works on an --open room (auto path)" || bad "open join: $(echo "$OUT"|tail -3)"
+spoke room leave >/dev/null 2>&1
+# password room: a no-credential join must report password_required (not a hard fragment error)
 hub room delete openroom >/dev/null 2>&1
+hub room create pwroom --password roompw12345 --provider bore >/dev/null 2>&1
+OUT=$(printf '%s' "$(curl -s --max-time 6 -X POST "http://127.0.0.1:${HUB_FED}/link/join" -H 'Content-Type: application/json' -d '{"node":"probe"}')")
+echo "$OUT" | grep -q '"password_required":true' && ok "credential-less join to a password room signals password_required (→ prompt)" || bad "no password_required signal: $OUT"
+hub room delete pwroom >/dev/null 2>&1
 
 # ── 9. comma + --all expose/hide (needs a fresh room + a couple sessions; use the API directly)
 #    Lightweight: just assert the CLI parses comma + --all without crashing and reports per-name.

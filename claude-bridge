@@ -1610,11 +1610,10 @@ join_hub() {
   local host="${link%%#*}"
   local token="${link#*#}"
   if [ "$token" = "$link" ]; then token=""; fi
-  if [ -z "$token" ] && [ "${JOIN_PW_MODE:-0}" != "1" ]; then
-    fail "Join link must include a fragment ('#<token>' or '#invite:<code>'), or pass --password for a password-gated room"
-    exit 1
-  fi
   host="${host%/}"
+  # No fragment + no --password is FINE: it's a room reached by code/link, and we
+  # authenticate at /link/join below — credential-less for an --open room, or
+  # prompting for the password otherwise (the server tells us which).
 
   # P2P link: 'p2p:<ticket>#<token>' — spawn a local dumbpipe forwarder and treat
   # http://127.0.0.1:<port> as the hub URL. connectToHub picks http/https by
@@ -1676,13 +1675,31 @@ join_hub() {
       read -rs join_val; echo "" >&2
     fi
   fi
+  # No invite, no --password, no raw token → a code/link to a room: try a
+  # credential-less join (open room); if the server says a password is required,
+  # prompt and retry. This is what makes `join <code>` "just work".
+  if [ -z "$join_kind" ] && [ -z "$token" ]; then
+    join_kind="auto"
+  fi
   if [ -n "$join_kind" ]; then
     ensure_node "${ARG3_NODE:-}"
     local jnode jbody resp mtok
     jnode=$(cat "$NODE_FILE")
-    jbody=$(jq -nc --arg n "$jnode" --arg v "$join_val" --arg k "$join_kind" '{node:$n} + {($k): $v}')
+    if [ "$join_kind" = "auto" ]; then
+      jbody=$(jq -nc --arg n "$jnode" '{node:$n}')
+    else
+      jbody=$(jq -nc --arg n "$jnode" --arg v "$join_val" --arg k "$join_kind" '{node:$n} + {($k): $v}')
+    fi
     resp=$(curl -s --max-time 15 -X POST "${host}/link/join" -H "Content-Type: application/json" -d "$jbody" 2>/dev/null || true)
     mtok=$(printf '%s' "$resp" | jq -r '.member_token // empty' 2>/dev/null)
+    # auto + the room wants a password → prompt and retry once.
+    if [ -z "$mtok" ] && [ "$join_kind" = "auto" ] && [ "$(printf '%s' "$resp" | jq -r '.password_required // false' 2>/dev/null)" = "true" ]; then
+      local pw_in
+      printf 'Room password: ' >&2; read -rs pw_in; echo "" >&2
+      jbody=$(jq -nc --arg n "$jnode" --arg v "$pw_in" '{node:$n, password:$v}')
+      resp=$(curl -s --max-time 15 -X POST "${host}/link/join" -H "Content-Type: application/json" -d "$jbody" 2>/dev/null || true)
+      mtok=$(printf '%s' "$resp" | jq -r '.member_token // empty' 2>/dev/null)
+    fi
     if [ -z "$mtok" ]; then
       fail "Room join failed: $(printf '%s' "$resp" | jq -r '.error // "no response from the hub"' 2>/dev/null)"
       # Don't leave a half-configured spoke (esp. a dangling p2p forwarder).
