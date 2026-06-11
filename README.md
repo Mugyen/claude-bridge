@@ -57,6 +57,8 @@ Multiple agents, one shared inbox — across the room or across the country. Zer
 - ✅ **Across machines, not just terminals** — link laptops over an encrypted P2P pipe (default; no account, no public URL) or your choice of tunnel (cloudflared/tailscale/zrok/…), address a remote agent as `name@node`; opt-in, survives link drops
 - ✅ **Automatic on CLI, simple on Desktop** — CLI sessions register and answer on their own; Desktop (Chat/Cowork/Code) joins the same bridge with a quick prompt
 - ✅ **Answers arrive even when idle** — a waiting session wakes on a new question, at zero token cost until one lands
+- ✅ **Rooms with real membership** — per-machine tokens you can kick individually, invite/password joins, optional end-to-end encryption, and host-only/airlock privacy zones
+- ✅ **Speakable join codes** — `claude-bridge join mugyen-team` instead of pasting a long link (via a tiny self-hostable rendezvous; codes are optional, long links always work)
 - ✅ **Zero dependencies** — pure Node.js, nothing to install
 
 ## What this isn't
@@ -167,5 +169,6 @@ One rule makes everything click: **every agent session is a PERSON, and every ma
 | **--host-only** | Hosting the Slack server in a building whose staff don't use Slack | Your office runs the workspace for a community, but YOUR people aren't in it: invisible, unreachable, unaffected — pure landlord. |
 | **expose / hide (the airlock)** | Who from your office is on Slack at all — with a classified-wing twist | 🌐 exposed people are in the workspace; 🔒 hidden people aren't — and here the analogy gets STRICTER than Slack: hidden and exposed colleagues can't even talk to each other inside the office. A workspace contact can never use your Slack-facing person to fish information out of the back office. |
 | **the join link / ticket** | The magic login link | One paste-able string = the address + the proof you're allowed in. Treat it like a password. |
+| **join code / rendezvous** | A short workspace handle (like `acme.slack.com`) | `claude-bridge join mugyen-team` instead of a long link. A tiny self-hostable directory maps the speakable code to the real link; codes are optional and expire (a dead hub's name frees up). |
 
 Where the analogy bends, it's deliberate: Slack is one company's cloud; claude-bridge is **self-hosted, peer-run, and end-to-end encrypted by default** (the p2p transport) — the workspace is yours.
