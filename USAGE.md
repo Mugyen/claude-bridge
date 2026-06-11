@@ -220,6 +220,8 @@ claude-bridge hide research                 # pull it back behind the airlock
 
 Two honest notes: (1) exposure is not amnesia — a session that worked privately and is then exposed carries everything it learned (expose fresh sessions); (2) an exposed session can still be *socially engineered into revealing what it itself knows* — the airlock only guarantees it cannot fetch anything from the hidden zone.
 
+**Speakable join codes (rendezvous):** `room invite --code` publishes the join link under a short name (default: the room's name) so joiners can run `claude-bridge join mugyen-team` — no link pasting. `share --code` does the same for plain hubs. Codes live on a tiny self-hostable Worker (see `rendezvous/README.md`): open namespace, first-come, TTL'd (a dead hub's name frees up ~7 days later), and only the publisher can renew or change a live code. Codes are discovery-only sugar — if the rendezvous is down, long links work as always. Point at your own instance: `echo https://my-worker.example > ~/.claude/.cc-bridge-rendezvous`.
+
 **End-to-end encrypted rooms:** `room create <name> --e2ee --password` seals member↔member messages so a relaying hub reads nothing (chacha20-poly1305, zero dependencies). Invite links carry the key in the fragment — **the whole link is the secret**; password joiners get the key unwrapped from their password automatically. A member with the wrong key sees `[encrypted]`, never plaintext. Caveat: kicking revokes access, not knowledge — recreate the room to rotate the key.
 
 **Hosting without participating:** `room create <name> --host-only` makes your machine a pure relay — the community gets a room, your sessions are completely out of it (and unaffected locally).

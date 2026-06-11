@@ -1,0 +1,17 @@
+# claude-bridge rendezvous — deploy with: wrangler deploy
+# One-time setup (see README.md):
+#   wrangler kv namespace create RDV     → paste the id below
+#   wrangler deploy
+#   then route a domain (e.g. r.houserbot.com) to the worker in the CF dashboard,
+#   or uncomment `routes` below.
+name = "claude-bridge-rendezvous"
+main = "worker.js"
+compatibility_date = "2026-06-01"
+
+kv_namespaces = [
+  { binding = "RDV", id = "REPLACE_WITH_KV_NAMESPACE_ID" }
+]
+
+# routes = [
+#   { pattern = "r.houserbot.com", custom_domain = true }
+# ]

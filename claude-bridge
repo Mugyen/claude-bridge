@@ -54,6 +54,13 @@ EXPOSE_FILE="${CC_BRIDGE_EXPOSE_FILE:-$HOME/.claude/.cc-bridge-expose}"
 # E2EE room key (3b): written at `room create --e2ee` (owner) or at join (members:
 # from the invite-link fragment, or password-unwrapped). chmod 600.
 ROOM_KEY_FILE="${CC_BRIDGE_ROOM_KEY_FILE:-$HOME/.claude/.cc-bridge-room-key}"
+# Rendezvous (phase 4): maps speakable codes → join links. A phone book, not a
+# relay — fully optional; long links always work. Override the default per
+# machine via env or the dotfile (self-hosters point at their own Worker).
+DEFAULT_RENDEZVOUS="https://r.houserbot.com"
+RENDEZVOUS="${CC_BRIDGE_RENDEZVOUS:-$(cat "$HOME/.claude/.cc-bridge-rendezvous" 2>/dev/null || echo "$DEFAULT_RENDEZVOUS")}"
+# Per-code owner tokens (renew/release rights while a code is alive). 0600 JSON.
+CODES_FILE="${CC_BRIDGE_CODES_FILE:-$HOME/.claude/.cc-bridge-codes}"
 
 # Read version from package.json
 VERSION=$(jq -r '.version // "unknown"' "$REPO_DIR/package.json" 2>/dev/null || echo "unknown")
@@ -1059,6 +1066,9 @@ share_hub() {
   while [ $i -lt ${#shift_args[@]} ]; do
     case "${shift_args[$i]}" in
       --provider)     i=$((i+1)); provider="${shift_args[$i]:-}" ;;
+      --code)
+        SHARE_CODE=1
+        case "${shift_args[$((i+1))]:-}" in ""|--*) ;; *) i=$((i+1)); SHARE_CODE_NAME="${shift_args[$i]}" ;; esac ;;
       --p2p)          provider="p2p" ;;
       --reuse)        P2P_REUSE=1 ;;
       --tailscale)    provider="tailscale" ;;
@@ -1159,6 +1169,11 @@ share_hub() {
   printf '%s' "$provider" > "$TUNNEL_PROVIDER_FILE"
   ok "EXPOSED via $provider: $url → 127.0.0.1:${FED_PORT}"
   print_join_link "$url" "$token"
+  if [ "${SHARE_CODE:-0}" = "1" ]; then
+    # Plain-hub code (pre-room sharing): the link carries the bearer token, so
+    # the code's TTL is real security — default name is this machine's node id.
+    publish_code "${SHARE_CODE_NAME:-$(cat "$NODE_FILE" 2>/dev/null)}" "${url}#${token}" "" || true
+  fi
   warn "Keep this machine on while you want the link open. 'claude-bridge stop-share' closes it (verified)."
 }
 
@@ -1274,11 +1289,15 @@ room_cmd() {
       fi
       ;;
     invite)
-      local one="" exp="" args=("$@") i=0
+      local one="" exp="" want_code=0 code_name="" args=("$@") i=0
       while [ $i -lt ${#args[@]} ]; do
         case "${args[$i]}" in
           --one-time) one=true ;;
           --expires) i=$((i+1)); exp=$(parse_duration "${args[$i]:-}") || { fail "bad --expires (use 90s/15m/2h/7d)"; exit 1; } ;;
+          --code)
+            want_code=1
+            local nxt="${args[$((i+1))]:-}"
+            case "$nxt" in ""|--*) ;; *) i=$((i+1)); code_name="$nxt" ;; esac ;;
         esac
         i=$((i+1))
       done
@@ -1304,6 +1323,15 @@ room_cmd() {
       echo "  Share this ONE command:"
       echo "    claude-bridge join '${url}#invite:${code}${keyfrag}'"
       echo ""
+      # --code: also publish the link under a speakable name (default: room name).
+      if [ "$want_code" = 1 ] && [ "$url" != "<your-share-url>" ]; then
+        if [ -z "$code_name" ]; then
+          code_name=$(room_api GET /room/info | jq -r '.room.name // empty' 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+        fi
+        publish_code "$code_name" "${url}#invite:${code}${keyfrag}" "${exp:-}" || true
+      elif [ "$want_code" = 1 ]; then
+        warn "--code skipped: not sharing yet (no link to publish)"
+      fi
       ;;
     members|list)
       resp=$(room_api GET /room/info)
@@ -1355,6 +1383,37 @@ room_cmd() {
   esac
 }
 
+# Publish a join link under a speakable code at the rendezvous. $1=code (empty =
+# random), $2=link, $3=ttl seconds (empty = worker default 7d). Prints the join
+# command on success; degrades to a warning if the rendezvous is unreachable.
+publish_code() {
+  local code="$1" link="$2" ttl="${3:-}" owner="" body resp
+  [ -n "$code" ] && owner=$(jq -r --arg c "$code" '.[$c] // empty' "$CODES_FILE" 2>/dev/null)
+  body=$(jq -nc --arg c "$code" --arg l "$link" --arg t "$ttl" --arg o "$owner"     '{link:$l} + (if $c != "" then {code:$c} else {} end) + (if $t != "" then {ttl_seconds:($t|tonumber)} else {} end) + (if $o != "" then {owner_token:$o} else {} end)')
+  resp=$(curl -s --max-time 8 -X POST "$RENDEZVOUS/v1/rooms" -H "Content-Type: application/json" -d "$body" 2>/dev/null || true)
+  local got_code
+  got_code=$(printf '%s' "$resp" | jq -r '.code // empty' 2>/dev/null)
+  if [ -z "$got_code" ]; then
+    local err; err=$(printf '%s' "$resp" | jq -r '.error // "rendezvous unreachable"' 2>/dev/null)
+    warn "Code not published ($err) — the long link above still works."
+    case "$err" in *taken*) warn "Hint: $(printf '%s' "$resp" | jq -r '.hint // "pick another name"')";; esac
+    return 1
+  fi
+  # First publish returns the owner token — persist it so WE can renew/update.
+  local new_owner
+  new_owner=$(printf '%s' "$resp" | jq -r '.owner_token // empty' 2>/dev/null)
+  if [ -n "$new_owner" ]; then
+    mkdir -p "$(dirname "$CODES_FILE")"
+    jq -nc --arg c "$got_code" --arg o "$new_owner" --slurpfile cur <(cat "$CODES_FILE" 2>/dev/null || echo '{}')       '($cur[0] // {}) + {($c): $o}' > "$CODES_FILE.tmp" && mv "$CODES_FILE.tmp" "$CODES_FILE" && chmod 600 "$CODES_FILE"
+  fi
+  echo ""
+  ok "Code published at $RENDEZVOUS (expires $(date -r $(($(printf '%s' "$resp" | jq -r '.expires_at') / 1000)) 2>/dev/null || echo "see worker"))"
+  echo ""
+  echo "  Or just tell them:"
+  echo "    claude-bridge join $got_code"
+  echo ""
+}
+
 # `claude-bridge sessions` — who's on this bridge, and which privacy zone.
 sessions_cmd() {
   if ! fed_bridge_running; then fail "Bridge not running — claude-bridge start"; exit 1; fi
@@ -1394,9 +1453,27 @@ expose_cmd() { # $1 = name, $2 = true|false
 join_hub() {
   local link="$1"
   if [ -z "$link" ]; then
-    fail "Usage: ./claude-bridge --join 'https://<host>#<token-or-invite>'"
+    fail "Usage: ./claude-bridge --join '<link-or-code>'  (codes resolve via $RENDEZVOUS)"
     exit 1
   fi
+  # A bare speakable code (no scheme, no fragment) → resolve at the rendezvous.
+  case "$link" in
+    *://*|*#*|p2p:*) ;;
+    *)
+      if printf '%s' "$link" | grep -qE '^[a-z0-9][a-z0-9-]{2,39}$'; then
+        ok "Resolving code \"$link\" via $RENDEZVOUS..."
+        local rresp
+        rresp=$(curl -s --max-time 8 "$RENDEZVOUS/v1/rooms/$link" 2>/dev/null || true)
+        local rlink
+        rlink=$(printf '%s' "$rresp" | jq -r '.link // empty' 2>/dev/null)
+        if [ -z "$rlink" ]; then
+          fail "Code \"$link\" not found: $(printf '%s' "$rresp" | jq -r '.error // "rendezvous unreachable"' 2>/dev/null)"
+          exit 1
+        fi
+        ok "Code resolved — joining"
+        link="$rlink"
+      fi ;;
+  esac
   # Split on the '#' fragment locally — the secret never travels in a URL path.
   local host="${link%%#*}"
   local token="${link#*#}"
@@ -1919,8 +1996,8 @@ FEDERATION (link bridges across machines)
   share --stable <host>                Stable HTTPS URL on your own domain (cloudflared named tunnel; ONE connector only)
   share --tailscale                    Tailnet-only (both machines on your Tailscale network; no extra process)
   share --provider <p>                 Other tunnels: bore | pinggy | zrok (see USAGE.md for trade-offs)
-  share [--node <id>]                  --node sets this machine's federation id (default: hostname)
-  join '<link>' [--password] [--expose all|none]
+  share [--node <id>] [--code [name]]  --node sets the federation id · --code publishes the join link as a speakable code
+  join '<link-or-code>' [--password] [--expose all|none]
                                        Become a spoke. Links: https://<host>#<token> · p2p:<ticket>#<token> · …#invite:<code>
                                        --password joins a password-gated room (prompts) · --expose none = privacy-first
                                        (sessions hidden from the room until you expose them)
@@ -1932,7 +2009,9 @@ ROOMS (per-member tokens on the hub — kick one machine without rotating everyo
                                                           Create the room (owner = this machine; auth switches to member tokens).
                                                           --host-only: relay without your sessions participating
                                                           --e2ee: seal member↔member messages end-to-end (zero-dep chacha20)
-  room invite [--one-time] [--expires <dur>]              Mint an invite + print the full join link (default 7d, unlimited uses)
+  room invite [--one-time] [--expires <dur>] [--code [name]]
+                                                          Mint an invite + print the join link. --code also publishes it as a
+                                                          speakable code (default name: the room's) → joiners run: join <code>
   room members | info                                     Roster with online state · room summary
   room kick <node> | rotate <node> | rotate-password      Revoke one machine · re-key one member · re-key the password gate
   room delete <name>                                      Tear the room down (typed name = confirmation; all tokens die)
@@ -2038,7 +2117,7 @@ case "$ACTION" in
     remove_claude_md_legacy
     remove_desktop
     # Federation config files (hardcoded fallback in case the manifest is missing).
-    rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" "$P2P_KEY_FILE" "$EXPOSE_FILE" "$ROOM_KEY_FILE" && ok "Federation config removed (token, role, hub, node, p2p key, expose policy, room key)"
+    rm -f "$TOKEN_FILE" "$ROLE_FILE" "$HUB_FILE" "$NODE_FILE" "$P2P_KEY_FILE" "$EXPOSE_FILE" "$ROOM_KEY_FILE" "$CODES_FILE" "$HOME/.claude/.cc-bridge-rendezvous" && ok "Federation config removed (token, role, hub, node, p2p key, expose policy, room key, codes)"
     # Remove the claude-bridge CLI symlink from PATH (manifest handles the tracked
     # one; this hardcoded fallback covers both install locations).
     UNSUDO="sudo"; [ -t 0 ] || UNSUDO="sudo -n"   # never hang on a password prompt non-interactively
