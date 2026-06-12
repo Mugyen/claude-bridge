@@ -2103,6 +2103,21 @@ const server = http.createServer(async (req, res) => {
         return jres(200, { ok: true, deleted: room.name });
       }
 
+      if (req.method === "POST" && url.pathname === "/room/owner-node") {
+        // Re-key the OWNER's membership when this machine's node id changed
+        // (the `node` command triggers this) so the owner stays the live, correct
+        // member instead of stranding the room under the old name.
+        const oldOwner = room.owner.node;
+        if (oldOwner === FED.node) return jres(200, { ok: true, unchanged: true });
+        const entry = room.members[oldOwner];
+        if (entry) { delete room.members[oldOwner]; room.members[FED.node] = entry; }
+        else room.members[FED.node] = { token_hash: null, pubkey: null, role: "owner", joined_at: Date.now(), invited_by: "creator" };
+        room.owner.node = FED.node;
+        saveRooms();
+        console.log(`${ts()} 🚪 room "${room.name}" owner re-keyed "${oldOwner}" → "${FED.node}"`);
+        return jres(200, { ok: true, owner: FED.node, was: oldOwner });
+      }
+
       return jres(404, { error: "unknown room endpoint" });
     } catch (e) {
       console.error(`${ts()} ✗ /room handler threw: ${e.message}`);

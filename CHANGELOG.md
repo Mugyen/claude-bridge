@@ -15,6 +15,8 @@ heading when you tag the release and bump `package.json` + the banner in
 - **`claude-bridge node [name]`** — view or set this machine's name (the node id shown as `name@<node>` across the room). Normalizes to lowercase a-z/0-9/hyphen; warns if you change it while in a room (re-join for the room to see the new name).
 
 ### Fixed (v2.10.0)
+- **Re-joining a room you're already a member of no longer asks for the password.** `room leave`/disconnect does NOT revoke membership, so `join` now first checks whether your stored member token is still valid (a `/link/heartbeat` probe) and re-links silently if so; the password/invite is only requested when you genuinely aren't a member yet (or were kicked). 
+- **Renaming THIS machine while you own a room keeps you the live owner.** `claude-bridge node <name>` re-keys the room's owner entry server-side (`/room/owner-node`) instead of stranding the room under the old name. A *spoke* that renames is told to re-join (now silent, no password).
 - **`health` now lists room MEMBER MACHINES (link-based), not session-derived spokes.** A machine that joined a room with zero active sessions used to be invisible in `health` ("No spokes connected") until a session registered; it now shows with ●/○ online state from the link layer (matching `room members`). Session naming reminder: set `CC_BRIDGE_SESSION=<name>` for a stable session name, or tell the agent to re-register under a new name.
 
 ### Changed (v2.10.0 — room-first UX, BREAKING)

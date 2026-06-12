@@ -734,10 +734,18 @@ node_cmd() {
   ok "Machine name set to \"$clean\"${old:+ (was \"$old\")}"
   [ "$clean" != "$want" ] && warn "(normalized from \"$want\" — lowercase, a-z/0-9/hyphen only)"
   if fed_bridge_running; then fed_reload >/dev/null 2>&1 && ok "Applied to the running bridge."; fi
-  # The node id is the room MEMBERSHIP key — changing it after joining a room
-  # means the room still knows your OLD name until you re-join.
-  if [ "$(cat "$ROLE_FILE" 2>/dev/null)" = "spoke" ] && [ -n "$old" ] && [ "$old" != "$clean" ]; then
-    warn "You're in a room as \"$old\". Re-join (claude-bridge join <code>) for the room to see \"$clean\"."
+  # The node id is the room MEMBERSHIP key. If we OWN a room, re-key the owner
+  # entry server-side so we stay the live owner under the new name. If we're a
+  # spoke (joined someone else's room), the owner still knows our OLD name until
+  # we re-join — warn (and re-joining is now silent thanks to the token fast-path).
+  if [ -n "$old" ] && [ "$old" != "$clean" ] && fed_bridge_running; then
+    local owner; owner=$(room_api GET /room/info 2>/dev/null | jq -r '.room.owner // empty' 2>/dev/null)
+    if [ -n "$owner" ] && [ "$owner" = "$old" ]; then
+      room_api POST /room/owner-node "$(jq -nc --arg n "$clean" '{new_node:$n}')" >/dev/null 2>&1
+      ok "Room owner re-keyed to \"$clean\" — you stay the live owner."
+    elif [ "$(cat "$ROLE_FILE" 2>/dev/null)" = "spoke" ]; then
+      warn "You're in a room as \"$old\". Run 'claude-bridge join <code>' to update it to \"$clean\" (silent — no password)."
+    fi
   fi
 }
 
@@ -1705,6 +1713,25 @@ join_hub() {
   # prompt and retry. This is what makes `join <code>` "just work".
   if [ -z "$join_kind" ] && [ -z "$token" ]; then
     join_kind="auto"
+  fi
+  # MEMBERSHIP FAST-PATH: if we already hold a valid member token for THIS room,
+  # re-link silently — leaving/disconnecting does NOT revoke membership, so coming
+  # back shouldn't re-ask for the password. /link/heartbeat 200 = token still a
+  # member; 401 = revoked/wrong room → fall through to the normal credential flow.
+  if [ "$join_kind" = "auto" ] && [ "${JOIN_PW_MODE:-0}" != "1" ]; then
+    ensure_node "${ARG3_NODE:-}" >/dev/null
+    local _jtok _jnode _probe
+    _jtok=$(cat "$TOKEN_FILE" 2>/dev/null || echo "")
+    _jnode=$(cat "$NODE_FILE")
+    if [ -n "$_jtok" ]; then
+      _probe=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 -X POST "${host}/link/heartbeat" \
+        -H "X-Bridge-Token: $_jtok" -H "Content-Type: application/json" \
+        -d "$(jq -nc --arg n "$_jnode" '{node:$n}')" 2>/dev/null || echo 000)
+      if [ "$_probe" = "200" ]; then
+        ok "Re-joined as \"$_jnode\" using your existing membership — no password needed"
+        join_kind=""; token="$_jtok"
+      fi
+    fi
   fi
   if [ -n "$join_kind" ]; then
     ensure_node "${ARG3_NODE:-}"

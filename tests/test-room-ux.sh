@@ -98,5 +98,23 @@ OUT=$(hub hide --all 2>&1; true)
 echo "$OUT" | grep -qi "no active sessions\|HIDDEN" && ok "hide --all handled" || bad "hide --all: $(echo "$OUT"|tail -3)"
 hub room delete zr >/dev/null 2>&1
 
+# ── 10. membership fast-path: re-join after leave needs NO password (token reuse)
+hub room create rejoinroom --password rjpw123456 --provider bore >/dev/null 2>&1
+printf 'http://127.0.0.1:%s' "$HUB_FED" > "$WORK/h-t.url"
+spoke join "http://127.0.0.1:${HUB_FED}" --password rjpw123456 --node rejoiner >/dev/null 2>&1
+spoke room leave >/dev/null 2>&1
+sleep 1
+# re-join with NO --password — should reuse the existing membership token
+OUT=$(spoke join "http://127.0.0.1:${HUB_FED}" --node rejoiner 2>&1)
+echo "$OUT" | grep -qi "existing membership" && ok "re-join after leave: NO password needed (token reuse)" || bad "rejoin fast-path: $(echo "$OUT"|tail -3)"
+spoke room leave >/dev/null 2>&1
+
+# ── 11. owner rename re-keys the owner entry (stays live owner)
+OWNER_BEFORE=$(hub room info 2>&1 | grep -i owner | head -1)
+hub node renamed-owner >/dev/null 2>&1
+OUT=$(hub room info 2>&1 | grep -i "owner")
+echo "$OUT" | grep -qi "renamed-owner" && ok "owner rename re-keys the room owner" || bad "owner re-key: $OUT (was: $OWNER_BEFORE)"
+hub room delete rejoinroom >/dev/null 2>&1
+
 echo ""; echo "test-room-ux: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
