@@ -356,6 +356,23 @@ function saveRooms() {
   } catch (e) { console.error(`${ts()} ✗ rooms save failed: ${e.message}`); }
 }
 
+/** Auto-reconcile the owner to THIS node. Tier-0: one room per machine, and the
+ *  rooms file lives on the owner's disk — so any room here IS ours. If our node
+ *  id changed (the `node` command, or a migrated rooms file), re-key the owner
+ *  entry to the current FED.node so we stay the live owner instead of stranding
+ *  the room under the old name. Runs on startup + every config reload. */
+function reconcileOwner() {
+  const r = activeRoom();
+  if (!r || !r.owner || r.owner.node === FED.node) return;
+  const old = r.owner.node;
+  const entry = r.members[old];
+  if (entry && entry.role === "owner") { delete r.members[old]; r.members[FED.node] = entry; }
+  else if (!r.members[FED.node]) r.members[FED.node] = { token_hash: null, pubkey: null, role: "owner", joined_at: Date.now(), invited_by: "creator" };
+  r.owner.node = FED.node;
+  saveRooms();
+  console.log(`${ts()} 🚪 room "${r.name}" owner auto-reconciled "${old}" → "${FED.node}" (node id changed)`);
+}
+
 /** The single active room (3a enforces one). Lazily expires TTL rooms. */
 function activeRoom() {
   let changed = false;
@@ -1923,6 +1940,7 @@ const server = http.createServer(async (req, res) => {
     try {
       loadFedConfig();
       loadRooms();   // pick up external edits to the rooms file too
+      reconcileOwner();
       applyFedConfig();
       console.log(`${ts()} ⇄ federation reloaded: role=${FED.role} node=${FED.node}${FED.hubUrl ? ` hub=${FED.hubUrl}` : ""}`);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -2214,7 +2232,7 @@ server.on("error", (err) => {
 server.listen(PORT, "127.0.0.1", () => {
   writePid();
   // Load federation config from disk and bring up the link if we're a hub/spoke.
-  try { loadFedConfig(); loadRooms(); applyFedConfig(); } catch (e) { console.error(`${ts()} ✗ fed config load failed: ${e.message}`); }
+  try { loadFedConfig(); loadRooms(); reconcileOwner(); applyFedConfig(); } catch (e) { console.error(`${ts()} ✗ fed config load failed: ${e.message}`); }
   console.log(`\n${"═".repeat(42)}`);
   console.log(`  claude-bridge v2.10.0`);
   console.log(`  PID:     ${process.pid}`);

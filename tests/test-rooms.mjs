@@ -116,6 +116,19 @@ try {
   const pendingCount = r.pending ?? (r.body && r.body.pending);
   assert("enc: opaque question queued without crashing the store", Number(pendingCount) >= 1, JSON.stringify(r));
 
+  // ── 10.7 owner auto-reconcile: if this node's id changes, the owner entry
+  //        re-keys to the new id on reload (no stranded room under the old name).
+  r = await hub.raw("GET", "/room/info", { token: HUB_TOKEN });
+  assert("reconcile: owner starts as 'hub'", r.body.room.owner === "hub", JSON.stringify(r.body.room.owner));
+  await hub.reloadFed({ token: HUB_TOKEN, role: "hub", node: "hub-renamed" });
+  await sleep(300);
+  r = await hub.raw("GET", "/room/info", { token: HUB_TOKEN });
+  assert("reconcile: owner auto-re-keyed to the new node id on reload", r.body.room.owner === "hub-renamed", JSON.stringify(r.body.room.owner));
+  const renamedOwner = (r.body.room.members || []).find((m) => m.role === "owner");
+  assert("reconcile: owner member entry moved to the new id", renamedOwner && renamedOwner.node === "hub-renamed", JSON.stringify(renamedOwner));
+  await hub.reloadFed({ token: HUB_TOKEN, role: "hub", node: "hub" }); // restore for later cases
+  await sleep(300);
+
   // ── 11. join rate limit (strict global bucket)
   let limited = false;
   for (let i = 0; i < 15; i++) {
