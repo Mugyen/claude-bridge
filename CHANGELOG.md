@@ -12,9 +12,12 @@ heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
 ### Added (v2.10.0)
+- **`room list`** — rooms THIS machine hosts, each with state (● active / ⏸ paused) + ownership + members + created date.
+- **`room history`** — a one-line-per-event timeline of rooms you created / started / stopped / deleted / joined / left, with timestamps (CLI-side append log at `~/.claude/.cc-bridge-room-history.jsonl`).
 - **`claude-bridge node [name]`** — view or set this machine's name (the node id shown as `name@<node>` across the room). Normalizes to lowercase a-z/0-9/hyphen; warns if you change it while in a room (re-join for the room to see the new name).
 
 ### Fixed (v2.10.0)
+- **`health` no longer shows your *owned* room when you're acting as a spoke.** A machine can own a paused room AND be a member of someone else's room; `health` used to print the dormant owned room as if it were the live one. Now it shows the owned room only when you're hosting (role=hub); as a spoke it shows "In a room (member) via <hub>" plus a hint that you own a paused room (see `room list`).
 - **Re-joining a room you're already a member of no longer asks for the password.** `room leave`/disconnect does NOT revoke membership, so `join` now first checks whether your stored member token is still valid (a `/link/heartbeat` probe) and re-links silently if so; the password/invite is only requested when you genuinely aren't a member yet (or were kicked). 
 - **Renaming THIS machine while you own a room keeps you the live owner.** `claude-bridge node <name>` re-keys the room's owner entry server-side, AND the server auto-reconciles the owner to the current node id on every startup/reload (tier-0: the rooms file lives on the owner's disk, so any room there is yours) — so a rename done before this fix, or a migrated rooms file, self-heals on restart instead of stranding the room under the old name. A *spoke* that renames is told to re-join (now silent, no password).
 - **`health` now lists room MEMBER MACHINES (link-based), not session-derived spokes.** A machine that joined a room with zero active sessions used to be invisible in `health` ("No spokes connected") until a session registered; it now shows with ●/○ online state from the link layer (matching `room members`). Session naming reminder: set `CC_BRIDGE_SESSION=<name>` for a stable session name, or tell the agent to re-register under a new name.

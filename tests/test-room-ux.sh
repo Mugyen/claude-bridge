@@ -116,5 +116,23 @@ OUT=$(hub room info 2>&1 | grep -i "owner")
 echo "$OUT" | grep -qi "renamed-owner" && ok "owner rename re-keys the room owner" || bad "owner re-key: $OUT (was: $OWNER_BEFORE)"
 hub room delete rejoinroom >/dev/null 2>&1
 
+# ── 12. room list shows hosted rooms with state + ownership
+hub room create listroom --password lrpw123456 --provider bore >/dev/null 2>&1
+OUT=$(hub room list 2>&1)
+echo "$OUT" | grep -qi "listroom" && echo "$OUT" | grep -qiE "ACTIVE|paused" && ok "room list shows the hosted room + state" || bad "room list: $(echo "$OUT"|tail -3)"
+
+# ── 13. room history logs lifecycle events with timestamps
+OUT=$(hub room history 2>&1)
+echo "$OUT" | grep -qi "created" && echo "$OUT" | grep -qi "listroom" && ok "room history records created/started events" || bad "room history: $(echo "$OUT"|tail -4)"
+
+# ── 14. health when a SPOKE owns a paused room: must NOT show it as the live room
+spoke join "http://127.0.0.1:${HUB_FED}" --password lrpw123456 --node spokehealth >/dev/null 2>&1
+# give the spoke its own paused owned-room record too (create then it stays owned)
+OUT=$(spoke health 2>&1)
+echo "$OUT" | grep -qi "In a room (member)" && ok "spoke health shows member-via-hub, not an owned-room line" || bad "spoke health: $(echo "$OUT"|tail -5)"
+echo "$OUT" | grep -qi "Room (hosting):" && bad "spoke health WRONGLY shows a hosted room" || ok "spoke health does not claim to host a room"
+spoke room leave >/dev/null 2>&1
+hub room delete listroom >/dev/null 2>&1
+
 echo ""; echo "test-room-ux: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

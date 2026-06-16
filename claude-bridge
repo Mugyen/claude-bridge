@@ -61,6 +61,12 @@ DEFAULT_RENDEZVOUS="https://r.houserbot.com"
 RENDEZVOUS="${CC_BRIDGE_RENDEZVOUS:-$(cat "$HOME/.claude/.cc-bridge-rendezvous" 2>/dev/null || echo "$DEFAULT_RENDEZVOUS")}"
 # Per-code owner tokens (renew/release rights while a code is alive). 0600 JSON.
 CODES_FILE="${CC_BRIDGE_CODES_FILE:-$HOME/.claude/.cc-bridge-codes}"
+# Append-only room lifecycle log (created/started/stopped/deleted/joined/left),
+# one JSON object per line. CLI-side, like the command log — never the server's.
+ROOM_HISTORY_FILE="${CC_BRIDGE_ROOM_HISTORY_FILE:-$HOME/.claude/.cc-bridge-room-history.jsonl}"
+# The server's rooms store (rooms THIS machine owns/hosts). The CLI only READS it
+# (for `room list`); the running server owns all writes (loopback /room/* admin).
+ROOMS_FILE="${CC_BRIDGE_ROOMS_FILE:-$HOME/.claude/.cc-bridge-rooms.json}"
 
 # Read version from package.json
 VERSION=$(jq -r '.version // "unknown"' "$REPO_DIR/package.json" 2>/dev/null || echo "unknown")
@@ -1345,6 +1351,7 @@ room_cmd() {
         name="$existing_name"
         ROOM_MODE=1 share_hub "${share_args[@]:-}"
         room_publish_and_print "$name" ""
+        log_room_event started "$name" "host"
       else
         # No room yet → create one. Default name = node id; password ON by default.
         [ -z "$name" ] && name=$(cat "$NODE_FILE" 2>/dev/null || hostname | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
@@ -1357,6 +1364,7 @@ room_cmd() {
         resp=$(room_api POST /room/create "$body")
         printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
         ok "Room \"$name\" created"
+        log_room_event created "$name" "$([ -n "$open" ] && echo open || echo password)${e2ee:+,e2ee}${host_only:+,host-only}"
         if [ -n "$e2ee" ]; then
           printf '%s' "$(printf '%s' "$resp" | jq -r '.room_key')" > "$ROOM_KEY_FILE"; chmod 600 "$ROOM_KEY_FILE"
           ok "E2EE ON 🔐 — member↔member messages are sealed end-to-end (key: $ROOM_KEY_FILE)"
@@ -1365,6 +1373,7 @@ room_cmd() {
         [ -n "$host_only" ] && ok "HOST-ONLY: this machine relays the room; its own sessions are NOT participants"
         ROOM_MODE=1 share_hub "${share_args[@]:-}"
         room_publish_and_print "$name" "$pw"
+        log_room_event started "$name" "host"
       fi
       ;;
     stop)
@@ -1374,9 +1383,12 @@ room_cmd() {
       stop_share
       [ -n "$nm" ] && { release_code "$nm"; ok "Join code \"$nm\" released (room is now unreachable but NOT deleted)"; }
       ok "Room paused — run 'claude-bridge room start' to reopen it (same members, same code)."
+      [ -n "$nm" ] && log_room_event stopped "$nm" "host"
       ;;
     leave)
+      local lh; lh=$(cat "$HUB_FILE" 2>/dev/null || true)
       unlink_hub
+      log_room_event left "${lh:-a room}" "member"
       ;;
     invite)
       local one="" exp="" want_code=0 code_name="" args=("$@") i=0
@@ -1423,7 +1435,7 @@ room_cmd() {
         warn "--code skipped: not sharing yet (no link to publish)"
       fi
       ;;
-    members|list)
+    members)
       resp=$(room_api GET /room/info)
       printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
       echo ""
@@ -1467,10 +1479,38 @@ room_cmd() {
       printf '%s' "$resp" | jq -e '.ok' >/dev/null 2>&1 || room_err "$resp"
       [ -n "$nm" ] && release_code "$nm"
       rm -f "$ROOM_KEY_FILE"
-      ok "Room \"$(printf '%s' "$resp" | jq -r '.deleted')\" deleted — every member token is dead, join code released."
+      local deleted; deleted=$(printf '%s' "$resp" | jq -r '.deleted')
+      ok "Room \"$deleted\" deleted — every member token is dead, join code released."
+      log_room_event deleted "$deleted" "host"
+      ;;
+    list)
+      # Rooms THIS machine owns/hosts (read straight from the store). Currently one
+      # (tier-0), but the store keeps records, so this lists whatever is there.
+      if [ ! -s "$ROOMS_FILE" ] || [ "$(jq '.rooms | length' "$ROOMS_FILE" 2>/dev/null || echo 0)" = "0" ]; then
+        echo "No rooms hosted on this machine. Create one: claude-bridge room start"
+      else
+        local myrole; myrole=$(cat "$ROLE_FILE" 2>/dev/null || echo standalone)
+        local active_id=""
+        [ "$myrole" = "hub" ] && active_id=$(room_api GET /room/info 2>/dev/null | jq -r '.room.id // empty' 2>/dev/null)
+        echo "Rooms you host (this machine):"
+        ACTIVE_ID="$active_id" jq -r '
+          .rooms | to_entries[] | .value as $r |
+          ($r.members // {} | length) as $m |
+          (if $r.id == env.ACTIVE_ID then "● ACTIVE " else "⏸ paused " end) as $state |
+          "  \($state) \"\($r.name)\"  (\($r.id))  · members: \($m) · \(if $r.open then "open" else "password" end)\(if $r.e2ee then " · 🔐" else "" end)\(if $r.host_participates == false then " · host-only" else "" end) · owner: \($r.owner.node // "?") · created \(($r.created_at // 0) / 1000 | strftime("%Y-%m-%d"))"
+        ' "$ROOMS_FILE" 2>/dev/null
+      fi
+      ;;
+    history)
+      if [ ! -s "$ROOM_HISTORY_FILE" ]; then
+        echo "No room history yet. (Logged from this machine as you create/start/stop/join/leave rooms.)"
+      else
+        echo "Room history (this machine):"
+        jq -r '"  \(.ts[0:10]) \(.ts[11:16])  \(.event | (. + "        ")[0:8])  \(.room)\(if .note then "  [\(.note)]" else "" end)"' "$ROOM_HISTORY_FILE" 2>/dev/null
+      fi
       ;;
     *)
-      fail "Usage: claude-bridge room <create|start|stop|delete|invite|members|kick|rotate|rotate-password|info|leave>"
+      fail "Usage: claude-bridge room <start|stop|create|delete|list|history|invite|members|kick|rotate|rotate-password|info|leave>"
       exit 1
       ;;
   esac
@@ -1524,6 +1564,18 @@ release_code() {
   # is NOT a valid del path and silently leaves the entry (was the bug).
   local cur; cur=$(cat "$CODES_FILE" 2>/dev/null || echo '{}')
   printf '%s' "$cur" | jq --arg c "$code" 'del(.[$c])' > "$CODES_FILE.tmp" 2>/dev/null && mv "$CODES_FILE.tmp" "$CODES_FILE" 2>/dev/null || true
+}
+
+# Append one lifecycle event to the room history. $1=event (created|started|
+# stopped|deleted|joined|left), $2=room name/handle, $3=role-or-note (optional).
+# Best-effort: never fail the command if the log can't be written.
+log_room_event() {
+  local ev="$1" room="${2:-}" note="${3:-}" line
+  mkdir -p "$(dirname "$ROOM_HISTORY_FILE")" 2>/dev/null || return 0
+  line=$(jq -nc --arg ts "$(date '+%Y-%m-%dT%H:%M:%S%z')" --arg ev "$ev" --arg r "$room" \
+    --arg n "$note" --arg node "$(cat "$NODE_FILE" 2>/dev/null)" \
+    '{ts:$ts, event:$ev, room:$r} + (if $n != "" then {note:$n} else {} end) + (if $node != "" then {node:$node} else {} end)' 2>/dev/null) || return 0
+  printf '%s\n' "$line" >> "$ROOM_HISTORY_FILE" 2>/dev/null && chmod 600 "$ROOM_HISTORY_FILE" 2>/dev/null || true
 }
 
 # The active room's name (lowercased join-handle), or empty if none. Used by the
@@ -1617,6 +1669,7 @@ expose_cmd() { # $1 = name(s): one, comma-separated, or --all · $2 = true|false
 
 join_hub() {
   local link="$1"
+  local _join_label="$1"   # what the user typed (code or link) — for the history log
   if [ -z "$link" ]; then
     fail "Usage: ./claude-bridge --join '<link-or-code>'  (codes resolve via $RENDEZVOUS)"
     exit 1
@@ -1808,6 +1861,8 @@ join_hub() {
     start_bridge
   fi
   ok "Linked to hub $host as node $(cat "$NODE_FILE")"
+  case "$_join_label" in *://*|*#*) _join_label="a room" ;; esac   # don't log a long link/secret
+  log_room_event joined "$_join_label" "member"
   echo ""
   echo "  Your sessions stay local. Other agents now appear in list_sessions"
   echo "  tagged with their node; target a specific remote session as name@node."
@@ -2081,17 +2136,23 @@ health_cmd() {
   echo ""
   echo "Topology:"
   ok "Role: $role · Node: $node · Token configured: $tok"
-  local rinfo
+  # The local rooms store holds rooms WE host. Show it as the live room ONLY when
+  # we're actually hosting (role=hub). A machine can own a paused room AND be a
+  # spoke in someone else's room — showing the owned one as a spoke is misleading
+  # (that was the bug). When a spoke, the owned room is just dormant → a hint.
+  local rinfo own_room=""
   rinfo=$(room_api GET /room/info 2>/dev/null || true)
-  if printf '%s' "$rinfo" | jq -e '.ok' >/dev/null 2>&1; then
-    ok "Room: $(printf '%s' "$rinfo" | jq -r '.room | "\"\(.name)\" — \(.members|length) member(s), \(.invites|length) open invite(s), password \(if .password_set then "on" else "off" end)"')"
+  own_room=$(printf '%s' "$rinfo" | jq -r 'if .ok then .room.name else empty end' 2>/dev/null)
+  if [ "$role" = "hub" ] && [ -n "$own_room" ]; then
+    ok "Room (hosting): $(printf '%s' "$rinfo" | jq -r '.room | "\"\(.name)\" — \(.members|length) member(s), \(.invites|length) open invite(s), password \(if .password_set then "on" else "off" end)"')"
   fi
   if [ "$role" = "spoke" ]; then
     local hub; hub=$(cat "$HUB_FILE" 2>/dev/null || true)
     if [ -n "$hub" ]; then
-      if curl -sf --max-time 6 "$hub/health/ping" >/dev/null 2>&1; then ok "Hub: $hub (reachable)"
-      else warn "Hub: $hub (NOT reachable — outage or tunnel down)"; fi
+      if curl -sf --max-time 6 "$hub/health/ping" >/dev/null 2>&1; then ok "In a room (member) via $hub — reachable"
+      else warn "In a room (member) via $hub — NOT reachable (host offline or tunnel down)"; fi
     fi
+    [ -n "$own_room" ] && warn "You also OWN a paused room \"$own_room\" (not hosting now) — see: claude-bridge room list"
   elif [ "$role" = "hub" ]; then
     # Tunnel: URL + whether the cloudflared PROCESS is alive + whether the URL is
     # actually reachable end-to-end. (Previously only printed the recorded URL, so
@@ -2218,6 +2279,8 @@ JOINING & PER-MACHINE PRIVACY
   join <code>                          Enter a room by its speakable code (prompts for the password)
   join '<link>' [--password] [--expose all|none]   Or by a direct link / invite. --expose none = join with everything hidden
   room leave                           Leave a room you joined
+  room list                            Rooms THIS machine hosts, with state (● active / ⏸ paused) + ownership
+  room history                         Timeline of rooms you created/started/stopped/joined/left, one line each
   node [new-name]                      Show or set THIS machine's name (shown as name@<node> across the room)
   sessions                             Your agents' zones: 🌐 EXPOSED to the room vs 🔒 hidden
   expose <name>[,<name>...] | --all    Put agents IN the room (comma-separated or --all)
