@@ -637,14 +637,21 @@ room_status() {
   name=$(printf '%s' "$info" | jq -r '.room.name // empty' 2>/dev/null)
 
   if [ "$role" = "spoke" ]; then
-    # We joined someone else's room.
-    local rn hub reachable
-    rn=$(room_api GET /sessions/exposure 2>/dev/null >/dev/null; echo "${name:-a room}")
+    # We joined someone else's room. Probe MEMBERSHIP with our token (not the
+    # ungated /health/ping, which says "reachable" even after a kick): 200 = still
+    # a member; 401/403 = REMOVED; no answer = owner offline / link down.
+    local hub code
     hub=$(cat "$HUB_FILE" 2>/dev/null || echo "")
-    if [ -n "$hub" ] && curl -sf --max-time 6 "${hub}/health/ping" >/dev/null 2>&1; then
+    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 -X POST "${hub}/link/heartbeat" \
+      -H "X-Bridge-Token: $(cat "$TOKEN_FILE" 2>/dev/null)" -H "Content-Type: application/json" \
+      -d "$(jq -nc --arg n "$(cat "$NODE_FILE" 2>/dev/null)" '{node:$n}')" 2>/dev/null || echo 000)
+    if [ "$code" = "200" ]; then
       ok "In a room as \"$(cat "$NODE_FILE" 2>/dev/null)\" — owner ● reachable"
+    elif [ "$code" = "401" ] || [ "$code" = "403" ]; then
+      fail "REMOVED from the room — the owner kicked this machine (token rejected). Run: claude-bridge room leave  (to clean up)"
+      return
     else
-      warn "In a room as \"$(cat "$NODE_FILE" 2>/dev/null)\" — owner ○ UNREACHABLE (they're offline, or you were removed)"
+      warn "In a room as \"$(cat "$NODE_FILE" 2>/dev/null)\" — owner ○ UNREACHABLE (they're offline or the link is down)"
     fi
     local ex hd
     ex=$(printf '%s' "$(room_api GET /sessions/exposure 2>/dev/null)" | jq -r '[.sessions[]|select(.expose)]|length' 2>/dev/null || echo 0)

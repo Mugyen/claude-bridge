@@ -132,6 +132,21 @@ OUT=$(spoke health 2>&1)
 echo "$OUT" | grep -qi "In a room (member)" && ok "spoke health shows member-via-hub, not an owned-room line" || bad "spoke health: $(echo "$OUT"|tail -5)"
 echo "$OUT" | grep -qi "Room (hosting):" && bad "spoke health WRONGLY shows a hosted room" || ok "spoke health does not claim to host a room"
 spoke room leave >/dev/null 2>&1
+
+# ── 15. kicked spoke self-demotes to standalone (no zombie membership)
+spoke join "http://127.0.0.1:${HUB_FED}" --password lrpw123456 --node kicked-spoke >/dev/null 2>&1
+sleep 1
+[ "$(cat "$SPOKEHOME/.claude/.cc-bridge-role" 2>/dev/null)" = "spoke" ] && ok "kick test: spoke joined" || bad "kick test: join failed"
+hub room kick kicked-spoke >/dev/null 2>&1
+# the kick closes the stream → the spoke's reconnect hits 401 → goStandalone. Give it a moment.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ "$(cat "$SPOKEHOME/.claude/.cc-bridge-role" 2>/dev/null)" = "standalone" ] && break
+  sleep 1
+done
+[ "$(cat "$SPOKEHOME/.claude/.cc-bridge-role" 2>/dev/null)" = "standalone" ] && ok "kicked spoke auto-demoted to standalone (role file cleared)" || bad "kicked spoke still role=$(cat "$SPOKEHOME/.claude/.cc-bridge-role" 2>/dev/null)"
+[ -z "$(cat "$SPOKEHOME/.claude/.cc-bridge-hub" 2>/dev/null)" ] && ok "kicked spoke cleared its hub file" || bad "kicked spoke still has a hub file"
+OUT=$(spoke status 2>&1)
+echo "$OUT" | grep -qi "Not in a room" && ok "kicked spoke status: 'Not in a room' (no zombie membership)" || bad "kicked status: $(echo "$OUT"|grep -iE 'room|member'|head -2)"
 hub room delete listroom >/dev/null 2>&1
 
 echo ""; echo "test-room-ux: $PASS passed, $FAIL failed"

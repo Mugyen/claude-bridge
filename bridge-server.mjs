@@ -940,6 +940,20 @@ function teardownHubStream() {
   if (spokeHeartbeatTimer) { clearInterval(spokeHeartbeatTimer); spokeHeartbeatTimer = null; }
 }
 
+// Demote this spoke to standalone and PERSIST it — used when the hub rejects our
+// token (we were kicked, or the token rotated out from under us). Without the file
+// writes, `status` (which reads the role file) keeps claiming we're in the room and
+// a restart would re-spoke with the dead token. The local p2p forwarder, if any, is
+// CLI-managed and harmless once standalone (doctor flags a stale one).
+function goStandalone(reason) {
+  console.log(`${ts()} ⛔ ${reason} — leaving the room (now standalone)`);
+  teardownHubStream();
+  FED.role = "standalone"; FED.hubUrl = ""; FED.token = "";
+  try { fs.writeFileSync(ROLE_FILE, "standalone", { mode: 0o600 }); } catch {}
+  try { fs.writeFileSync(HUB_FILE, "", { mode: 0o600 }); } catch {}
+  try { fs.writeFileSync(TOKEN_FILE, "", { mode: 0o600 }); } catch {}
+}
+
 function connectToHub() {
   if (FED.role !== "spoke" || !FED.hubUrl || !FED.token) return;
   const myGen = ++spokeGen;
@@ -959,9 +973,17 @@ function connectToHub() {
     (res) => {
       if (myGen !== spokeGen) { try { res.destroy(); } catch {} return; }
       if (res.statusCode !== 200) {
-        console.log(`${ts()} ✗ hub link rejected (HTTP ${res.statusCode}) — retrying`);
         try { res.destroy(); } catch {}
-        scheduleSpokeReconnect();
+        // 401/403 = the hub refused our token: we were KICKED (or the token was
+        // rotated/revoked). Retrying forever would leave us a zombie spoke that
+        // still claims membership. Stop and go standalone. Other codes (5xx,
+        // transient) are recoverable → keep retrying with backoff.
+        if (res.statusCode === 401 || res.statusCode === 403) {
+          goStandalone(`hub rejected our token (HTTP ${res.statusCode}) — removed from the room`);
+        } else {
+          console.log(`${ts()} ✗ hub link rejected (HTTP ${res.statusCode}) — retrying`);
+          scheduleSpokeReconnect();
+        }
         return;
       }
       console.log(`${ts()} ⇄ linked to hub ${FED.hubUrl} as node "${FED.node}"`);
