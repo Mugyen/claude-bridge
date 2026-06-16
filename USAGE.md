@@ -226,6 +226,12 @@ Two honest notes: (1) exposure is not amnesia — a session that worked privatel
 
 **End-to-end encrypted rooms:** `room create <name> --e2ee --password` seals member↔member messages so a relaying hub reads nothing (chacha20-poly1305, zero dependencies). Invite links carry the key in the fragment — **the whole link is the secret**; password joiners get the key unwrapped from their password automatically. A member with the wrong key sees `[encrypted]`, never plaintext. Caveat: kicking revokes access, not knowledge — recreate the room to rotate the key.
 
+> **Do you actually need `--e2ee`? Usually not.** It's a **shared symmetric room key** — one key, every member (and the host) holds the same copy; it is *not* per-user public-key crypto. So:
+> - **Default p2p between machines you own → `--e2ee` adds nothing.** The p2p transport is already end-to-end-encrypted QUIC, both endpoints are yours, and the host holds the key anyway. You'd only take on the costs (key distribution, no rotation on kick, degraded server-side features) for no gain.
+> - **`--e2ee` earns its keep only when traffic crosses a relay you don't fully trust** — a public tunnel that terminates TLS (cloudflared/zrok/pinggy), or a hosted/community relay — where you want the *infrastructure* to carry ciphertext it can't read. It does **not** hide messages from the room's host, which holds the key by design.
+>
+> Rule of thumb: trust the hub (you own it) → skip `--e2ee`; route through infrastructure you don't own → use it.
+
 **Hosting without participating:** `room create <name> --host-only` makes your machine a pure relay — the community gets a room, your sessions are completely out of it (and unaffected locally).
 
 ### Using the commands in scripts
