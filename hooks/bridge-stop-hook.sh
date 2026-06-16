@@ -78,11 +78,12 @@ if [ -f "$ENGAGED_FILE" ] && [ "$MONITOR_STATE" != "on" ] && [ "$MONITOR_STATE" 
 
 WAKE=\"${WAKE_FILE}\"
 mkdir -p \"\$(dirname \"\$WAKE\")\" 2>/dev/null
-if ! ( touch \"\$WAKE\" 2>/dev/null && [ -w \"\$WAKE\" ] ); then
+if ( touch \"\$WAKE\" 2>/dev/null && [ -w \"\$WAKE\" ] ); then
+  tail -n 0 -F \"\$WAKE\" 2>&1
+else
   echo \"monitor: cannot write \$WAKE — your sandbox blocks this path. Override CC_BRIDGE_WAKE_DIR on BOTH the bridge server and this session, or disable the sandbox.\"
   exit 1
 fi
-tail -n 0 -F \"\$WAKE\" 2>&1
 
 This is sandbox-proof (no network). It costs ZERO tokens while your inbox is empty — the bridge server appends a line to that file on every new pending event; tail -F emits it; the harness wakes you. Call check_inbox() on wake.
 The instant the Monitor is running, run:  echo on > ${MONITOR_FILE}

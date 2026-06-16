@@ -140,11 +140,12 @@ if [ "$NUDGE_MONITOR" = 1 ]; then
 
 WAKE=\"${WAKE_FILE}\"
 mkdir -p \"\$(dirname \"\$WAKE\")\" 2>/dev/null
-if ! ( touch \"\$WAKE\" 2>/dev/null && [ -w \"\$WAKE\" ] ); then
+if ( touch \"\$WAKE\" 2>/dev/null && [ -w \"\$WAKE\" ] ); then
+  tail -n 0 -F \"\$WAKE\" 2>&1
+else
   echo \"monitor: cannot write \$WAKE — your sandbox blocks this path. Override CC_BRIDGE_WAKE_DIR on BOTH the bridge server and this session, or disable the sandbox.\"
   exit 1
 fi
-tail -n 0 -F \"\$WAKE\" 2>&1
 
 This is sandbox-proof (no network — the bridge server appends a line to that file on every new pending event, tail -F emits it as a stdout line, the harness wakes you). It costs ZERO tokens while your inbox is empty.
 When it wakes you, call check_inbox() to read what arrived — a question to answer, or a 📨 NOTICE to simply take in (notices appear in the notices list; do NOT reply to them).
