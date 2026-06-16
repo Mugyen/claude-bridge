@@ -8,8 +8,6 @@
 
 *Two real Claude sessions (Desktop on the left, CLI on the right) talking to each other through the bridge. No human in the loop for the routing.*
 
-🌐 **Live site:** [vijay2411.github.io/claude-bridge](https://vijay2411.github.io/claude-bridge/)
-
 📦 **Install in one line:**
 
 ```bash
