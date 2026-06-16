@@ -28,7 +28,7 @@ That's your getting-started home. Fastest path:
 
 📑 USAGE.md opens with a full table of contents — skim it to find anything in seconds.
 
-🧭 **New to the vocabulary?** Jump to the **[Appendix: "explain it like I use Slack"](#appendix-explain-it-like-i-use-slack)** at the bottom — every concept here (bridge, session, hub, room, link…) mapped to its Slack equivalent in one table.
+🧭 **New to the vocabulary?** Jump to the **[Appendix: "explain it like I use Slack"](#appendix-explain-it-like-i-use-slack)** at the bottom — every concept here (bridge, session, room, spoke, link…) mapped to its Slack equivalent in one table.
 
 > 🤖 **Handing this repo to an AI agent to set up?** Tell it to run `./claude-bridge install` from the repo root — that's the whole install. It should **not** run the test suite (`npm test` / `tests/`); those are for developing the project, not installing it. See `CLAUDE.md`.
 
@@ -96,17 +96,17 @@ LOCAL — every session connects to its own machine's bridge
                 └───   ask · reply · notify — all by name
 
 
-CROSS-NETWORK — bridges link hub-and-spoke over a secure tunnel (opt-in)
+CROSS-NETWORK — agents on other machines join your ROOM (opt-in)
 ────────────────────────────────────────────────────────────────────────
-      YOUR MACHINE  (hub)                      TEAMMATE  (spoke)
+   YOUR MACHINE  (room owner)                 TEAMMATE  (spoke / room user)
    ┌──────────────────────┐                ┌──────────────────────┐
    │ sessions ─► :7400     │                │ sessions ─► :7400     │
    │              │        │                │        │              │
-   │           fed :7401 ●─┼── secure tunnel ┼─● join │              │
+   │           fed :7401 ●─┼── secure link ─┼─● join │              │
    └──────────────────────┘   (only :7401   └──────────────────────┘
                                is exposed)
    rosters merge ─► a session on either machine can ask  name@node
-                    (more spokes can join the same hub)
+                    (more spokes can join the same room)
 ```
 
 ### In one paragraph
@@ -126,14 +126,14 @@ claude-bridge is one small Node.js server. CLI sessions connect to it automatica
 1. **How agents talk** — they auto-register on the bridge, each session is one entity on the bridge (an MCP server; CLI wires it up via hooks), then message one another one at a time. One asks, the other replies — like texting, but the history is kept. The whole protocol is three verbs: **ASK**, **REPLY**, and **NOTIFY** (one-way).
 2. **The armed listener** — each active agent arms a ~25s polling listener (or you prompt it to), so it answers other sessions even while sitting idle — at zero token cost until a message lands.
 3. **Batteries included** — scratchpad/broadcast, an inbox where questions land, skills (install · debug · report), the lifecycle hooks, and the `claude-bridge` CLI all ship natively with the project.
-4. **Cross-network is a layer on top** — start a **hub** (a secure tunnel); other devices' bridges **join** it, and every session on every joined device becomes visible and addressable as `name@node`.
+4. **Cross-network is a layer on top** — open a **room** (`room start`); other devices **join** it (`join <code>`), and every session on every joined device becomes visible and addressable as `name@node`.
 
 **Platforms:** :apple: macOS works fully (CLI + Desktop). :penguin: Linux works for the CLI path (no Linux Desktop app from Anthropic yet). :window: Windows: use WSL and follow the Linux path.
 
 ## More docs:
 
 - **[USAGE.md](USAGE.md)** — setup, every CLI command, troubleshooting
-- **[docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)** — step-by-step guide to linking machines (hub/spoke)
+- **[docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)** — the full federation guide: creating/joining rooms, owner vs user roles, passwords, invites, codes, E2EE, the airlock
 - **[BRIDGE.md](BRIDGE.md)** — protocol docs (what the agent reads to use the bridge)
 - **[LICENSE](LICENSE)** — MIT
 

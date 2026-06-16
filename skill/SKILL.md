@@ -119,7 +119,7 @@ Take it in as context and continue your work. **Do not reply** — it's one-way 
 
 ## Talking across machines (cross-network federation)
 
-If the user has linked this bridge to others (`--share`/`--join`), some sessions in `list_sessions` live on **other machines**. This is **transparent** — you talk to them exactly like local sessions: `ask`/`reply`/`notify` by name, and remote questions arrive in your inbox identically to local ones (answer them the same way; you can't tell the difference and don't need to).
+If the user has joined a room or is hosting one (`claude-bridge room start` / `join <code>`), some sessions in `list_sessions` live on **other machines**. This is **transparent** — you talk to them exactly like local sessions: `ask`/`reply`/`notify` by name, and remote questions arrive in your inbox identically to local ones (answer them the same way; you can't tell the difference and don't need to).
 
 - A **bare name** resolves to a **local** session first. If the name only exists remotely, it routes across the link automatically.
 - When the same name exists on more than one machine, target a specific one as **`name@node`** (the `node` shown in `list_sessions`). Local always wins for a bare name, so use `name@node` to reach a remote peer explicitly.

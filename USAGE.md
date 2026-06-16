@@ -21,10 +21,11 @@
 - [Part 3: Using the bridge](#part-3-using-the-bridge)
   - [What CLI agents do automatically](#what-cli-agents-do-automatically)
   - [Idle sessions: the auto-armed listener](#idle-sessions-the-auto-armed-listener)
-- [Part 4: Cross-network (other machines)](#part-4-cross-network-talk-to-agents-on-other-machines)
-  - [What you do (as hub or spoke)](#what-you-do-as-hub-or-spoke)
-  - [Cloudflare quick tunnels were removed](#cloudflare-quick-tunnels-were-removed)
-  - [Keeping an always-on hub up](#keeping-an-always-on-hub-up-supervise-cloudflared)
+- [Part 4: Cross-network (other machines)](#part-4-cross-network-talk-to-agents-on-other-machines) — full guide: [docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)
+  - [The 30-second version](#the-30-second-version)
+  - [What to tell your agent](#what-to-tell-your-agent)
+  - [Why p2p is the default](#why-p2p-is-the-default-and-which-tunnels-to-avoid)
+  - [Keeping an always-on room](#keeping-an-always-on-room-supervise-the-tunnel)
   - [Security, honestly](#security-honestly)
 - [Manual installation](#manual-installation)
 - [Configuration](#configuration)
@@ -120,24 +121,24 @@ The commands below use a handful of words consistently. Here's the whole vocabul
    │   └── session "db"    │ local     │          │     local │  session "infra"      │
    │                       ┘ only      │          │      only ┘                       │
    │                                   │          │                                   │
-   │  fed port :7401  ●────── link (Cloudflare tunnel) ──────● fed port :7401         │
+   │  fed port :7401  ●────────── the link (p2p / tunnel) ───────● fed port :7401     │
    └──────────────────────────────────┘          └──────────────────────────────────┘
-        HUB                                            SPOKE
-        runs `claude-bridge share`                     runs `claude-bridge join`
-        (opens the tunnel)                             (links up to the hub)
+        ROOM OWNER                                     SPOKE (room user)
+        runs `claude-bridge room start`                runs `claude-bridge join <code>`
+        (hosts the room)                               (joins it)
 ```
 
 | Term | What it means |
 |---|---|
 | **bridge** | The local server (`:7400`) your Claude sessions connect to. One per machine. |
 | **session** | One Claude agent, registered on the bridge under a name (e.g. `api`, `db`). |
-| **node** | One machine running a bridge. Defaults to the hostname; set with `--node <id>`. |
-| **hub** | The node that opens the tunnel so others can link in — created by `share`. |
-| **spoke** | A node that links up to a hub — created by `join`. Its sessions stay on `:7400`. |
-| **standalone** | The default: not linked to anyone, fully local. |
-| **fed port** (`:7401`) | A *second* loopback listener used only for the cross-machine link. **It's the only thing the tunnel exposes** — your `:7400` bridge and its sessions are never reachable from outside. |
+| **node** | One machine running a bridge. Defaults to the hostname; show/set it with `claude-bridge node [name]`. |
+| **room** | The shared space agents talk through. The machine that runs it is the **room owner**; created with `room start`/`room create`. |
+| **spoke** | A machine that joined a room (a **room user**) — created by `join`. Its sessions stay on `:7400`. |
+| **standalone** | The default: not in any room, fully local. |
+| **fed port** (`:7401`) | A *second* loopback listener used only for the cross-machine link. **It's the only thing the link exposes** — your `:7400` bridge and its sessions are never reachable from outside. |
 
-Only `share`/`join`/`unlink`/`stop-share` involve hub/spoke/fed-port. If you never link machines, you only need the **Setup & maintenance** and **Bridge lifecycle** commands — everything stays local on `:7400`.
+Only the room/`join`/`leave` commands involve the owner/spoke/fed-port. If you never link machines, you only need the **Setup & maintenance** and **Bridge lifecycle** commands — everything stays local on `:7400`. Full walkthrough: **[docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)**.
 
 ### Setup & maintenance
 
@@ -148,7 +149,7 @@ Only `share`/`join`/`unlink`/`stop-share` involve hub/spoke/fed-port. If you nev
 | `claude-bridge update [branch]` | Fetch + pull + reinstall + **restart**. Bare `update` always lands on the **default branch** (main); `update <branch>` switches to and tracks that branch — handy for beta-testing a feature branch, and a later plain `update` returns to main. A plain `git pull` won't reload the running server. |
 | `claude-bridge uninstall` | Full teardown — see [Uninstalling](#uninstalling). Removes config **and stops the running bridge**. |
 | `claude-bridge doctor` | Deep health check: prereqs, running bridge, version/role drift, tunnel, ports, log. The go-to "is everything wired up?" check. |
-| `claude-bridge health` | Live server health: role, topology, connected clients (hub + spokes), and pending/answered/notice counts. Reads the token for you when sharing is on (so it works even when `/health` is 401-gated). |
+| `claude-bridge health` | Live server health: role, room/topology, connected member machines, registered sessions, and pending/answered/notice counts. Reads the token for you when hosting (so it works even when `/health` is 401-gated). |
 | `claude-bridge status` | Quick component status — installed vs repo version, wiring (probes the ungated `/health/ping`). |
 | `claude-bridge version` | Repo / installed / running versions. |
 | `claude-bridge logs [-f]` | Show (or `-f`/`--follow`) the CLI action log. |
@@ -178,17 +179,20 @@ See [Part 4](#part-4-cross-network-talk-to-agents-on-other-machines) and [docs/C
 | `claude-bridge room invite [--one-time] [--expires <dur>] [--code [name]]` | Hand someone a one-time token link instead of the password. |
 | `claude-bridge room members \| info` | Who's in the room · room summary. |
 | `claude-bridge room kick <node> \| rotate <node> \| rotate-password` | Revoke one machine · re-key a member · change the password. |
+| `claude-bridge room list` | Rooms THIS machine hosts, with state (● active / ⏸ paused) + ownership. |
+| `claude-bridge room history` | Timeline of rooms you created / started / stopped / joined / left, one line each. |
+| `claude-bridge node [name]` | Show or set this machine's name (shown as `name@<node>` across the room; re-keys you as owner on rename). |
 | `claude-bridge join <code>` | Enter a room by its speakable code (prompts for the password). |
 | `claude-bridge join '<link>' [--password] [--expose all\|none]` | Or by a direct link / invite. `--expose none` = join with all your agents hidden. |
 | `claude-bridge room leave` | Leave a room you joined (was `unlink`). |
 
-#### Picking a share transport#### Picking a share transport
+#### Picking a transport
 
 The default needs zero setup: no account, no domain, nothing public. The others trade setup for different properties. `CC_BRIDGE_PROVIDER` sets a per-machine default.
 
 | Transport | Account needed | Encrypted | Best for | Watch out |
 |---|---|---|---|---|
-| `p2p` *(default)* | No | ✅ end-to-end (QUIC) | Everything — rooms of any size, no public URL | Ticket+token = the whole secret; hub machine must stay on |
+| `p2p` *(default)* | No | ✅ end-to-end (QUIC) | Everything — rooms of any size, no public URL | Ticket+token = the whole secret; the room owner's machine must stay on |
 | `cloudflared-named` (`--stable`) | Cloudflare + your domain | TLS | A join link that never changes | Run exactly **one** connector per hostname or the link flaps |
 | `tailscale` | Tailscale on both ends | WireGuard | Machines already on your tailnet | Tailnet-only; never use `tailscale serve` HTTP mode (it buffers SSE) |
 | `zrok` | One-time free (`zrok enable`) | TLS | A real HTTPS URL without owning a domain | Free tier: 24h-window bandwidth cap, ~6.6 req/s |
@@ -197,17 +201,18 @@ The default needs zero setup: no account, no domain, nothing public. The others 
 
 ### Rooms (per-member tokens)
 
-A **room** upgrades the flat shared-token group: every joining machine gets its **own token**, so you can kick one machine without re-inviting everyone. Members are machines (bridges) — your agent sessions never see any of this. Until you create a room, the classic shared-token links keep working; after `room create`, only member tokens are accepted.
+A **room** gives every joining machine its **own token**, so you can kick one machine without re-inviting everyone. Members are machines (bridges) — your agent sessions never see any of this. The room owner hosts it; the everyday on/off is `room start` / `room stop`.
 
 ```bash
-claude-bridge room create team --password        # create (generates+prints a strong password once)
-claude-bridge room invite --one-time             # prints a complete join link (…#invite:<code>)
+claude-bridge room start                         # open a room (password-protected by default, prints the password + join code once)
+claude-bridge room invite --one-time             # a single-use join link instead of sharing the password
 claude-bridge room members                       # roster with online state
 claude-bridge room kick old-laptop               # that machine's token dies instantly (and stays dead across restarts)
-claude-bridge room delete team                   # typed-name confirmation; all tokens die; legacy mode resumes
+claude-bridge room stop                          # pause it (keeps members + password); room start reopens
+claude-bridge room delete team                   # typed-name confirmation; all tokens die, code released
 ```
 
-Joiners run the printed link as-is, or `claude-bridge join '<share-url>' --password` for password-gated rooms (prompted — passwords never travel in links). Rooms persist in `~/.claude/.cc-bridge-rooms.json` until deleted (`--ttl 2h` makes a self-expiring room). One active room per hub for now.
+Joiners run `claude-bridge join <code>` (prompted for the password — passwords never travel in links) or a direct invite/p2p link. Rooms persist in `~/.claude/.cc-bridge-rooms.json` until deleted (`--ttl 2h` makes a self-expiring room). One room per machine for now. **Full owner + user walkthrough with examples → [docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md).**
 
 ### Privacy zones (exposure + the airlock)
 
@@ -222,15 +227,15 @@ claude-bridge hide research                 # pull it back behind the airlock
 
 Two honest notes: (1) exposure is not amnesia — a session that worked privately and is then exposed carries everything it learned (expose fresh sessions); (2) an exposed session can still be *socially engineered into revealing what it itself knows* — the airlock only guarantees it cannot fetch anything from the hidden zone.
 
-**Speakable join codes (rendezvous):** `room invite --code` publishes the join link under a short name (default: the room's name) so joiners can run `claude-bridge join mugyen-team` — no link pasting. `share --code` does the same for plain hubs. Codes live on a tiny self-hostable Worker (see `rendezvous/README.md`): open namespace, first-come, TTL'd (a dead hub's name frees up ~7 days later), and only the publisher can renew or change a live code. Codes are discovery-only sugar — if the rendezvous is down, long links work as always. Point at your own instance: `echo https://my-worker.example > ~/.claude/.cc-bridge-rendezvous`.
+**Speakable join codes (rendezvous):** `room start`/`room create` auto-publish the room's join code so joiners can run `claude-bridge join mugyen-team` — no link pasting (`room invite --code [name]` publishes a specific invite under a code). Codes live on a tiny self-hostable Worker (see `rendezvous/README.md`): open namespace, first-come, TTL'd (a dead room's name frees up ~7 days later), and only the publisher can renew or change a live code. `room stop`/`delete` release the code. Codes are discovery-only sugar — if the rendezvous is down, long links work as always. Point at your own instance: `echo https://my-worker.example > ~/.claude/.cc-bridge-rendezvous`.
 
-**End-to-end encrypted rooms:** `room create <name> --e2ee --password` seals member↔member messages so a relaying hub reads nothing (chacha20-poly1305, zero dependencies). Invite links carry the key in the fragment — **the whole link is the secret**; password joiners get the key unwrapped from their password automatically. A member with the wrong key sees `[encrypted]`, never plaintext. Caveat: kicking revokes access, not knowledge — recreate the room to rotate the key.
+**End-to-end encrypted rooms:** `room create <name> --e2ee --password` seals member↔member messages so a relaying room owner reads nothing (chacha20-poly1305, zero dependencies). Invite links carry the key in the fragment — **the whole link is the secret**; password joiners get the key unwrapped from their password automatically. A member with the wrong key sees `[encrypted]`, never plaintext. Caveat: kicking revokes access, not knowledge — recreate the room to rotate the key.
 
 > **Do you actually need `--e2ee`? Usually not.** It's a **shared symmetric room key** — one key, every member (and the host) holds the same copy; it is *not* per-user public-key crypto. So:
 > - **Default p2p between machines you own → `--e2ee` adds nothing.** The p2p transport is already end-to-end-encrypted QUIC, both endpoints are yours, and the host holds the key anyway. You'd only take on the costs (key distribution, no rotation on kick, degraded server-side features) for no gain.
 > - **`--e2ee` earns its keep only when traffic crosses a relay you don't fully trust** — a public tunnel that terminates TLS (cloudflared/zrok/pinggy), or a hosted/community relay — where you want the *infrastructure* to carry ciphertext it can't read. It does **not** hide messages from the room's host, which holds the key by design.
 >
-> Rule of thumb: trust the hub (you own it) → skip `--e2ee`; route through infrastructure you don't own → use it.
+> Rule of thumb: trust the room owner (it's you) → skip `--e2ee`; route through infrastructure you don't own → use it.
 
 **Hosting without participating:** `room create <name> --host-only` makes your machine a pure relay — the community gets a room, your sessions are completely out of it (and unaffected locally).
 
@@ -392,56 +397,51 @@ Tune the interval with `CC_BRIDGE_MONITOR_INTERVAL` (seconds, default 25).
 
 ## Part 4: Cross-network (talk to agents on other machines)
 
-By default the bridge is localhost-only. **Federation** links bridges on different machines so their agents can `ask`/`reply`/`notify` each other. It's hub-and-spoke: one person runs the **hub** (and a tunnel); everyone else **joins** as a spoke. Your sessions never leave localhost -- only the bridge-to-bridge link rides the tunnel, so if the link drops, local coordination keeps working and cross-network resumes automatically (queued messages are not lost).
+By default the bridge is localhost-only. To link machines you create a **room**; agents on every joined machine then `ask`/`reply`/`notify` each other by name. Your sessions never leave localhost — only the bridge-to-bridge link rides the wire, so if it drops, local work keeps going and cross-network resumes automatically (queued messages aren't lost).
 
-> 📘 **New to this? Start with the step-by-step guide: [docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)** — prerequisites, exact hub/spoke setup steps, verifying, disconnect/reconnect, and troubleshooting. The summary below is the quick version.
+> 📘 **The full walkthrough is its own doc: [docs/CROSS-NETWORK.md](docs/CROSS-NETWORK.md)** — owner vs user roles, passwords/invites/codes, transports, E2EE, the airlock, troubleshooting, with examples throughout. Below is just the 30-second version.
 
-### What you do (as hub or spoke)
+### The 30-second version
 
-**Prerequisite (hub only):** `cloudflared`. As of the federation release **`--share` auto-installs it** for your OS (Homebrew on macOS; the matching static binary on Linux) and best-effort **updates** it if already present — so usually you don't do anything. No account needed for the default quick tunnel. The bridge *server* stays zero-dependency; cloudflared is installed only on the hub path where a tunnel is opened. To manage it yourself instead, set `CC_BRIDGE_NO_AUTOINSTALL=1` and install via `brew install cloudflared` (macOS) or the [Cloudflare downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+```bash
+# Room OWNER (the machine hosting):
+claude-bridge room start              # opens a password-protected room; prints a join code + the password once
 
-| Action | Command | Notes |
-|---|---|---|
-| **Be the hub** | `./claude-bridge --share` | Generates a token, opens a Cloudflare quick tunnel, prints a one-line join command. Run from a **separate terminal** (not a Claude session bound to the bridge). |
-| Stable URL (optional) | `./claude-bridge --share --named-tunnel <hostname>` | Uses a pre-configured cloudflared *named* tunnel on your own domain (stable URL that survives restarts). You set up the tunnel + DNS route once with cloudflared. |
-| **Join a hub** | `./claude-bridge --join 'https://<host>#<token>'` | Paste the exact join command the hub printed. Your local bridge links upstream; your sessions stay on localhost. |
-| Spoke leaves | `./claude-bridge --unlink` | Drops the link, back to local-only. Local sessions unaffected. |
-| Hub stops sharing | `./claude-bridge --stop-share` | Closes the tunnel, keeps the token (fast re-share). The bridge keeps running. |
-| Check status | `./claude-bridge --check` | Shows role (hub/spoke/standalone), node id, the loopback **fed port** the tunnel points at, and the tunnel URL if open. |
-
-`--share`/`--join` flip a **running** bridge into hub/spoke mode without a restart, so attached sessions are never dropped.
-
-**What gets tunneled:** `--share` opens the tunnel against a *separate* loopback **federation port** (default `7401`, i.e. main port `+ 1`; override with `CC_BRIDGE_FED_PORT`), **not** the main bridge port. That fed port serves only the token-gated bridge-to-bridge link surface plus a content-free health probe. The main bridge (`/sse`, your sessions, pending messages) binds `127.0.0.1` only and is never reachable from the tunnel or the LAN. The join link is unchanged -- the tunnel hostname maps to the fed port for you.
+# Room USER (any other machine):
+claude-bridge join <code>             # joins by the speakable code → prompts for the password
+claude-bridge room leave              # leave later
+```
+Default transport is **p2p** (encrypted, no account, no public URL). For a stable public URL use `room create <name> --stable <host>` (cloudflared named tunnel) or `--tailscale`. The owner's machine must stay online — the room lives only while it's up.
 
 ### What to tell your agent
 
-Once linked, it's transparent: agents talk **by name**, same as local. `list_sessions` now shows remote sessions too, tagged with their machine's node id.
+Once joined it's transparent — agents talk **by name**, same as local. `list_sessions` now shows remote sessions tagged with their node id.
 
-- "List bridge sessions" -> the agent sees both local and remote sessions (remote ones show a `node`).
-- "Ask `frontend` about the API contract" -> a bare name resolves to a **local** session first; if it only exists remotely, it routes across the link.
-- "Ask `frontend@alice` ..." -> targets a **specific** remote session when the same name exists on more than one machine. **Local always wins for a bare name** -- use `name@node` to reach a remote one explicitly.
+- "List bridge sessions" → the agent sees local + remote (remote ones show a `node`).
+- "Ask `frontend` …" → a bare name resolves **local-first**; if it only exists remotely it routes across the link automatically.
+- "Ask `frontend@alice` …" → targets a **specific** remote session when the name exists on more than one machine. Use `name@node` to reach a remote one explicitly.
 
-### Cloudflare quick tunnels were removed
+### Why p2p is the default (and which tunnels to avoid)
 
-Cloudflare **quick** tunnels buffer Server-Sent Events until the connection closes (cloudflared#1449; official docs: "Quick Tunnels do not support SSE") — through one, spokes register fine but **never receive forwarded messages**. v2.8.0 removed them entirely; `share --provider cloudflared-quick` now explains why and points at the working transports. Use the default p2p share, `--stable <host>` (cloudflared **named** tunnels stream SSE correctly), or `--tailscale`.
+Cloudflare **quick** tunnels buffer Server-Sent Events until the connection closes (cloudflared#1449) — through one, spokes register but **never receive forwarded messages**. They were removed entirely. Use the default **p2p**, a cloudflared **named** tunnel (`--stable <host>`), or `--tailscale` — all stream SSE correctly. `bore` is plaintext (demo only).
 
-### p2p forwarder died (spoke can't reach the hub)
+### Recovering a dead p2p forwarder
 
-A p2p spoke reaches its hub through a local `dumbpipe connect-tcp` forwarder. If it dies (reboot, crash), the spoke's reconnect loop gets `ECONNREFUSED` forever. `claude-bridge doctor` flags this ("p2p forwarder DOWN") and prints the exact re-join command (the ticket is remembered in `/tmp/claude-bridge-spoke-pipe.ticket`). Re-joining with the same link is always safe.
+A p2p spoke reaches the room owner through a local `dumbpipe connect-tcp` forwarder. If it dies (reboot, crash), the reconnect loop gets `ECONNREFUSED` forever. `claude-bridge doctor` flags this ("p2p forwarder DOWN") and prints the exact re-join command (the ticket is remembered in `/tmp/claude-bridge-spoke-pipe.ticket`). Re-joining is always safe — and free (no password, your membership is reused).
 
-### Keeping an always-on hub up (supervise cloudflared)
+### Keeping an always-on room (supervise the tunnel)
 
-`cloudflared` is a child process, not a service -- it can exit or silently lose its edge connection on a network blip (you'll see `bridge.houserbot.com` return a Cloudflare `530`/`1033` even though the bridge is fine). `claude-bridge` does not babysit it. For an **always-on hub**, run cloudflared under a supervisor so it restarts itself: a `launchd` plist (macOS) or a `systemd` unit (Linux) with `Restart=always`, running `cloudflared tunnel run <named-tunnel>` against `http://localhost:$FED_PORT`. Don't trust `pgrep` for liveness -- cloudflared can stay running but disconnected; poll its metrics `--metrics 127.0.0.1:<port>` `/ready` endpoint (200 = at least one edge connection) instead. For an ad-hoc session this isn't needed -- just re-launch cloudflared if the tunnel drops.
+For a 24/7 room, host it on an always-on box and, if you use a **cloudflared named** tunnel, run cloudflared under a supervisor (`launchd` plist on macOS, `systemd` unit with `Restart=always` on Linux) pointing at `http://localhost:$FED_PORT`. cloudflared can stay running but silently lose its edge (you'll see a Cloudflare `530`/`1033` even though the bridge is fine) — don't trust `pgrep`; poll its `--metrics 127.0.0.1:<port>` `/ready` endpoint. The **p2p** transport has no such daemon — just keep the machine on (use `room create --stable …` only if you specifically need a public URL).
 
 ### Security, honestly
 
-- **The default p2p share IS end-to-end encrypted.** dumbpipe/iroh runs QUIC with TLS between the two endpoints; even when NAT traversal falls back to a relay, the relay forwards ciphertext it cannot read. The tunnel providers differ: cloudflared/zrok/pinggy encrypt the wire but **terminate TLS at their edge** (the provider could see plaintext); tailscale is WireGuard-encrypted tailnet-internal; **bore is plaintext through the relay** (demo only). For a trusted group plus a shared token, TLS-to-edge is an accepted bar — pick p2p or tailscale when it isn't.
-- **One shared token per hub = a trusted group.** Anyone with the join link (token + URL) is a fully trusted member: they can see the roster and message any session, and within the group node ids and session names are self-asserted (a member could claim another's name or node id). This is a deliberate design choice -- per-node tokens/identity were considered and **declined** to keep joining a one-paste operation. Treat the join link like a password. **To revoke the group, rotate the token** (`./claude-bridge --stop-share` then `--share` mints a fresh one; every spoke must re-`--join`). Give each machine a **distinct** `--node <id>` (defaults to the hostname) so the roster and `name@node` addressing stay unambiguous.
-- **Only the link surface is exposed -- by construction, not just by a token.** The bridge runs two listeners: the **main** one (`127.0.0.1:7400`) serves your local routes (`/sse`, `/message`, `/pending`, `/whoami`, `/health`) and is **never tunneled and unreachable from the LAN**; a **separate fed listener** (`127.0.0.1:7401` in hub mode) serves ONLY the token-gated `/link/*` plus the content-free `/health/ping`, and that fed port is the **only** thing the tunnel exposes. So `/sse`/`/pending`/etc. simply don't exist on the public surface -- a remote caller cannot register, ask, or read pending messages even without a token. When sharing is on, every internet-reachable path requires the token except `/health/ping` (which leaks no session names). `/link/reload` (config hot-reload) is loopback-only and token-gated.
+- **The default p2p link IS end-to-end encrypted.** dumbpipe/iroh runs QUIC+TLS between the two endpoints; even when NAT traversal falls back to a relay, the relay forwards ciphertext. Other transports differ: cloudflared/zrok/pinggy **terminate TLS at their edge** (the provider could see plaintext); tailscale is WireGuard-encrypted; **bore is plaintext** (demo only). When the relay isn't trusted, add `--e2ee` (see the [E2EE callout](#privacy-zones-exposure--the-airlock)) or stick to p2p/tailscale.
+- **Membership is per-machine and revocable.** Each joined machine holds its own token; `room kick <node>` revokes one instantly (and across restarts) without touching the rest. Within a room, node ids and session names are self-asserted — give each machine a distinct name (`claude-bridge node <id>`) so the roster and `name@node` addressing stay unambiguous. Treat join links and the room password like secrets.
+- **Only the link surface is exposed — by construction, not just by a token.** Two listeners: the **main** one (`127.0.0.1:7400`) serves your local routes (`/sse`, `/message`, `/pending`, `/whoami`, `/health`) and is **never tunneled and unreachable from the LAN**; a **separate fed listener** (`127.0.0.1:7401` when hosting) serves ONLY the token-gated `/link/*` plus the content-free `/health/ping`, and that fed port is the **only** thing the link exposes. So a remote caller cannot register, ask, or read pending messages even without a token. `/link/reload` is loopback-only and token-gated.
 
 ### `notify` to an offline remote name
 
-A NOTICE to a remote session that's currently offline queues on the hub and delivers when that node reconnects (30-day TTL). As with local names, a **rotated/auto-generated** remote name may never reconnect under the same name and will dead-letter -- prefer stable names (`CC_BRIDGE_SESSION`) for cross-network NOTICEs.
+A NOTICE to a remote session that's offline queues on the room owner and delivers when that node reconnects (30-day TTL). A **rotated/auto-generated** remote name may never reconnect under the same name and will dead-letter — prefer stable names (`CC_BRIDGE_SESSION`) for cross-network NOTICEs.
 
 ---
 
