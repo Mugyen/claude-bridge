@@ -30,7 +30,12 @@ fi
 # ("on"), flip the stamp to "rearm" so the PostToolUse hook re-nudges the agent
 # to start a fresh Monitor on its next tool call (with the correctly-resolved
 # name). "off" (user-disabled) and absent (never armed) are left untouched.
-MONITOR_FILE="/tmp/claude-bridge-${SESSION_ID}.monitor"
+MONITOR_FILE="${CC_BRIDGE_WAKE_DIR:-/tmp/claude/cc-bridge}/${SESSION_ID}.monitor"
+# Back-compat: an "on" flag from the previous build may still be at the old path.
+if [ ! -f "$MONITOR_FILE" ] && [ -f "/tmp/claude-bridge-${SESSION_ID}.monitor" ]; then
+  mkdir -p "$(dirname "$MONITOR_FILE")" 2>/dev/null
+  mv "/tmp/claude-bridge-${SESSION_ID}.monitor" "$MONITOR_FILE" 2>/dev/null
+fi
 if [ "$(cat "$MONITOR_FILE" 2>/dev/null)" = "on" ]; then
   echo "rearm" > "$MONITOR_FILE"
 fi

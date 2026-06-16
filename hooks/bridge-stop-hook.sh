@@ -60,32 +60,33 @@ fi
 # marker, set here, cleared by the PostToolUse hook on the next ask/reply).
 # Respects the .monitor stamp: "on" = already armed, "off" = user-disabled.
 ENGAGED_FILE="/tmp/claude-bridge-${SESSION_ID}.engaged"
-MONITOR_FILE="/tmp/claude-bridge-${SESSION_ID}.monitor"
+WAKE_DIR="${CC_BRIDGE_WAKE_DIR:-/tmp/claude/cc-bridge}"
+mkdir -p "$WAKE_DIR" 2>/dev/null
+MONITOR_FILE="${WAKE_DIR}/${SESSION_ID}.monitor"
+WAKE_FILE="${WAKE_DIR}/${SESSION_ID}.wake"
 ARMBLOCK_FILE="/tmp/claude-bridge-${SESSION_ID}.armblocked"
+# Back-compat: pick up an "on" flag still living at the old /tmp path.
+if [ ! -f "$MONITOR_FILE" ] && [ -f "/tmp/claude-bridge-${SESSION_ID}.monitor" ]; then
+  cp -p "/tmp/claude-bridge-${SESSION_ID}.monitor" "$MONITOR_FILE" 2>/dev/null
+fi
 MONITOR_STATE=$(cat "$MONITOR_FILE" 2>/dev/null)
 if [ -f "$ENGAGED_FILE" ] && [ "$MONITOR_STATE" != "on" ] && [ "$MONITOR_STATE" != "off" ] && [ ! -f "$ARMBLOCK_FILE" ]; then
   touch "$ARMBLOCK_FILE"
-  INTERVAL="${CC_BRIDGE_MONITOR_INTERVAL:-25}"
   REASON="🔗 claude-bridge: You engaged on the bridge (asked or replied) but have NOT armed your idle-listener — so any question that arrives while you sit idle will be MISSED until the user pokes you. Arm it NOW before finishing:
 
 → Call the Monitor tool with persistent: true, description: \"incoming bridge messages for ${SESSION}\", and this exact command. Arm only ONE — if a bridge monitor is already running for this session, TaskStop it first:
 
-prev=\"\"
-while true; do
-  out=\$(curl -sf \"http://localhost:${PORT}/pending?claude_session_id=${SESSION_ID}&peek=1\" 2>/dev/null || true)
-  if [ -n \"\$out\" ]; then
-    ids=\$(printf '%s' \"\$out\" | grep -o 'id: [a-z0-9-]*' | sort)
-    if [ \"\$ids\" != \"\$prev\" ]; then
-      printf '%s\\n' \"\$out\" | grep -E 'Question from|NEW QUESTION|NOTICE from|id:'
-      prev=\"\$ids\"
-    fi
-  fi
-  sleep ${INTERVAL}
-done
+WAKE=\"${WAKE_FILE}\"
+mkdir -p \"\$(dirname \"\$WAKE\")\" 2>/dev/null
+if ! ( touch \"\$WAKE\" 2>/dev/null && [ -w \"\$WAKE\" ] ); then
+  echo \"monitor: cannot write \$WAKE — your sandbox blocks this path. Override CC_BRIDGE_WAKE_DIR on BOTH the bridge server and this session, or disable the sandbox.\"
+  exit 1
+fi
+tail -n 0 -F \"\$WAKE\" 2>&1
 
-This costs ZERO tokens while your inbox is empty — the loop only wakes you when a NEW message id appears; then call check_inbox().
+This is sandbox-proof (no network). It costs ZERO tokens while your inbox is empty — the bridge server appends a line to that file on every new pending event; tail -F emits it; the harness wakes you. Call check_inbox() on wake.
 The instant the Monitor is running, run:  echo on > ${MONITOR_FILE}
-Then tell the user one line, e.g. \"Armed bridge idle-listener (polling ${INTERVAL}s).\"
+Then tell the user one line, e.g. \"Armed bridge idle-listener (file-wake).\"
 (If you genuinely don't want it:  echo off > ${MONITOR_FILE}  to disable auto-arm for this session.)"
   jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
   exit 0

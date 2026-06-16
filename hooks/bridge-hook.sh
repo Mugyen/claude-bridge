@@ -102,7 +102,19 @@ PENDING=$(curl -sf --max-time 1 "http://localhost:${PORT}/pending?session=${SESS
 #   absent → eligible (nudge on ask/reply)   on → armed   off → user disabled
 #   rearm  → was armed before a restart/resume; re-nudge on ANY tool call so the
 #            listener comes back even if the session doesn't ask/reply again.
-MONITOR_FILE="/tmp/claude-bridge-${SESSION_ID}.monitor"
+# Path strategy: the .monitor flag is written by the AGENT via a Bash tool call
+# (`echo on > ...`), and Claude Code's command sandbox blocks writes to
+# /tmp/claude-bridge-*. /tmp/claude/cc-bridge/ IS on the sandbox's writable
+# allowlist (verified against Claude Code 2.1.x). Same path used by the wake
+# file the Monitor tails, so the agent only learns one location.
+WAKE_DIR="${CC_BRIDGE_WAKE_DIR:-/tmp/claude/cc-bridge}"
+mkdir -p "$WAKE_DIR" 2>/dev/null
+MONITOR_FILE="${WAKE_DIR}/${SESSION_ID}.monitor"
+WAKE_FILE="${WAKE_DIR}/${SESSION_ID}.wake"
+# Back-compat: migrate any existing on/off flag from the old /tmp path.
+if [ ! -f "$MONITOR_FILE" ] && [ -f "/tmp/claude-bridge-${SESSION_ID}.monitor" ]; then
+  cp -p "/tmp/claude-bridge-${SESSION_ID}.monitor" "$MONITOR_FILE" 2>/dev/null
+fi
 MONITOR_STATE=$(cat "$MONITOR_FILE" 2>/dev/null)
 NUDGE_MONITOR=0
 case "$MONITOR_STATE" in
@@ -122,28 +134,22 @@ case "$TOOL" in
     ;;
 esac
 if [ "$NUDGE_MONITOR" = 1 ]; then
-      INTERVAL="${CC_BRIDGE_MONITOR_INTERVAL:-25}"
       NUDGE="🔗 claude-bridge: You're now active on the bridge. Arm your idle-listener so you can answer questions that arrive while you sit idle — without it, a dormant session never sees new questions until the user pokes it. (This reminder repeats on every ask/reply until you actually arm it.)
 
 → Call the Monitor tool NOW with persistent: true, description: \"incoming bridge messages for ${SESSION}\", and this exact command. Arm only ONE — if a bridge monitor is already running for this session, TaskStop it first:
 
-prev=\"\"
-while true; do
-  out=\$(curl -sf \"http://localhost:${PORT}/pending?claude_session_id=${SESSION_ID}&peek=1\" 2>/dev/null || true)
-  if [ -n \"\$out\" ]; then
-    ids=\$(printf '%s' \"\$out\" | grep -o 'id: [a-z0-9-]*' | sort)
-    if [ \"\$ids\" != \"\$prev\" ]; then
-      printf '%s\\n' \"\$out\" | grep -E 'Question from|NEW QUESTION|NOTICE from|id:'
-      prev=\"\$ids\"
-    fi
-  fi
-  sleep ${INTERVAL}
-done
+WAKE=\"${WAKE_FILE}\"
+mkdir -p \"\$(dirname \"\$WAKE\")\" 2>/dev/null
+if ! ( touch \"\$WAKE\" 2>/dev/null && [ -w \"\$WAKE\" ] ); then
+  echo \"monitor: cannot write \$WAKE — your sandbox blocks this path. Override CC_BRIDGE_WAKE_DIR on BOTH the bridge server and this session, or disable the sandbox.\"
+  exit 1
+fi
+tail -n 0 -F \"\$WAKE\" 2>&1
 
-This costs ZERO tokens while your inbox is empty — the loop runs in the shell and only wakes you when a NEW message id appears.
+This is sandbox-proof (no network — the bridge server appends a line to that file on every new pending event, tail -F emits it as a stdout line, the harness wakes you). It costs ZERO tokens while your inbox is empty.
 When it wakes you, call check_inbox() to read what arrived — a question to answer, or a 📨 NOTICE to simply take in (notices appear in the notices list; do NOT reply to them).
 IMPORTANT: the instant the Monitor is running, run this so the reminder stops:  echo on > ${MONITOR_FILE}
-Then tell the user one line, e.g. \"Armed bridge idle-listener (polling ${INTERVAL}s).\"
+Then tell the user one line, e.g. \"Armed bridge idle-listener (file-wake).\"
 To CLOSE it later (user says \"stop the bridge listener\"): TaskStop the monitor, then run  echo off > ${MONITOR_FILE}  to disable auto-run for this session.
 To RE-ENABLE: run  rm -f ${MONITOR_FILE}  then arm it again (or just ask/reply once more)."
   if [ -n "$MSG" ]; then

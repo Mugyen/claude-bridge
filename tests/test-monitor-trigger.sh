@@ -21,14 +21,19 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 FAKE_ID="MONITOR-TEST-$$"
 MCP_FILE="/tmp/claude-bridge-${FAKE_ID}.mcp"
 NAME_FILE="/tmp/claude-bridge-${FAKE_ID}.name"
-MONITOR_FILE="/tmp/claude-bridge-${FAKE_ID}.monitor"
+# The monitor flag and wake file now live in the sandbox-writable wake dir
+# (see hooks/bridge-hook.sh: /tmp/claude/cc-bridge by default).
+WAKE_DIR="${CC_BRIDGE_WAKE_DIR:-/tmp/claude/cc-bridge}"
+mkdir -p "$WAKE_DIR" 2>/dev/null
+MONITOR_FILE="${WAKE_DIR}/${FAKE_ID}.monitor"
+WAKE_FILE="${WAKE_DIR}/${FAKE_ID}.wake"
 HOOK="$REPO_DIR/hooks/bridge-hook.sh"
 
 PASS=0
 FAIL=0
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 pass() { echo "  ✓ $1"; PASS=$((PASS+1)); }
-trap "rm -f /tmp/claude-bridge-${FAKE_ID}.*" EXIT
+trap "rm -f /tmp/claude-bridge-${FAKE_ID}.* '$MONITOR_FILE' '$WAKE_FILE'" EXIT
 
 # MCP present so the hook doesn't short-circuit; .name lets it resolve a session
 # name without a running bridge.
@@ -104,24 +109,26 @@ else
   fail "ask should nudge after re-enable: output='$OUT' state='$(cat "$MONITOR_FILE" 2>/dev/null)'"
 fi
 
-# ── Case 8: the emitted command polls by STABLE claude_session_id (not name),
-#    names the session in the description, and embeds the interval + arm-confirm ─
-rm -f "$MONITOR_FILE"
-OUT=$(CC_BRIDGE_MONITOR_INTERVAL=42 run "mcp__bridge__reply")
-if echo "$OUT" | grep -q "claude_session_id=$FAKE_ID" && echo "$OUT" | grep -q "for monitortest" \
-   && echo "$OUT" | grep -q "sleep 42" && echo "$OUT" | grep -q "echo on > $MONITOR_FILE"; then
-  pass "nudge polls by claude_session_id, names the session, embeds interval + 'echo on' arm-confirm"
-else
-  fail "nudge should poll by claude_session_id + embed name/interval/arm-confirm: output='$OUT'"
-fi
-
-# ── Case 9: the armed Monitor command wakes on NOTICEs and PEEKS (no consume) ─
+# ── Case 8: the emitted command names the session + the sandbox-safe wake path,
+#    embeds the 'echo on' arm-confirm pointing at the new MONITOR_FILE path ─────
 rm -f "$MONITOR_FILE"
 OUT=$(run "mcp__bridge__reply")
-if echo "$OUT" | grep -q "NOTICE from" && echo "$OUT" | grep -q "peek=1"; then
-  pass "arm command greps 'NOTICE from' and peeks (peek=1) so it doesn't consume notices"
+if echo "$OUT" | grep -q "for monitortest" && echo "$OUT" | grep -q "$WAKE_FILE" \
+   && echo "$OUT" | grep -q "echo on > $MONITOR_FILE"; then
+  pass "nudge names the session, embeds the wake-file path + 'echo on' arm-confirm"
 else
-  fail "arm command should grep NOTICE from + use peek=1: output='$OUT'"
+  fail "nudge should embed name + wake-file path + arm-confirm: output='$OUT'"
+fi
+
+# ── Case 9: the armed Monitor command uses file-wake (tail -F), not curl-polling
+#    — sandbox-proof. Also asserts loud-failure check on unwritable wake path. ──
+rm -f "$MONITOR_FILE"
+OUT=$(run "mcp__bridge__reply")
+if echo "$OUT" | grep -q 'tail -n 0 -F' && echo "$OUT" | grep -q "$WAKE_FILE" \
+   && echo "$OUT" | grep -q "sandbox blocks this path"; then
+  pass "arm command uses tail -F file-wake (sandbox-proof) with loud-failure diagnostic"
+else
+  fail "arm command should use tail -F + emit a sandbox diagnostic on failure: output='$OUT'"
 fi
 
 # ── Case 10: 'rearm' state (resumed while armed) → re-nudge on ANY tool call ──

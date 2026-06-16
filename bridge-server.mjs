@@ -60,6 +60,33 @@ const ROLE_FILE = process.env.CC_BRIDGE_ROLE_FILE ?? `${HOME}/.claude/.cc-bridge
 const HUB_FILE = process.env.CC_BRIDGE_HUB_FILE ?? `${HOME}/.claude/.cc-bridge-hub`;
 const NODE_FILE = process.env.CC_BRIDGE_NODE_FILE ?? `${HOME}/.claude/.cc-bridge-node`;
 const SPOKE_ROOM_FILE = process.env.CC_BRIDGE_SPOKE_ROOM_FILE ?? `${HOME}/.claude/.cc-bridge-spoke-room`;
+// Sandbox-safe wake directory. Per the field report from agent-sandbox, Claude
+// Code's command sandbox blocks loopback HTTP to localhost:7400 AND writes to
+// /tmp/claude-bridge-* — so the old poll-based idle listener silently does
+// nothing under sandbox. /tmp/claude (and $TMPDIR) ARE on the sandbox's writable
+// allowlist, so we put a per-session wake file there: the server appends a line
+// on every new pending event; the hook's Monitor tail -F's it. No network in
+// the wake path → sandbox can't break it. Same env override on both sides.
+const WAKE_DIR = process.env.CC_BRIDGE_WAKE_DIR ?? `/tmp/claude/cc-bridge`;
+try { fs.mkdirSync(WAKE_DIR, { recursive: true, mode: 0o700 }); } catch {}
+/** Wake the model for sessionName, if that name is registered with a
+ *  claude_session_id on this bridge. No-op for remote/unknown targets — they're
+ *  woken by the hook on THEIR machine when injectRemote queues the message there.
+ *  The event lines surface as stdout in the agent's `tail -F` Monitor, so they
+ *  see WHAT arrived (a question banner / a notice banner) without an MCP call. */
+function wakeIfLocal(toName, eventLines) {
+  if (!toName) return;
+  for (const [csid, name] of claudeIdToName) {
+    if (name !== toName) continue;
+    try {
+      const body = (Array.isArray(eventLines) && eventLines.length ? eventLines : [`bridge wake ${Date.now()}`]).join("\n") + "\n";
+      fs.appendFileSync(`${WAKE_DIR}/${csid}.wake`, body, { mode: 0o600 });
+    } catch {}
+    return;
+  }
+}
+/** Trim a long question body for the wake banner. */
+const wakeSnippet = (s) => (typeof s === "string" && s.length > 0 ? (s.length > 200 ? s.slice(0, 200) + "…" : s) : "");
 // Default exposure policy for sessions on a FEDERATED bridge: "all" (legacy) or
 // "none" (privacy-first — sessions are hidden from the room until exposed).
 // Written by `join --expose <all|none>`; per-session override via register() or
@@ -224,7 +251,7 @@ function gc() {
     if (![...nameToSSE.values()].some((id) => sessions.get(id)?.name === name)) {
       // name no longer has an active session — check if it's orphaned
       const hasMessages = [...messages.values()].some((m) => m.from === name || m.to === name);
-      if (!hasMessages) claudeIdToName.delete(cid);
+      if (!hasMessages) { claudeIdToName.delete(cid); try { fs.rmSync(`${WAKE_DIR}/${cid}.wake`, { force: true }); } catch {} }
     }
   }
 
@@ -628,6 +655,7 @@ function injectRemote(fwd) {
       ...(fwd.enc && typeof fwd.enc === "object" ? { enc: fwd.enc } : {}),
     };
     messages.set(msg.id, msg);
+    wakeIfLocal(fwd.to, [`🔔 Bridge — Question from "${fwd.from}@${fwd.originNode}"`, `Q (id: ${msg.id}): "${wakeSnippet(msg.question)}"`]);
     pushThread(fwd.from, fwd.to, msg.id);
     console.log(`${ts()} ⇄ injected remote question ${msg.id} ${fwd.from}@${fwd.originNode} → ${fwd.to}`);
   } else if (fwd.kind === "notice") {
@@ -640,6 +668,7 @@ function injectRemote(fwd) {
       ...(fwd.enc && typeof fwd.enc === "object" ? { enc: fwd.enc } : {}),
     };
     messages.set(msg.id, msg);
+    wakeIfLocal(fwd.to, [`📨 NOTICE from "${fwd.from}@${fwd.originNode}"`, `id: ${msg.id}`]);
     pushThread(fwd.from, fwd.to, msg.id);
     console.log(`${ts()} ⇄ injected remote notice ${msg.id} ${fwd.from}@${fwd.originNode} → ${fwd.to}`);
   } else if (fwd.kind === "answer") {
@@ -1332,6 +1361,7 @@ async function executeTool(sseId, name, args) {
       const id = crypto.randomUUID(); // full 122-bit id: unguessable, no pre-claim/collision vector (S3)
       const msg = { id, from: myName, to: target.name, question, answer: null, ts: Date.now(), answeredAt: null, origin: { node: FED.node } };
       messages.set(id, msg);
+      if (target.kind === "local") wakeIfLocal(target.name, [`🔔 Bridge — Question from "${myName}"`, `Q (id: ${id}): "${wakeSnippet(question)}"`]);
       pushThread(myName, target.name, id);
 
       if (target.kind === "remote") {
@@ -1410,6 +1440,7 @@ async function executeTool(sseId, name, args) {
       // NO answer field — lesson #19.
       const msg = { id, from: myName, to: target.name ?? to, kind: "notice", content, delivered: false, ts: Date.now(), origin: { node: FED.node } };
       messages.set(id, msg);
+      if (target.kind === "local") wakeIfLocal(msg.to, [`📨 NOTICE from "${myName}"`, `id: ${id}`]);
       pushThread(myName, msg.to, id);
 
       if (target.kind === "remote") {
