@@ -40,6 +40,10 @@ TUNNEL_URL_FILE="${CC_BRIDGE_TUNNEL_URL:-/tmp/claude-bridge-tunnel.url}"
 # bore|pinggy|zrok|tailscale). stop-share/status read it to tear down / report the
 # right thing — update EVERY reader if you add a writer (DEVELOPER.md lesson #32).
 TUNNEL_PROVIDER_FILE="${CC_BRIDGE_TUNNEL_PROVIDER:-/tmp/claude-bridge-tunnel.provider}"
+# The NAME of the room this machine has joined as a spoke (the owner's room name,
+# learned from the /link/join response). Local-only label so `health`/`status` can
+# say which room you're in — the hub URL is just a forwarder address. Cleared on leave.
+SPOKE_ROOM_FILE="${CC_BRIDGE_SPOKE_ROOM_FILE:-$HOME/.claude/.cc-bridge-spoke-room}"
 # P2P spoke-side forwarder state (dumbpipe connect-tcp), same env-override pattern.
 SPOKE_PIPE_PID_FILE="${CC_BRIDGE_SPOKE_PIPE_PID:-/tmp/claude-bridge-spoke-pipe.pid}"
 SPOKE_PIPE_PORT_FILE="${CC_BRIDGE_SPOKE_PIPE_PORT:-/tmp/claude-bridge-spoke-pipe.port}"
@@ -645,13 +649,15 @@ room_status() {
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 -X POST "${hub}/link/heartbeat" \
       -H "X-Bridge-Token: $(cat "$TOKEN_FILE" 2>/dev/null)" -H "Content-Type: application/json" \
       -d "$(jq -nc --arg n "$(cat "$NODE_FILE" 2>/dev/null)" '{node:$n}')" 2>/dev/null || echo 000)
+    local rname rlabel; rname=$(cat "$SPOKE_ROOM_FILE" 2>/dev/null || true)
+    rlabel=$([ -n "$rname" ] && echo "room \"$rname\"" || echo "a room")
     if [ "$code" = "200" ]; then
-      ok "In a room as \"$(cat "$NODE_FILE" 2>/dev/null)\" — owner ● reachable"
+      ok "In $rlabel as \"$(cat "$NODE_FILE" 2>/dev/null)\" — owner ● reachable"
     elif [ "$code" = "401" ] || [ "$code" = "403" ]; then
-      fail "REMOVED from the room — the owner kicked this machine (token rejected). Run: claude-bridge room leave  (to clean up)"
+      fail "REMOVED from $rlabel — the owner kicked this machine (token rejected). Run: claude-bridge room leave  (to clean up)"
       return
     else
-      warn "In a room as \"$(cat "$NODE_FILE" 2>/dev/null)\" — owner ○ UNREACHABLE (they're offline or the link is down)"
+      warn "In $rlabel as \"$(cat "$NODE_FILE" 2>/dev/null)\" — owner ○ UNREACHABLE (they're offline or the link is down)"
     fi
     local ex hd
     ex=$(printf '%s' "$(room_api GET /sessions/exposure 2>/dev/null)" | jq -r '[.sessions[]|select(.expose)]|length' 2>/dev/null || echo 0)
@@ -1839,7 +1845,9 @@ join_hub() {
       rm -f "$SPOKE_PIPE_PORT_FILE" "$SPOKE_PIPE_TICKET_FILE"
       exit 1
     fi
-    ok "Joined room \"$(printf '%s' "$resp" | jq -r '.room.name // "?"')\" as member \"$jnode\" (received a personal token)"
+    local _rname; _rname=$(printf '%s' "$resp" | jq -r '.room.name // empty' 2>/dev/null)
+    ok "Joined room \"${_rname:-?}\" as member \"$jnode\" (received a personal token)"
+    [ -n "$_rname" ] && { printf '%s' "$_rname" > "$SPOKE_ROOM_FILE" 2>/dev/null; chmod 600 "$SPOKE_ROOM_FILE" 2>/dev/null || true; }
     # E2EE key handling: link fragment (invite) or password-unwrap (wrapped_key).
     if [ -n "$link_room_key" ]; then
       printf '%s' "$link_room_key" > "$ROOM_KEY_FILE"; chmod 600 "$ROOM_KEY_FILE"
@@ -1912,7 +1920,7 @@ unlink_hub() {
   # ORDER MATTERS: the hub was notified ABOVE (over the still-alive forwarder for
   # p2p links) — only now is it safe to kill the local pipe.
   kill_recorded "$SPOKE_PIPE_PID_FILE" "p2p forwarder"
-  rm -f "$SPOKE_PIPE_PORT_FILE" "$SPOKE_PIPE_TICKET_FILE" "$ROOM_KEY_FILE"
+  rm -f "$SPOKE_PIPE_PORT_FILE" "$SPOKE_PIPE_TICKET_FILE" "$ROOM_KEY_FILE" "$SPOKE_ROOM_FILE"
   fed_reload && ok "Unlinked — back to standalone (local sessions unaffected)"
 }
 
@@ -2174,10 +2182,11 @@ health_cmd() {
     ok "Room (hosting): $(printf '%s' "$rinfo" | jq -r '.room | "\"\(.name)\" — \(.members|length) member(s), \(.invites|length) open invite(s), password \(if .password_set then "on" else "off" end)"')"
   fi
   if [ "$role" = "spoke" ]; then
-    local hub; hub=$(cat "$HUB_FILE" 2>/dev/null || true)
+    local hub rname; hub=$(cat "$HUB_FILE" 2>/dev/null || true); rname=$(cat "$SPOKE_ROOM_FILE" 2>/dev/null || true)
+    local rlabel; rlabel=$([ -n "$rname" ] && echo "room \"$rname\"" || echo "a room")
     if [ -n "$hub" ]; then
-      if curl -sf --max-time 6 "$hub/health/ping" >/dev/null 2>&1; then ok "In a room (member) via $hub — reachable"
-      else warn "In a room (member) via $hub — NOT reachable (host offline or tunnel down)"; fi
+      if curl -sf --max-time 6 "$hub/health/ping" >/dev/null 2>&1; then ok "In $rlabel (member, as \"$node\") — reachable"
+      else warn "In $rlabel (member, as \"$node\") — NOT reachable (owner offline or tunnel down)"; fi
     fi
     [ -n "$own_room" ] && warn "You also OWN a paused room \"$own_room\" (not hosting now) — see: claude-bridge room list"
   elif [ "$role" = "hub" ]; then

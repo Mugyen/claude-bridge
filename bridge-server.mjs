@@ -59,6 +59,7 @@ const TOKEN_FILE = process.env.CC_BRIDGE_TOKEN_FILE ?? `${HOME}/.claude/.cc-brid
 const ROLE_FILE = process.env.CC_BRIDGE_ROLE_FILE ?? `${HOME}/.claude/.cc-bridge-role`;
 const HUB_FILE = process.env.CC_BRIDGE_HUB_FILE ?? `${HOME}/.claude/.cc-bridge-hub`;
 const NODE_FILE = process.env.CC_BRIDGE_NODE_FILE ?? `${HOME}/.claude/.cc-bridge-node`;
+const SPOKE_ROOM_FILE = process.env.CC_BRIDGE_SPOKE_ROOM_FILE ?? `${HOME}/.claude/.cc-bridge-spoke-room`;
 // Default exposure policy for sessions on a FEDERATED bridge: "all" (legacy) or
 // "none" (privacy-first — sessions are hidden from the room until exposed).
 // Written by `join --expose <all|none>`; per-session override via register() or
@@ -952,6 +953,7 @@ function goStandalone(reason) {
   try { fs.writeFileSync(ROLE_FILE, "standalone", { mode: 0o600 }); } catch {}
   try { fs.writeFileSync(HUB_FILE, "", { mode: 0o600 }); } catch {}
   try { fs.writeFileSync(TOKEN_FILE, "", { mode: 0o600 }); } catch {}
+  try { fs.rmSync(SPOKE_ROOM_FILE, { force: true }); } catch {}
 }
 
 function connectToHub() {

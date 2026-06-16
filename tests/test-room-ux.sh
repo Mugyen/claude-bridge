@@ -64,7 +64,8 @@ hub room rotate-password testpw123456 >/dev/null 2>&1
 OUT=$(spoke join "http://127.0.0.1:${HUB_FED}" --password testpw123456 --node spokeux 2>&1)
 echo "$OUT" | grep -qi "joined room" && ok "password join (direct link) works" || bad "pw join: $(echo "$OUT"|tail -4)"
 [ "$(cat "$SPOKEHOME/.claude/.cc-bridge-role" 2>/dev/null)" = "spoke" ] && ok "joiner is in spoke role" || bad "spoke role not set"
-OUT=$(spoke status 2>&1); echo "$OUT" | grep -qi "In a room" && ok "member status: 'In a room'" || bad "member status: $(echo "$OUT"|tail -3)"
+OUT=$(spoke status 2>&1); echo "$OUT" | grep -qi "In room" && ok "member status names the room joined" || bad "member status: $(echo "$OUT"|tail -3)"
+[ "$(cat "$SPOKEHOME/.claude/.cc-bridge-spoke-room" 2>/dev/null)" = "$(cat "$WORK/h.rooms" 2>/dev/null | jq -r '.rooms|to_entries[0].value.name')" ] && ok "spoke persisted the joined room name" || bad "spoke-room file = '$(cat "$SPOKEHOME/.claude/.cc-bridge-spoke-room" 2>/dev/null)'"
 
 # ── 6. room leave (member)
 OUT=$(spoke room leave 2>&1); echo "$OUT" | grep -qi "unlinked\|leav\|standalone" && ok "room leave works" || bad "leave: $(echo "$OUT"|tail -2)"
@@ -129,7 +130,7 @@ echo "$OUT" | grep -qi "created" && echo "$OUT" | grep -qi "listroom" && ok "roo
 spoke join "http://127.0.0.1:${HUB_FED}" --password lrpw123456 --node spokehealth >/dev/null 2>&1
 # give the spoke its own paused owned-room record too (create then it stays owned)
 OUT=$(spoke health 2>&1)
-echo "$OUT" | grep -qi "In a room (member)" && ok "spoke health shows member-via-hub, not an owned-room line" || bad "spoke health: $(echo "$OUT"|tail -5)"
+echo "$OUT" | grep -qiE "In room .* \(member" && ok "spoke health shows the joined room as a member, not an owned-room line" || bad "spoke health: $(echo "$OUT"|tail -5)"
 echo "$OUT" | grep -qi "Room (hosting):" && bad "spoke health WRONGLY shows a hosted room" || ok "spoke health does not claim to host a room"
 spoke room leave >/dev/null 2>&1
 
