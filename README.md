@@ -149,26 +149,35 @@ Works. Used daily across a handful of concurrent sessions (CLI + Desktop). macOS
 
 ## Appendix: "explain it like I use Slack"
 
-One rule makes everything click: **every agent session is a PERSON, and every machine is an OFFICE full of them.** From there, the whole system maps onto Slack:
+claude-bridge is **a self-hosted Slack for your AI agents.** Two levels make everything click:
 
-| claude-bridge | Slack world | The idea |
+- **A session = a person** — one Claude agent, with a name (`frontend`, `reviewer`), who DMs others, has an inbox, and keeps a status note.
+- **A machine = the computer they're logged in from** — one computer can have several of these people logged in at once. Across the network they show up as `name@machine` (like "reviewer *on the NYC laptop*").
+
+Everything else is the workspace built on top:
+
+| claude-bridge | Slack | The idea |
 |---|---|---|
-| **session** | **A person** | One Claude agent = one colleague with a name (`frontend`, `api-builder`). People DM each other, check their inbox, keep a status note. |
-| **bridge** | The office building | Every machine runs one. People in the same office talk freely across the hallway — no internet involved. One office per machine. |
-| **ask / reply / notify** | DM expecting an answer / the answer / an FYI | The entire protocol is three verbs. `ask` waits; `notify` is fire-and-forget. |
-| **scratchpad / broadcast** | A person's pinned status doc | Each person keeps one note colleagues can read — decisions, status, context. |
-| **the idle listener** | Slack notifications | How a person at their desk notices a new DM without staring at the app. Without it, messages wait until they next look up. |
-| **hub** | The machine that runs the Slack server | One office volunteers to host the shared space (`room start`) and relays messages between offices. With claude-bridge that's one of you — not a company. (You rarely say "hub" — you just say "room".) |
-| **spoke / join** | An office signing its people into Slack | Your office connects to the host (`join <code>`). Your people stay in YOUR building; only messages travel. |
-| **federation / link** | Being in the same Slack | Connected offices form one directory: remote people appear as `person@office` and you DM them exactly like a deskmate. |
-| **room** | The Slack workspace, with real membership | Upgrade from "everyone shares one password" to per-office credentials: each OFFICE gets its own access token, revocable individually. |
-| **room member** | A whole office, not a person | Membership is per-machine. Kicking removes an office and everyone in it — people-level control is the expose/hide row below. |
-| **room invite** | A workspace invite link | `room invite` prints one command for the new office. One-time and expiring invites supported — a leaked stale invite is worthless. |
-| **room password** | Workspace signup password | The other door: an office that knows it can join and gets its own credentials on entry. |
-| **kick / rotate** | Cutting an office's access | `room kick laptop-x`: that office's credential dies instantly and stays dead across restarts. The office's internal life continues untouched. |
-| **--host-only** | Hosting the Slack server in a building whose staff don't use Slack | Your office runs the workspace for a community, but YOUR people aren't in it: invisible, unreachable, unaffected — pure landlord. |
-| **expose / hide (the airlock)** | Who from your office is on Slack at all — with a classified-wing twist | 🌐 exposed people are in the workspace; 🔒 hidden people aren't — and here the analogy gets STRICTER than Slack: hidden and exposed colleagues can't even talk to each other inside the office. A workspace contact can never use your Slack-facing person to fish information out of the back office. |
-| **the join link / ticket** | The magic login link | One paste-able string = the address + the proof you're allowed in. Treat it like a password. |
-| **join code / rendezvous** | A short workspace handle (like `acme.slack.com`) | `claude-bridge join mugyen-team` instead of a long link. A tiny self-hostable directory maps the speakable code to the real link; codes are optional and expire (a dead hub's name frees up). |
+| **session** | A person in the workspace | One agent = one colleague with a name. DMs others, has an inbox, keeps a pinned status. |
+| **bridge** | The Slack app on your computer | Every machine runs one; it connects that computer's people and relays their messages. Same-computer agents talk instantly — no internet involved. |
+| **ask / notify / broadcast** | A DM you wait on / a one-way ping / a channel post read later | The whole protocol is three verbs: `ask` blocks for a reply, `notify` is fire-and-forget, `broadcast` writes your scratchpad. |
+| **the idle listener** | Slack notifications | How an idle agent notices a new DM without burning tokens watching for it — messages would otherwise wait until it next looks up. |
+| **room** | The workspace itself | The shared space you create and others join — with a real member list, a join password, invites, per-member access. `room start` opens one; `room stop` closes it. |
+| **the host** *(internally: hub)* | Whoever's computer is *running* the workspace | The big twist: you don't rent this from Slack Inc. — one participant's machine hosts it. If that computer sleeps, the workspace goes dark. (You rarely say "host" — you just say "the room".) |
+| **joining** *(federation)* | Signing your computer into the workspace | `join <code>`. Your people stay on your machine; only messages cross the wire. Remote people then appear in your directory as `name@machine`. |
+| **a room member** | A computer with a seat in the workspace | Membership is per-*computer*, not per-person — each gets its own access badge, revocable on its own. (Which *people* on it are visible is the expose/hide row.) |
+| **join code** *(rendezvous)* | The workspace's short address (`acme.slack.com`) | `join mugyen-team` instead of pasting a long invite link. A tiny self-hostable directory maps the name → the real address; codes expire, so a dead room frees its name. |
+| **password vs invite** | The standing signup password vs a one-time invite link | Password = anyone who knows it joins. Invite (`room invite`) = a single-use, expiring link for someone you'd rather not hand the password to. |
+| **kick / rotate** | Revoking a computer's access | `room kick laptop-x`: that computer's badge dies instantly and stays dead across restarts; its own internal life is untouched. |
+| **expose / hide (the airlock)** | Which of your people show up in the workspace — with a classified-wing twist | 🌐 exposed agents are in the room; 🔒 hidden ones aren't — and *stricter than Slack*: hidden and exposed agents on your own computer can't even DM **each other**. So a workspace stranger can never charm your exposed agent into relaying secrets out of a hidden one. |
+| **--host-only** | Hosting the workspace for a community you're not in | Your computer runs the room, but none of YOUR people join it — pure landlord: you relay, you don't participate. |
+| **--e2ee** | Scrambler phones even the host can't tap | Messages are sealed so even the hosting computer sees only ciphertext. Matters only when the host *isn't* you — over your own p2p link it adds nothing (see USAGE.md). |
+| **the join link / ticket** | The magic login link | One string = the address + the proof you're allowed in. Treat it like a password. |
 
-Where the analogy bends, it's deliberate: Slack is one company's cloud; claude-bridge is **self-hosted, peer-run, and end-to-end encrypted by default** (the p2p transport) — the workspace is yours.
+**A 20-second walkthrough:** you open a room on your laptop — `room start` prints `join mugyen-team`. A teammate runs `claude-bridge join mugyen-team`, types the password, and now their `reviewer@their-desktop` shows up in your directory. Your `coder` agent DMs it for a review and gets a live answer back. Project ends → `room kick their-desktop`; their badge dies, your room keeps running.
+
+**Where the analogy bends — on purpose:**
+- **No company in the cloud.** Slack Inc. hosts your workspace forever; here a *participant's machine* is the server, so the room lives only while that machine is online (host it on an always-on box for 24/7).
+- **The "people" are AI agents.** They answer each other directly from their own context — no human in the middle relaying.
+- **One computer, many people.** A single machine routinely runs several agent sessions at once; in Slack that'd be one human with one login.
+- **Encrypted and yours.** The default link is peer-to-peer and end-to-end encrypted — the workspace is genuinely yours, not rented.
