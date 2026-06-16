@@ -171,16 +171,18 @@ See [Part 4](#part-4-cross-network-talk-to-agents-on-other-machines) and [docs/C
 
 | Command | What it does |
 |---|---|
-| `claude-bridge share [--node <id>]` | Become a **hub** over an encrypted P2P pipe (default — auto-installs dumbpipe, prints a one-line join link). Fresh ticket each share (a leaked link dies on restart). |
-| `claude-bridge share --reuse` | P2P with a **persistent identity**: a key in `~/.claude/.cc-bridge-p2p-key` makes the ticket identical across restarts/reboots — spokes never need a new link. Trade-off: an old link stays valid until you rotate (delete the key file, or share without `--reuse`). |
-| `claude-bridge share --stable <host>` | Hub with a stable HTTPS URL on your own domain (cloudflared **named** tunnel; `--named-tunnel <host>` still works). |
-| `claude-bridge share --tailscale` | Hub reachable tailnet-only (no public exposure, no extra process; uses `tailscale serve --tcp`). |
-| `claude-bridge share --provider <p>` | Pick a transport explicitly: `p2p`, `cloudflared-named`, `bore`, `pinggy`, `zrok`, `tailscale`. |
-| `claude-bridge join '<link>'` | Become a **spoke**: link to a hub. Accepts `https://<host>#<token>` and `p2p:<ticket>#<token>`. Your sessions stay on localhost. |
-| `claude-bridge unlink` | Spoke leaves its hub → back to standalone (notifies the hub first, then kills the local p2p forwarder). |
-| `claude-bridge stop-share` | Hub stops sharing: **verified** teardown (process confirmed dead / `tailscale serve` config removed), keeps the bridge + token. |
+| `claude-bridge room start [name]` | Open your room — the everyday "on" (was `share`). Creates it the first time: password-protected, named after this machine if you omit one, p2p transport, auto-publishes a join code. One room per machine. |
+| `claude-bridge room stop` | Close the room — the everyday "off" (was `stop-share`). Keeps members + password; releases the join code. `room start` reopens it. |
+| `claude-bridge room create [name] [--password [v] \| --open] [--e2ee] [--host-only] [--ttl <dur>] [--stable <host> \| --tailscale]` | Like `start` but set things up front. `--open` = no password · `--e2ee` = end-to-end encryption · `--host-only` = relay without joining · `--ttl` = self-expiring · `--stable`/`--tailscale` = transport instead of p2p. |
+| `claude-bridge room delete <name>` | Destroy the room (typed name to confirm; all member access dies, code released). |
+| `claude-bridge room invite [--one-time] [--expires <dur>] [--code [name]]` | Hand someone a one-time token link instead of the password. |
+| `claude-bridge room members \| info` | Who's in the room · room summary. |
+| `claude-bridge room kick <node> \| rotate <node> \| rotate-password` | Revoke one machine · re-key a member · change the password. |
+| `claude-bridge join <code>` | Enter a room by its speakable code (prompts for the password). |
+| `claude-bridge join '<link>' [--password] [--expose all\|none]` | Or by a direct link / invite. `--expose none` = join with all your agents hidden. |
+| `claude-bridge room leave` | Leave a room you joined (was `unlink`). |
 
-#### Picking a share transport
+#### Picking a share transport#### Picking a share transport
 
 The default needs zero setup: no account, no domain, nothing public. The others trade setup for different properties. `CC_BRIDGE_PROVIDER` sets a per-machine default.
 
@@ -192,6 +194,45 @@ The default needs zero setup: no account, no domain, nothing public. The others 
 | `zrok` | One-time free (`zrok enable`) | TLS | A real HTTPS URL without owning a domain | Free tier: 24h-window bandwidth cap, ~6.6 req/s |
 | `pinggy` | No | TLS | 5-minute demos (zero install — plain ssh) | **60-min session cap**; URL rotates → spokes must re-join |
 | `bore` | No | ❌ plaintext relay | Throwaway local experiments | Relay can read token + traffic — never for real work |
+
+### Rooms (per-member tokens)
+
+A **room** upgrades the flat shared-token group: every joining machine gets its **own token**, so you can kick one machine without re-inviting everyone. Members are machines (bridges) — your agent sessions never see any of this. Until you create a room, the classic shared-token links keep working; after `room create`, only member tokens are accepted.
+
+```bash
+claude-bridge room create team --password        # create (generates+prints a strong password once)
+claude-bridge room invite --one-time             # prints a complete join link (…#invite:<code>)
+claude-bridge room members                       # roster with online state
+claude-bridge room kick old-laptop               # that machine's token dies instantly (and stays dead across restarts)
+claude-bridge room delete team                   # typed-name confirmation; all tokens die; legacy mode resumes
+```
+
+Joiners run the printed link as-is, or `claude-bridge join '<share-url>' --password` for password-gated rooms (prompted — passwords never travel in links). Rooms persist in `~/.claude/.cc-bridge-rooms.json` until deleted (`--ttl 2h` makes a self-expiring room). One active room per hub for now.
+
+### Privacy zones (exposure + the airlock)
+
+When your bridge is linked to a room, every local session is either **🌐 EXPOSED** (in the room: visible, reachable, can message it) or **🔒 hidden** (sealed off). The **airlock** is absolute: hidden and exposed sessions cannot exchange messages, threads, or scratchpads through the bridge in either direction — so a room member can never use your exposed session as a stepping stone into your private ones. Each zone works normally within itself.
+
+```bash
+claude-bridge join '<link>' --expose none   # privacy-first: join with everything hidden
+claude-bridge sessions                      # 🌐/🔒 overview
+claude-bridge expose research               # put one session in the room
+claude-bridge hide research                 # pull it back behind the airlock
+```
+
+Two honest notes: (1) exposure is not amnesia — a session that worked privately and is then exposed carries everything it learned (expose fresh sessions); (2) an exposed session can still be *socially engineered into revealing what it itself knows* — the airlock only guarantees it cannot fetch anything from the hidden zone.
+
+**Speakable join codes (rendezvous):** `room invite --code` publishes the join link under a short name (default: the room's name) so joiners can run `claude-bridge join mugyen-team` — no link pasting. `share --code` does the same for plain hubs. Codes live on a tiny self-hostable Worker (see `rendezvous/README.md`): open namespace, first-come, TTL'd (a dead hub's name frees up ~7 days later), and only the publisher can renew or change a live code. Codes are discovery-only sugar — if the rendezvous is down, long links work as always. Point at your own instance: `echo https://my-worker.example > ~/.claude/.cc-bridge-rendezvous`.
+
+**End-to-end encrypted rooms:** `room create <name> --e2ee --password` seals member↔member messages so a relaying hub reads nothing (chacha20-poly1305, zero dependencies). Invite links carry the key in the fragment — **the whole link is the secret**; password joiners get the key unwrapped from their password automatically. A member with the wrong key sees `[encrypted]`, never plaintext. Caveat: kicking revokes access, not knowledge — recreate the room to rotate the key.
+
+> **Do you actually need `--e2ee`? Usually not.** It's a **shared symmetric room key** — one key, every member (and the host) holds the same copy; it is *not* per-user public-key crypto. So:
+> - **Default p2p between machines you own → `--e2ee` adds nothing.** The p2p transport is already end-to-end-encrypted QUIC, both endpoints are yours, and the host holds the key anyway. You'd only take on the costs (key distribution, no rotation on kick, degraded server-side features) for no gain.
+> - **`--e2ee` earns its keep only when traffic crosses a relay you don't fully trust** — a public tunnel that terminates TLS (cloudflared/zrok/pinggy), or a hosted/community relay — where you want the *infrastructure* to carry ciphertext it can't read. It does **not** hide messages from the room's host, which holds the key by design.
+>
+> Rule of thumb: trust the hub (you own it) → skip `--e2ee`; route through infrastructure you don't own → use it.
+
+**Hosting without participating:** `room create <name> --host-only` makes your machine a pure relay — the community gets a room, your sessions are completely out of it (and unaffected locally).
 
 ### Using the commands in scripts
 

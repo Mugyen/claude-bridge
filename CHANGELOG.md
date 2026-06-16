@@ -11,6 +11,51 @@ _Add entries here as you work on the next version. Move them under a dated
 heading when you tag the release and bump `package.json` + the banner in
 `bridge-server.mjs`._
 
+### Added (v2.10.0)
+- **`claude-bridge node [name]`** — view or set this machine's name (the node id shown as `name@<node>` across the room). Normalizes to lowercase a-z/0-9/hyphen; warns if you change it while in a room (re-join for the room to see the new name).
+
+### Fixed (v2.10.0)
+- **Re-joining a room you're already a member of no longer asks for the password.** `room leave`/disconnect does NOT revoke membership, so `join` now first checks whether your stored member token is still valid (a `/link/heartbeat` probe) and re-links silently if so; the password/invite is only requested when you genuinely aren't a member yet (or were kicked). 
+- **Renaming THIS machine while you own a room keeps you the live owner.** `claude-bridge node <name>` re-keys the room's owner entry server-side, AND the server auto-reconciles the owner to the current node id on every startup/reload (tier-0: the rooms file lives on the owner's disk, so any room there is yours) — so a rename done before this fix, or a migrated rooms file, self-heals on restart instead of stranding the room under the old name. A *spoke* that renames is told to re-join (now silent, no password).
+- **`health` now lists room MEMBER MACHINES (link-based), not session-derived spokes.** A machine that joined a room with zero active sessions used to be invisible in `health` ("No spokes connected") until a session registered; it now shows with ●/○ online state from the link layer (matching `room members`). Session naming reminder: set `CC_BRIDGE_SESSION=<name>` for a stable session name, or tell the agent to re-register under a new name.
+
+### Changed (v2.10.0 — room-first UX, BREAKING)
+- **The room is now the single user-facing primitive.** `room start` opens a room (auto-creating a password-protected default named after the machine the first time) and `room stop` closes it — these replace `share`/`stop-share`, which are removed along with `unlink` (→ `room leave`). Hub/spoke/standalone vocabulary is hidden from all output. One room per machine (tier-0).
+- **Password by default.** `room create`/`room start` generate and show a strong password once; `--open` makes a no-password room (credential-less join). Creating a room prints a tip to use `room invite` for one-time tokens instead of resharing the password.
+- **Connectivity + the join code are managed by the room lifecycle.** `start`/`create` open the transport (p2p default; `--stable`/`--tailscale`/`--provider` to override) and auto-publish the speakable join code; `stop`/`delete` release it (fixes the earlier stale-code gap). `join <code>` resolves it and prompts for the password.
+- **Room-aware `status`/`health`/`doctor`** — lead with "what room, is it working, who am I", distinguishing ACTIVE vs PAUSED (owner) and reachable vs unreachable (member); no hub/spoke jargon.
+- `expose`/`hide` accept a comma-separated list or `--all`.
+
+### Added (v2.9.0 — rooms, phase 3a)
+- **Rooms with per-member tokens**: `room create <name> [--ttl <dur>] [--password [value]]` turns the flat shared-token group into real membership — each joining machine gets its OWN token, so `room kick <node>` revokes one machine without rotating everyone. Member = a bridge/machine; sessions stay local and oblivious.
+- **Invites + password gate**: `room invite [--one-time] [--expires <dur>]` prints a complete join link (`…#invite:<code>`, default 7d); `join '<url>' --password` joins a password-gated room (scrypt-hashed; password never rides in a link). `/link/join` is the only unauthenticated link endpoint, behind a strict global rate bucket (10/min) against brute force.
+- **Durable revocation**: rooms persist in `~/.claude/.cc-bridge-rooms.json` (0600, atomic writes, env-overridable `CC_BRIDGE_ROOMS_FILE`) — kicked stays kicked across restarts/reboots. Zero new dependencies (node:crypto scrypt).
+- **Room lifecycle**: `room members/info/rotate <node>/rotate-password/delete <name>` (typed-name confirmation); TTL rooms self-expire (lazy + GC sweep). Kick/rotate/delete sever the member's live stream immediately. `health`/`doctor` show a room line.
+- **E2EE envelope reserved (3b)**: messages can carry an opaque `enc` payload end-to-end through every relay/queue path without the hub reading it — the 3b encryption work slots in without protocol changes.
+
+### Fixed (v2.9.0 — security)
+- **Command-injection via bash arithmetic on a network value** (flagged HIGH by automated review). The expiry display did `date -r $(( <jq .expires_at from the rendezvous/bridge response> / 1000 ))` — bash `$(( ))` evaluates its contents, so a crafted `expires_at` like `a[$(cmd)]` would have executed. Now routed through `expiry_human()`, which validates the value is a pure integer before any arithmetic. Regression test in `tests/test-rendezvous-cli.sh`.
+
+### Added (v2.9.0 — rendezvous codes, phase 4)
+- **Speakable join codes**: `claude-bridge join mugyen-team` instead of pasting long links. `room invite --code [name]` (default name: the room's) and `share --code [name]` (default: the node id) publish the join link to a rendezvous service; `join <code>` resolves it. Codes are pure sugar — long links always work, and an unreachable rendezvous degrades to a warning.
+- **The rendezvous itself** ships in `rendezvous/` — a ~100-line Cloudflare Worker + KV ("a phone book, not a relay"): open namespace (anyone publishes any code, first-come), per-code owner tokens (no hijacking while alive; renew/update/release), TTL'd (default 7d — an unrenewed dead hub's name frees up), rate-limited lookups. Deploy once with `wrangler deploy` (free tier, ~$0). Tested by running the REAL worker handler in-process (16 assertions) and the CLI against it served locally (8 assertions).
+- Config: default URL baked as `DEFAULT_RENDEZVOUS`, overridable per machine via `CC_BRIDGE_RENDEZVOUS` or `~/.claude/.cc-bridge-rendezvous` (self-hosters point at their own Worker). Owner tokens persist in `~/.claude/.cc-bridge-codes` (0600).
+
+### Added (v2.9.0 — E2EE rooms, phase 3b)
+- **`room create --e2ee`** — member↔member messages are sealed end-to-end (chacha20-poly1305): the origin bridge encrypts, the destination bridge decrypts, and a relaying hub passes opaque `enc` blobs — verified: a spoke↔spoke exchange leaves NOTHING readable in the hub's store. **Zero new dependencies** (node:crypto AEAD + scrypt; the researched libsodium/Argon2id route proved unnecessary).
+- **Key distribution without servers seeing it**: invite links carry the room key in the URL fragment (`#invite:<code>:<key>` — fragments never reach servers); password joiners receive the key wrapped under a scrypt-derived key (separate salt from the join gate — the hub stores the wrapped blob it cannot open). Keys live in `~/.claude/.cc-bridge-room-key` (0600), installed automatically by `join`, removed on `unlink`/uninstall.
+- Wrong-key members degrade safely: messages surface as `[encrypted]`, plaintext never appears. Non-E2EE rooms are byte-for-byte unaffected.
+- Documented limitation: kick revokes access, not knowledge — a kicked member still holds the key (transport 401s keep them out); recreate the room to rotate.
+
+### Added (v2.9.0 — privacy)
+- **`room create --host-only`** — host a room for a community WITHOUT participating: the hub relays everything, but its own sessions are never advertised, can't be reached from the room (even by forged forwards), and can't message it. Local sessions keep full normal bridge life with each other.
+- **Per-session exposure + the AIRLOCK** — when linked to a room, each local session is 🌐 EXPOSED or 🔒 hidden. Hidden sessions: invisible in the roster, unreachable (enforced at delivery, not just by roster filtering), and mute toward the room. **Airlock (always on): exposed and hidden sessions cannot exchange ANYTHING through the bridge (ask/notify/threads/scratchpads, both directions)** — the room→gateway→private-sessions social-engineering path is mechanically impossible. Zones are fully functional within themselves.
+- New CLI: `claude-bridge sessions` (zone overview with 🌐/🔒), `expose <name>` / `hide <name>` (instant toggle, roster updates ripple to the room), `join '<link>' --expose none` (privacy-first join: everything hidden until exposed). `register()` gains an optional `expose` boolean.
+- Honest caveat, documented: exposure is not retroactive amnesia — a session exposed after working privately carries what it learned. Expose fresh sessions.
+
+### Changed (v2.9.0)
+- **Back-compat: legacy shared-token federation works UNTIL the first `room create`** — bit-identical behavior before that; afterwards the fed surface accepts only member tokens (old links get a clear 401 + re-invite hint). `room delete` returns to legacy mode.
+
 ### Added (v2.8.0 — multi-tunnel providers)
 - **Multi-tunnel provider dispatch for `share`**: p2p (dumbpipe, NEW DEFAULT), cloudflared named (`--stable <host>`), bore, pinggy, zrok, and tailscale-direct (`--tailscale`, via `serve --tcp` — L4 passthrough, because Tailscale's HTTP serve/funnel modes buffer SSE). Per-machine default via `CC_BRIDGE_PROVIDER`.
 - **`join` accepts `p2p:<ticket>#<token>` links** — spawns a local dumbpipe forwarder (E2E-encrypted QUIC to the hub); managed by `unlink` (killed only AFTER the hub is notified), `doctor` (liveness + re-join hint), and uninstall.

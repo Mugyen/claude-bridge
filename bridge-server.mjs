@@ -59,6 +59,15 @@ const TOKEN_FILE = process.env.CC_BRIDGE_TOKEN_FILE ?? `${HOME}/.claude/.cc-brid
 const ROLE_FILE = process.env.CC_BRIDGE_ROLE_FILE ?? `${HOME}/.claude/.cc-bridge-role`;
 const HUB_FILE = process.env.CC_BRIDGE_HUB_FILE ?? `${HOME}/.claude/.cc-bridge-hub`;
 const NODE_FILE = process.env.CC_BRIDGE_NODE_FILE ?? `${HOME}/.claude/.cc-bridge-node`;
+// Default exposure policy for sessions on a FEDERATED bridge: "all" (legacy) or
+// "none" (privacy-first — sessions are hidden from the room until exposed).
+// Written by `join --expose <all|none>`; per-session override via register() or
+// the loopback /sessions/expose endpoint (CLI: claude-bridge expose/hide <name>).
+const EXPOSE_FILE = process.env.CC_BRIDGE_EXPOSE_FILE ?? `${HOME}/.claude/.cc-bridge-expose`;
+// E2EE room key (3b): 32-byte hex. Members get it via the invite-link fragment
+// or password-unwrapped from /link/join; the CLI writes it here (0600). The hub
+// keeps its copy inside rooms.json (the owner is a participant in 3b).
+const ROOM_KEY_FILE = process.env.CC_BRIDGE_ROOM_KEY_FILE ?? `${HOME}/.claude/.cc-bridge-room-key`;
 
 function sanitizeNode(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "") || "node";
@@ -74,6 +83,8 @@ const FED = {
   token: null,
   node: sanitizeNode(process.env.CC_BRIDGE_NODE ?? os.hostname()),
   hubUrl: null, // spoke only
+  exposeDefault: "all", // "all" | "none" — see EXPOSE_FILE
+  roomKey: null, // Buffer(32) when this member holds an E2EE room key
 };
 
 // HUB side: node → { res:SSEResponse|null, sessions:[{name,description}], lastSeen:number }
@@ -131,6 +142,9 @@ function loadFedConfig() {
   FED.token = token;
   FED.node = sanitizeNode(node ?? process.env.CC_BRIDGE_NODE ?? os.hostname());
   FED.hubUrl = hubUrl;
+  FED.exposeDefault = readFileTrim(EXPOSE_FILE) === "none" ? "none" : "all";
+  const rk = readFileTrim(ROOM_KEY_FILE);
+  FED.roomKey = rk && /^[a-f0-9]{64}$/.test(rk) ? Buffer.from(rk, "hex") : null;
 
   // Role inference: explicit role file wins; else token+hubUrl ⇒ spoke, token alone ⇒ hub.
   if (role === "hub" || role === "spoke" || role === "standalone") {
@@ -181,6 +195,9 @@ function gc() {
   // doesn't accumulate one entry per ever-seen sseId/node.
   const rateIdle = Date.now() - RATE_WINDOW_MS * 2;
   for (const [k, b] of _rate) if (b.last < rateIdle) _rate.delete(k);
+
+  // Lazy room-TTL sweep (activeRoom() deletes expired rooms as a side effect).
+  try { activeRoom(); } catch {}
 
   for (const [id, msg] of messages) {
     if (msg.ts < cutoff) {
@@ -233,7 +250,7 @@ function activeSessions() {
   const out = [];
   for (const [sseId, info] of sessions) {
     if (sseClients.has(sseId)) {
-      out.push({ name: info.name, description: info.description });
+      out.push({ name: info.name, description: info.description, expose: info.expose !== false });
     }
   }
   return out;
@@ -244,7 +261,9 @@ function activeSessions() {
 // broadcasts the roster to every node) — opt in with CC_BRIDGE_SHARE_DESCRIPTIONS=1.
 // Local list_sessions still shows local descriptions regardless.
 function linkSessions() {
-  return activeSessions().map((s) => (SHARE_DESCRIPTIONS ? { name: s.name, description: s.description } : { name: s.name }));
+  return activeSessions()
+    .filter((s) => s.expose !== false)   // hidden sessions never cross the link
+    .map((s) => (SHARE_DESCRIPTIONS ? { name: s.name, description: s.description } : { name: s.name }));
 }
 
 function getName(sseId) {
@@ -303,6 +322,197 @@ function pushThread(a, b, id) {
   const key = tkey(a, b);
   if (!threads.has(key)) threads.set(key, []);
   threads.get(key).push(id);
+}
+
+// ─── Rooms (phase 3a) ─────────────────────────────────────────────────────────
+//
+// A room turns the flat shared-token group into real membership: per-member
+// tokens (kickable individually), invites, an optional password gate — persisted
+// in a tiny JSON file so revocation survives restarts. Member = a NODE (a
+// bridge/machine); sessions stay local and oblivious. BACK-COMPAT: until the
+// first room is created, auth is bit-identical to the legacy shared token; from
+// then on the fed surface accepts ONLY member tokens. Admin (/room/*) lives on
+// the MAIN listener, loopback-only — the local user IS the owner in 3a.
+// Design: docs/specs/2026-06-11-rooms-design.md
+
+const ROOMS_FILE = process.env.CC_BRIDGE_ROOMS_FILE ?? `${HOME}/.claude/.cc-bridge-rooms.json`;
+let ROOMS = { version: 1, rooms: {} };
+
+function loadRooms() {
+  try {
+    const j = JSON.parse(fs.readFileSync(ROOMS_FILE, "utf8"));
+    if (j && j.version === 1 && j.rooms && typeof j.rooms === "object") { ROOMS = j; return; }
+  } catch {}
+  ROOMS = { version: 1, rooms: {} };
+}
+
+function saveRooms() {
+  // Atomic: temp + rename so a crash mid-write can't truncate the store
+  // (a corrupted rooms file would silently un-revoke kicked members).
+  try {
+    const tmp = `${ROOMS_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(ROOMS, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, ROOMS_FILE);
+  } catch (e) { console.error(`${ts()} ✗ rooms save failed: ${e.message}`); }
+}
+
+/** Auto-reconcile the owner to THIS node. Tier-0: one room per machine, and the
+ *  rooms file lives on the owner's disk — so any room here IS ours. If our node
+ *  id changed (the `node` command, or a migrated rooms file), re-key the owner
+ *  entry to the current FED.node so we stay the live owner instead of stranding
+ *  the room under the old name. Runs on startup + every config reload. */
+function reconcileOwner() {
+  const r = activeRoom();
+  if (!r || !r.owner || r.owner.node === FED.node) return;
+  const old = r.owner.node;
+  const entry = r.members[old];
+  if (entry && entry.role === "owner") { delete r.members[old]; r.members[FED.node] = entry; }
+  else if (!r.members[FED.node]) r.members[FED.node] = { token_hash: null, pubkey: null, role: "owner", joined_at: Date.now(), invited_by: "creator" };
+  r.owner.node = FED.node;
+  saveRooms();
+  console.log(`${ts()} 🚪 room "${r.name}" owner auto-reconciled "${old}" → "${FED.node}" (node id changed)`);
+}
+
+/** The single active room (3a enforces one). Lazily expires TTL rooms. */
+function activeRoom() {
+  let changed = false;
+  let found = null;
+  for (const [id, r] of Object.entries(ROOMS.rooms)) {
+    if (r.expires_at && Date.now() > r.expires_at) {
+      delete ROOMS.rooms[id];
+      changed = true;
+      console.log(`${ts()} 🚪 room "${r.name}" expired (ttl) — removed`);
+      continue;
+    }
+    if (!found) found = r;
+  }
+  if (changed) saveRooms();
+  return found;
+}
+
+/** Host-only room: this hub relays for the community but its OWN sessions are
+ *  not participants — never advertised, never addressable from the room, and
+ *  blocked from reaching the room (two-way isolation; pure broker). */
+function hostOnly() {
+  const r = activeRoom();
+  return !!(r && r.host_participates === false && FED.role === "hub");
+}
+
+// ── Per-session exposure + AIRLOCK zones ─────────────────────────────────────
+// On a federated bridge each local session is either EXPOSED (visible/addressable
+// from the room, can message it) or HIDDEN (invisible, unreachable, room-mute).
+// AIRLOCK (always on, by design decision): exposed and hidden sessions cannot
+// exchange anything through the bridge — ask/notify/get_thread/read_scratchpad
+// are refused across the line IN BOTH DIRECTIONS. This makes the social-
+// engineering path (room → exposed gateway → private sessions) mechanically
+// impossible: the gateway cannot query the private zone no matter what it is
+// talked into. Each zone is fully functional within itself. Standalone bridges
+// have no zones. Toggling: /sessions/expose (CLI expose/hide) — exposure is not
+// retroactive amnesia; expose fresh sessions, not seasoned ones.
+function isFederated() { return FED.role !== "standalone"; }
+/** true = exposed, false = hidden, null = not a local session. */
+function sessionExposed(name) {
+  const sse = nameToSSE.get(name);
+  if (!sse || !sessions.has(sse)) return null;
+  return sessions.get(sse).expose !== false;
+}
+/** Cross-zone check for two LOCAL sessions (federated bridges only). */
+function crossZone(aName, bName) {
+  if (!isFederated()) return false;
+  const a = sessionExposed(aName), b = sessionExposed(bName);
+  if (a === null || b === null) return false;
+  return a !== b;
+}
+
+const sha256hex = (s) => crypto.createHash("sha256").update(s).digest("hex");
+// scrypt (node:crypto): memory-hard password hash for the JOIN GATE, zero-dep.
+// (Argon2id is reserved for the 3b E2EE room-key derivation via libsodium.)
+const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+function pwHash(password, saltHex) {
+  return crypto.scryptSync(String(password), Buffer.from(saltHex, "hex"), 32, SCRYPT_PARAMS).toString("hex");
+}
+function safeEqHex(aHex, bHex) {
+  const a = Buffer.from(String(aHex));
+  const b = Buffer.from(String(bHex));
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch { return false; }
+}
+
+/**
+ * Fed-surface gate. No room → legacy shared-token check (pre-room behavior,
+ * bit-identical). Room exists → the header must be a member token (hash lookup).
+ * Returns { node, role, room } | { legacy: true } | null.
+ */
+function roomAuth(req) {
+  const room = activeRoom();
+  if (!room) return tokenOk(req) ? { legacy: true } : null;
+  const got = req.headers["x-bridge-token"];
+  if (typeof got !== "string" || !got) return null;
+  const h = sha256hex(got);
+  for (const [node, m] of Object.entries(room.members)) {
+    if (m.token_hash && safeEqHex(m.token_hash, h)) return { node, role: m.role, room };
+  }
+  return null;
+}
+
+// /link/join is the unauthenticated entry point (and the password brute-force
+// surface) — a strict GLOBAL bucket, far tighter than the general rate limiter.
+const JOIN_MAX = Number(process.env.CC_BRIDGE_JOIN_MAX) || 10;
+const JOIN_WINDOW_MS = Number(process.env.CC_BRIDGE_JOIN_WINDOW_MS) || 60_000;
+let _join = { count: 0, windowStart: 0 };
+function joinRateOk() {
+  const now = Date.now();
+  if (now - _join.windowStart > JOIN_WINDOW_MS) _join = { count: 0, windowStart: now };
+  _join.count += 1;
+  return _join.count <= JOIN_MAX;
+}
+
+// ── E2EE (3b): chacha20-poly1305 via node:crypto — ZERO dependencies ─────────
+// Messages bound for another machine are sealed by the ORIGIN bridge and opened
+// by the DESTINATION bridge; a relaying hub passes `enc` blobs it never opens
+// (in 3b the hub holds the key as room owner, but the relay path doesn't use it
+// for spoke↔spoke traffic — and phase 6's blind hosting needs exactly that).
+// Sessions/hooks never touch crypto. Wire shape: enc = { alg, n, ct } (hex).
+function e2eeKey() {
+  if (FED.roomKey) return FED.roomKey;
+  const r = activeRoom();
+  if (r && r.e2ee && typeof r.key === "string" && /^[a-f0-9]{64}$/.test(r.key)) return Buffer.from(r.key, "hex");
+  return null;
+}
+function encPayload(text, key) {
+  const n = crypto.randomBytes(12);
+  const ci = crypto.createCipheriv("chacha20-poly1305", key, n, { authTagLength: 16 });
+  const ct = Buffer.concat([ci.update(String(text), "utf8"), ci.final(), ci.getAuthTag()]);
+  return { alg: "chacha20-poly1305", n: n.toString("hex"), ct: ct.toString("hex") };
+}
+function decPayload(enc, key) {
+  try {
+    if (!enc || enc.alg !== "chacha20-poly1305") return null;
+    const n = Buffer.from(enc.n, "hex");
+    const buf = Buffer.from(enc.ct, "hex");
+    const di = crypto.createDecipheriv("chacha20-poly1305", key, n, { authTagLength: 16 });
+    di.setAuthTag(buf.subarray(buf.length - 16));
+    return Buffer.concat([di.update(buf.subarray(0, buf.length - 16)), di.final()]).toString("utf8");
+  } catch { return null; }
+}
+// Wrap/unwrap the ROOM KEY itself under a password-derived key (scrypt, with a
+// DIFFERENT salt than the join-gate hash — the hub knows the gate hash but can
+// never derive the wrap key without the password).
+function wrapRoomKey(roomKeyHex, password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const wk = crypto.scryptSync(String(password), Buffer.from(salt, "hex"), 32, SCRYPT_PARAMS);
+  return { salt, ...encPayload(roomKeyHex, wk) };
+}
+
+/** Drop a node's live link (kick/rotate/delete): close stream, prune queues. */
+function severSpoke(node, reason) {
+  const sp = spokes.get(node);
+  if (sp && sp.res && !sp.res.destroyed) {
+    try { sp.res.write(`event: close\ndata: ${reason}\n\n`); sp.res.end(); } catch {}
+  }
+  spokes.delete(node);
+  pendingRelay.delete(node);
+  broadcastRoster();
 }
 
 /** Merged roster: local sessions tagged "local" ∪ remote sessions tagged by node. */
@@ -385,12 +595,36 @@ function injectRemote(fwd) {
   if (!["question", "notice", "answer"].includes(fwd.kind)) return;
   if (typeof fwd.id !== "string" || !fwd.id) return;
   if (fwd.kind !== "answer" && (typeof fwd.from !== "string" || typeof fwd.to !== "string")) return;
+  // Exposure guard: a HIDDEN local session is unreachable from the room even if
+  // a (malicious) peer forges a forward addressed to its name (roster filtering
+  // alone is not enforcement — this is).
+  if (fwd.kind !== "answer" && sessionExposed(fwd.to) === false) {
+    console.log(`${ts()} 🛡 dropped inbound ${fwd.kind} for HIDDEN session "${fwd.to}" (not exposed to the room)`);
+    return;
+  }
+  // E2EE unwrap: if the payload is sealed and we hold the room key, open it so
+  // local delivery (hooks, /pending, check_inbox) sees plaintext. No key / bad
+  // key → the message stays opaque (renders as "[encrypted]").
+  if (fwd.enc) {
+    const k = e2eeKey();
+    const plain = k ? decPayload(fwd.enc, k) : null;
+    if (plain !== null) {
+      if (fwd.kind === "question") { fwd = { ...fwd, question: plain }; delete fwd.enc; }
+      else if (fwd.kind === "notice") { fwd = { ...fwd, content: plain }; delete fwd.enc; }
+      else if (fwd.kind === "answer") { fwd = { ...fwd, answer: plain }; delete fwd.enc; }
+    } else if (k) {
+      console.log(`${ts()} 🔐 inbound ${fwd.kind} ${fwd.id} failed to decrypt (wrong room key?) — kept opaque`);
+    }
+  }
   if (fwd.kind === "question") {
     if (messages.has(fwd.id)) return; // idempotent re-forward
     const msg = {
       id: fwd.id, from: fwd.from, to: fwd.to, question: fwd.question,
       answer: null, ts: fwd.ts ?? Date.now(), answeredAt: null,
       origin: { node: fwd.originNode },
+      // 3b E2EE reservation: an encrypted payload rides in `enc` (question absent)
+      // and every hub path treats the message as opaque ciphertext.
+      ...(fwd.enc && typeof fwd.enc === "object" ? { enc: fwd.enc } : {}),
     };
     messages.set(msg.id, msg);
     pushThread(fwd.from, fwd.to, msg.id);
@@ -402,11 +636,13 @@ function injectRemote(fwd) {
       id: fwd.id, from: fwd.from, to: fwd.to, kind: "notice",
       content: fwd.content, delivered: false, ts: fwd.ts ?? Date.now(),
       origin: { node: fwd.originNode },
+      ...(fwd.enc && typeof fwd.enc === "object" ? { enc: fwd.enc } : {}),
     };
     messages.set(msg.id, msg);
     pushThread(fwd.from, fwd.to, msg.id);
     console.log(`${ts()} ⇄ injected remote notice ${msg.id} ${fwd.from}@${fwd.originNode} → ${fwd.to}`);
   } else if (fwd.kind === "answer") {
+    if (typeof fwd.answer !== "string") return; // enc answer we couldn't open — leave pending
     const msg = messages.get(fwd.id); // the original question, queued on this node
     if (msg && msg.answer === null) { // idempotent: already-answered is a no-op
       msg.answer = fwd.answer;
@@ -467,7 +703,9 @@ function routeForward(payload) {
       } else {
         const sp = spokes.get(dest);
         if (sp && sp.res && !sp.res.destroyed) {
-          linkSend(sp, "forward", { kind: "answer", id: payload.id, answer: payload.answer, ts: payload.ts });
+          // Preserve `enc` — a sealed answer must reach the asker sealed (the
+          // hub relay never opens spoke↔spoke traffic).
+          linkSend(sp, "forward", { kind: "answer", id: payload.id, ts: payload.ts, ...(payload.enc ? { enc: payload.enc } : { answer: payload.answer }) });
         }
         // If the asker's spoke is gone, the answer is dropped (asker timed out).
       }
@@ -476,12 +714,17 @@ function routeForward(payload) {
     // question | notice
     const target = resolveTarget(payload.to);
     if (target.kind === "local") {
+      // Host-only room: the hub's own sessions are NOT participants — inbound
+      // room traffic must never reach them. Drop (asker fails/times out).
+      if (hostOnly()) { console.log(`${ts()} 🚪 host-only: dropped inbound for local "${payload.to}"`); return; }
       injectRemote(payload); // wakes the hub-local target via normal delivery
     } else if (target.kind === "remote") {
       relayForward(target.node, payload); // another spoke
     } else {
       // Unknown target on the hub: inject so it queues (30d TTL) and delivers if a
       // session by that name appears locally later (lesson #22 dead-letter caveat).
+      // Host-only: never queue for local adoption either.
+      if (hostOnly()) { console.log(`${ts()} 🚪 host-only: dropped inbound for unknown "${payload.to}"`); return; }
       injectRemote(payload);
     }
   } catch (e) {
@@ -545,10 +788,15 @@ function markPendingRelay(payload, node) {
 }
 
 function pushForwardToSpoke(sp, m) {
+  // E2EE: locally-stored messages are plaintext (decrypted at inject) — re-seal
+  // fresh on every push (never reuse a nonce). Already-opaque ones pass as-is.
+  const k = e2eeKey();
   if (m.kind === "notice") {
-    linkSend(sp, "forward", { kind: "notice", id: m.id, from: m.from, to: m.to, content: m.content, ts: m.ts, originNode: m.origin?.node ?? FED.node });
+    const body = m.enc ? { enc: m.enc } : (k && m.content != null ? { enc: encPayload(m.content, k) } : { content: m.content });
+    linkSend(sp, "forward", { kind: "notice", id: m.id, from: m.from, to: m.to, ts: m.ts, originNode: m.origin?.node ?? FED.node, ...body });
   } else {
-    linkSend(sp, "forward", { kind: "question", id: m.id, from: m.from, to: m.to, question: m.question, ts: m.ts, originNode: m.origin?.node ?? FED.node });
+    const body = m.enc ? { enc: m.enc } : (k && m.question != null ? { enc: encPayload(m.question, k) } : { question: m.question });
+    linkSend(sp, "forward", { kind: "question", id: m.id, from: m.from, to: m.to, ts: m.ts, originNode: m.origin?.node ?? FED.node, ...body });
   }
 }
 
@@ -603,7 +851,7 @@ function linkSend(sp, event, data) {
 function broadcastRoster() {
   if (FED.role !== "hub") return;
   const nodes = {};
-  nodes[FED.node] = linkSessions();
+  nodes[FED.node] = hostOnly() ? [] : linkSessions();
   for (const [node, sp] of spokes) {
     if (sp.res) nodes[node] = sp.sessions || [];
   }
@@ -792,12 +1040,15 @@ function flushSpokeOutbound() {
     if (!originLocal) continue;
     const t = resolveTarget(m.to);
     if (t.kind !== "remote") continue;
+    const k = e2eeKey();
     if (m.kind === "notice") {
       if (m.delivered) continue;
-      hubPost("/link/forward", { kind: "notice", id: m.id, from: m.from, to: m.to, content: m.content, ts: m.ts, originNode: FED.node });
+      const body = k && m.content != null ? { enc: encPayload(m.content, k) } : { content: m.content };
+      hubPost("/link/forward", { kind: "notice", id: m.id, from: m.from, to: m.to, ts: m.ts, originNode: FED.node, ...body });
     } else {
       if (m.answer !== null) continue;
-      hubPost("/link/forward", { kind: "question", id: m.id, from: m.from, to: m.to, question: m.question, ts: m.ts, originNode: FED.node });
+      const body = k && m.question != null ? { enc: encPayload(m.question, k) } : { question: m.question };
+      hubPost("/link/forward", { kind: "question", id: m.id, from: m.from, to: m.to, ts: m.ts, originNode: FED.node, ...body });
     }
   }
 }
@@ -841,6 +1092,7 @@ const TOOLS = [
         name: { type: "string", description: 'Unique session name, e.g. "api-builder", "frontend"' },
         description: { type: "string", description: "What this session is working on" },
         claude_session_id: { type: "string", description: "The Claude Code session_id printed by the SessionStart hook. Required so the PostToolUse hook can resolve your canonical name." },
+        expose: { type: "boolean", description: "Federated bridges only: expose this session to the linked room (visible + addressable). Defaults to the bridge's policy (join --expose all|none). Hidden sessions are sealed off from the room AND from exposed local sessions (airlock)." },
       },
       required: ["name"],
     },
@@ -988,7 +1240,8 @@ async function executeTool(sseId, name, args) {
         }
         console.log(`${ts()} ↪ rename: "${prev.name}" → "${sName}" (old name retired, pending asks + notices migrated)`);
       }
-      sessions.set(sseId, { name: sName, description, connectedAt: Date.now() });
+      const expose = typeof args.expose === "boolean" ? args.expose : FED.exposeDefault !== "none";
+      sessions.set(sseId, { name: sName, description, connectedAt: Date.now(), expose });
       nameToSSE.set(sName, sseId);
 
       // Persist claude_session_id → name so the hook can resolve canonical name
@@ -1007,13 +1260,33 @@ async function executeTool(sseId, name, args) {
       return { ok: true, your_name: sName, active_sessions: activeSessions() };
     }
 
-    case "list_sessions":
-      return { sessions: FED.role === "standalone" ? activeSessions() : globalRoster() };
+    case "list_sessions": {
+      // Host-only hub: local sessions see only each other — the room is invisible
+      // to them, exactly as they are invisible to the room (two privacy zones).
+      if (hostOnly()) return { sessions: activeSessions() };
+      if (FED.role === "standalone") return { sessions: activeSessions() };
+      // Federated: each session sees its own zone. Hidden → hidden locals only.
+      // Exposed → exposed locals + the room roster.
+      const meExposed = sessionExposed(myName);
+      if (meExposed === false) {
+        return { sessions: activeSessions().filter((x) => x.expose === false), note: "you are HIDDEN from the room: this is your private zone only" };
+      }
+      return { sessions: globalRoster().filter((e) => e.node !== "local" || sessionExposed(e.name) !== false) };
+    }
 
     case "ask": {
       if (!myName) return { error: "Call register() first." };
       const { to, question } = args;
       const target = resolveTarget(to);
+      if (target.kind === "remote" && hostOnly()) {
+        return { error: "this hub is HOST-ONLY: it relays for the room, but local sessions are not participants (room created with --host-only)" };
+      }
+      if (target.kind === "remote" && sessionExposed(myName) === false) {
+        return { error: `you ("${myName}") are HIDDEN from the room — you can't message it. The user can change this with: claude-bridge expose ${myName}` };
+      }
+      if (target.kind === "local" && crossZone(myName, target.name)) {
+        return { error: `AIRLOCK: "${target.name}" is in the other privacy zone (exposed↔hidden) — the bridge does not carry messages across. The user can move a session with: claude-bridge expose/hide <name>` };
+      }
       if (target.kind === "none") {
         const roster = (FED.role === "standalone" ? activeSessions().map((s) => s.name)
           : globalRoster().map((e) => (e.node === "local" ? e.name : `${e.name}@${e.node}`)));
@@ -1024,7 +1297,7 @@ async function executeTool(sseId, name, args) {
       const key = tkey(myName, target.name);
       for (const msgId of threads.get(key) || []) {
         const m = messages.get(msgId);
-        if (m?.answer && m.kind !== "notice" && norm(m.question) === norm(question)) {
+        if (m?.answer && m.kind !== "notice" && !m.enc && m.question && norm(m.question) === norm(question)) {
           console.log(`${ts()} ↩ dedup hit (${question.length} chars) → ${m.id}`);
           return { cached: true, message_id: m.id, question: m.question, answer: m.answer, note: "Already asked and answered. Previous answer returned." };
         }
@@ -1039,8 +1312,13 @@ async function executeTool(sseId, name, args) {
 
       if (target.kind === "remote") {
         // Relay toward the owning node; the answer routes home via relayAnswer.
-        console.log(`${ts()} ? ${myName} → ${target.name}@${target.node} (remote, ${question.length} chars) ${id}`);
-        relayForward(target.node, { kind: "question", id, from: myName, to: target.name, question, ts: msg.ts, originNode: FED.node });
+        // E2EE: seal the question — only `enc` crosses the wire.
+        const k = e2eeKey();
+        const fwdQ = k
+          ? { kind: "question", id, from: myName, to: target.name, enc: encPayload(question, k), ts: msg.ts, originNode: FED.node }
+          : { kind: "question", id, from: myName, to: target.name, question, ts: msg.ts, originNode: FED.node };
+        console.log(`${ts()} ? ${myName} → ${target.name}@${target.node} (remote${k ? ", e2ee" : ""}, ${question.length} chars) ${id}`);
+        relayForward(target.node, fwdQ);
       } else {
         console.log(`${ts()} ? ${myName} → ${target.name} (${question.length} chars) ${id}`);
       }
@@ -1080,7 +1358,10 @@ async function executeTool(sseId, name, args) {
       console.log(`${ts()} ← reply to ${msg.id} (${args.answer.length} chars)`);
       // If the question originated on another node, route the answer home.
       if (msg.origin && msg.origin.node && msg.origin.node !== FED.node) {
-        relayAnswer(msg.origin.node, { kind: "answer", id: msg.id, answer: msg.answer, ts: msg.answeredAt });
+        const k = e2eeKey();
+        relayAnswer(msg.origin.node, k
+          ? { kind: "answer", id: msg.id, enc: encPayload(msg.answer, k), ts: msg.answeredAt }
+          : { kind: "answer", id: msg.id, answer: msg.answer, ts: msg.answeredAt });
       }
       return { ok: true, message_id: msg.id };
     }
@@ -1092,6 +1373,15 @@ async function executeTool(sseId, name, args) {
         return { error: "notify requires { to: string, content: string }" };
       }
       const target = resolveTarget(to);
+      if (target.kind === "remote" && hostOnly()) {
+        return { error: "this hub is HOST-ONLY: it relays for the room, but local sessions are not participants (room created with --host-only)" };
+      }
+      if (target.kind === "remote" && sessionExposed(myName) === false) {
+        return { error: `you ("${myName}") are HIDDEN from the room — you can't message it. The user can change this with: claude-bridge expose ${myName}` };
+      }
+      if (target.kind === "local" && crossZone(myName, target.name)) {
+        return { error: `AIRLOCK: "${target.name}" is in the other privacy zone (exposed↔hidden) — the bridge does not carry messages across. The user can move a session with: claude-bridge expose/hide <name>` };
+      }
       const id = crypto.randomUUID(); // full 122-bit id: unguessable, no pre-claim/collision vector (S3)
       // NO answer field — lesson #19.
       const msg = { id, from: myName, to: target.name ?? to, kind: "notice", content, delivered: false, ts: Date.now(), origin: { node: FED.node } };
@@ -1099,8 +1389,12 @@ async function executeTool(sseId, name, args) {
       pushThread(myName, msg.to, id);
 
       if (target.kind === "remote") {
-        console.log(`${ts()} 📨 ${myName} → ${target.name}@${target.node} (remote notice, ${content.length} chars) ${id}`);
-        relayForward(target.node, { kind: "notice", id, from: myName, to: target.name, content, ts: msg.ts, originNode: FED.node });
+        const k = e2eeKey();
+        const fwdN = k
+          ? { kind: "notice", id, from: myName, to: target.name, enc: encPayload(content, k), ts: msg.ts, originNode: FED.node }
+          : { kind: "notice", id, from: myName, to: target.name, content, ts: msg.ts, originNode: FED.node };
+        console.log(`${ts()} 📨 ${myName} → ${target.name}@${target.node} (remote notice${k ? ", e2ee" : ""}, ${content.length} chars) ${id}`);
+        relayForward(target.node, fwdN);
         return { ok: true, message_id: id, to: `${target.name}@${target.node}`, target_online: true };
       }
 
@@ -1128,7 +1422,7 @@ async function executeTool(sseId, name, args) {
         questions: pending.map((m) => ({
           id: m.id,
           from: m.from,
-          question: m.question,
+          question: m.question ?? "[encrypted]",
           asked_at: new Date(m.ts).toISOString(),
         })),
         notices: notices.map((m) => ({
@@ -1142,6 +1436,12 @@ async function executeTool(sseId, name, args) {
 
     case "get_thread": {
       if (!myName) return { error: "Call register() first." };
+      if (crossZone(myName, args.with_session)) {
+        return { error: `AIRLOCK: "${args.with_session}" is in the other privacy zone — history is not readable across the line` };
+      }
+      if (isFederated() && sessionExposed(myName) === false && sessionExposed(args.with_session) === null) {
+        return { error: `you ("${myName}") are HIDDEN from the room — remote threads are not accessible` };
+      }
       const history = getThread(myName, args.with_session);
       return { thread_with: args.with_session, count: history.length, messages: history };
     }
@@ -1156,9 +1456,17 @@ async function executeTool(sseId, name, args) {
     }
 
     case "read_scratchpad": {
-      if (args.session) return { session: args.session, content: scratchpad.get(args.session) || "(empty)" };
+      if (args.session) {
+        if (myName && crossZone(myName, args.session)) {
+          return { session: args.session, content: "(restricted: different privacy zone — the airlock does not carry scratchpads across)" };
+        }
+        return { session: args.session, content: scratchpad.get(args.session) || "(empty)" };
+      }
       const all = {};
-      for (const [k, v] of scratchpad) all[k] = v;
+      for (const [k, v] of scratchpad) {
+        if (myName && crossZone(myName, k)) continue;   // other zone: invisible
+        all[k] = v;
+      }
       return { scratchpads: Object.keys(all).length ? all : "(none)" };
     }
 
@@ -1215,9 +1523,78 @@ async function handleLinkRequest(req, res, url) {
     return;
   }
 
-  // No-token guardrail: you cannot be reachable as a hub without a token.
-  if (!FED.token) { res.writeHead(503, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "federation disabled: no token" })); return; }
-  if (!tokenOk(req)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+  // POST /link/join — the ONLY unauthenticated /link/* entry: exchange an invite
+  // code or the room password for a per-member token. Strictly rate-limited
+  // (this is the password brute-force surface). Rooms only; legacy mode 404s.
+  if (req.method === "POST" && url.pathname === "/link/join") {
+    if (!joinRateOk()) { res.writeHead(429, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "too many join attempts — slow down" })); return; }
+    const room = activeRoom();
+    if (!room) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "no room on this hub — legacy join links carry the token directly (#<token>)" })); return; }
+    let jbody = "";
+    for await (const chunk of req) {
+      jbody += chunk;
+      if (jbody.length > MAX_BODY_BYTES) { res.writeHead(413, { "Content-Type": "application/json", "Connection": "close" }); res.end(JSON.stringify({ error: "payload too large" })); return; }
+    }
+    let jp;
+    try { jp = JSON.parse(jbody || "{}"); } catch { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "bad json" })); return; }
+    const jnode = sanitizeNode(jp.node || "");
+    if (!jnode) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "missing node" })); return; }
+    let via = null;
+    if (typeof jp.invite_code === "string" && jp.invite_code) {
+      const h = sha256hex(jp.invite_code);
+      for (const [iid, inv] of Object.entries(room.invites || {})) {
+        if (!safeEqHex(inv.code_hash, h)) continue;
+        if (inv.expires_at && Date.now() > inv.expires_at) break;
+        if (inv.max_uses != null && inv.uses >= inv.max_uses) break;
+        inv.uses += 1;
+        via = `invite:${iid}`;
+        break;
+      }
+    } else if (typeof jp.password === "string" && jp.password && room.password) {
+      if (safeEqHex(room.password.hash, pwHash(jp.password, room.password.salt))) via = "password";
+    } else if (!jp.invite_code && !jp.password && room.open === true && !room.password) {
+      // --open room: no credential required, anyone with the code/link joins.
+      via = "open";
+    }
+    if (!via) {
+      // Signal the joiner whether a password would help, so `join <code>` knows
+      // to prompt (vs. an open room that just needs a node, vs. invite-only).
+      const needsPw = !!room.password && !jp.password && !jp.invite_code;
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: needsPw ? "this room requires a password" : "invalid or expired invite/password", password_required: needsPw }));
+      return;
+    }
+    // Mint the member token. Re-join by an existing member ROTATES their token
+    // (lost-token recovery) — the old one dies the moment the file is saved.
+    const memberToken = crypto.randomBytes(32).toString("hex");
+    const existing = room.members[jnode];
+    room.members[jnode] = {
+      token_hash: sha256hex(memberToken),
+      pubkey: (typeof jp.pubkey === "string" && jp.pubkey) || existing?.pubkey || null,
+      role: jnode === room.owner.node ? "owner" : "member",
+      joined_at: existing?.joined_at ?? Date.now(),
+      invited_by: via,
+    };
+    saveRooms();
+    console.log(`${ts()} 🚪 "${jnode}" joined room "${room.name}" via ${via.split(":")[0]}${existing ? " (token rotated)" : ""}`);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ok: true, member_token: memberToken,
+      room: { id: room.id, name: room.name, e2ee: !!room.e2ee },
+      node: FED.node,
+      // Password joiners can unwrap this locally (scrypt of the password they
+      // just typed, salt included). Invite joiners get the key in the link
+      // fragment instead — it never touches any server.
+      ...(room.e2ee && via === "password" && room.wrapped_key ? { wrapped_key: room.wrapped_key } : {}),
+    }));
+    return;
+  }
+
+  // No-credentials guardrail: you cannot be reachable as a hub with neither a
+  // legacy token nor a room. (A room alone is sufficient — member tokens gate.)
+  if (!FED.token && !activeRoom()) { res.writeHead(503, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "federation disabled: no token" })); return; }
+  // Gate: member token (room mode) or the shared token (legacy mode).
+  if (!roomAuth(req)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: activeRoom() ? "unauthorized: not a member of this room — ask the owner for an invite" : "unauthorized" })); return; }
 
   // GET /link/stream — hub → spoke SSE
   if (req.method === "GET" && url.pathname === "/link/stream") {
@@ -1286,7 +1663,7 @@ async function handleLinkRequest(req, res, url) {
         // stream-connect resync saw an empty session list). No-op if no stream.
         flushPendingForwards(node);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, node: FED.node, roster: globalRoster() }));
+        res.end(JSON.stringify({ ok: true, node: FED.node, roster: hostOnly() ? globalRoster().filter((e) => e.node !== "local") : globalRoster() }));
         return;
       }
       if (url.pathname === "/link/forward") {
@@ -1308,7 +1685,7 @@ async function handleLinkRequest(req, res, url) {
         const sp = spokes.get(node);
         if (sp) sp.lastSeen = Date.now();
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, roster: globalRoster() }));
+        res.end(JSON.stringify({ ok: true, roster: hostOnly() ? globalRoster().filter((e) => e.node !== "local") : globalRoster() }));
         return;
       }
       if (url.pathname === "/link/unregister") {
@@ -1503,7 +1880,7 @@ const server = http.createServer(async (req, res) => {
         const p = recent[recent.length - 1];
         out += `prior (don't repeat): Q "${clip(p.question, 120)}" → A "${clip(p.answer, 120)}"\n`;
       }
-      out += `Q (id: ${msg.id}): "${msg.question}"\n`;
+      out += `Q (id: ${msg.id}): "${msg.question ?? "[encrypted — your bridge will decrypt this once E2EE rooms (3b) land]"}"\n`;
       out += `→ reply(message_id="${msg.id}"): precise by default — the answer + any gotcha/trap, no preamble, don't restate the Q. Go verbose ONLY if they asked for depth (e.g. a walkthrough/handoff). You may also follow up with your own ask.\n`;
     }
 
@@ -1516,7 +1893,7 @@ const server = http.createServer(async (req, res) => {
       out += `\n📨 NOTICE from "${msg.from}"`;
       if (fromInfo?.description) out += ` (${clip(fromInfo.description, 60)})`;
       out += `\nid: ${msg.id}\n`;
-      out += `${msg.content}\n`;
+      out += `${msg.content ?? "[encrypted]"}\n`;
       out += `(FYI — one-way, no reply.)\n`;
 
       // Only a non-peek read consumes the notice. A peeking idle-listener must
@@ -1562,6 +1939,8 @@ const server = http.createServer(async (req, res) => {
     if (FED.token && !tokenOk(req)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
     try {
       loadFedConfig();
+      loadRooms();   // pick up external edits to the rooms file too
+      reconcileOwner();
       applyFedConfig();
       console.log(`${ts()} ⇄ federation reloaded: role=${FED.role} node=${FED.node}${FED.hubUrl ? ` hub=${FED.hubUrl}` : ""}`);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -1582,6 +1961,186 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
     return;
+  }
+
+  // ── /sessions/* — exposure admin, MAIN listener ONLY (loopback) ─────────
+  // CLI: `claude-bridge sessions` (list zones) · `expose <name>` · `hide <name>`.
+  if (url.pathname.startsWith("/sessions/")) {
+    if (!isLoopback(req)) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "forbidden: loopback only" })); return; }
+    if (FED.token && !tokenOk(req)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+    if (req.method === "GET" && url.pathname === "/sessions/exposure") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, expose_default: FED.exposeDefault, federated: isFederated(), sessions: activeSessions().map((x) => ({ name: x.name, description: x.description, expose: x.expose })) }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/sessions/expose") {
+      let sbody = "";
+      for await (const chunk of req) {
+        sbody += chunk;
+        if (sbody.length > MAX_BODY_BYTES) { res.writeHead(413, { "Content-Type": "application/json", "Connection": "close" }); res.end(JSON.stringify({ error: "payload too large" })); return; }
+      }
+      let sp2;
+      try { sp2 = JSON.parse(sbody || "{}"); } catch { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "bad json" })); return; }
+      const sse = nameToSSE.get(sp2.name);
+      if (!sse || !sessions.has(sse)) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: `no active session named "${sp2.name}"` })); return; }
+      sessions.get(sse).expose = sp2.expose !== false;
+      console.log(`${ts()} 🛡 session "${sp2.name}" is now ${sp2.expose !== false ? "EXPOSED to" : "HIDDEN from"} the room`);
+      onLocalRosterChange();   // roster updates ripple to the room immediately
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, name: sp2.name, expose: sp2.expose !== false }));
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "unknown sessions endpoint" }));
+    return;
+  }
+
+  // ── /room/* — owner admin, MAIN listener ONLY (never tunneled) ──────────
+  // Same defense pattern as /link/reload: loopback peer + token-gated when a
+  // token is configured. The local user IS the room owner in 3a — no separate
+  // owner-token plumbing. The CLI `room ...` verbs drive these.
+  if (url.pathname.startsWith("/room/")) {
+    if (!isLoopback(req)) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "forbidden: loopback only" })); return; }
+    if (FED.token && !tokenOk(req)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+    let rbody = "";
+    if (req.method === "POST") {
+      for await (const chunk of req) {
+        rbody += chunk;
+        if (rbody.length > MAX_BODY_BYTES) { res.writeHead(413, { "Content-Type": "application/json", "Connection": "close" }); res.end(JSON.stringify({ error: "payload too large" })); return; }
+      }
+    }
+    let rp = {};
+    try { rp = JSON.parse(rbody || "{}"); } catch { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "bad json" })); return; }
+    const jres = (code, obj) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
+    try {
+      const room = activeRoom();
+
+      if (req.method === "POST" && url.pathname === "/room/create") {
+        if (room) return jres(409, { error: `a room already exists ("${room.name}") — one active room per hub for now (room delete first)` });
+        if (typeof rp.name !== "string" || !rp.name.trim()) return jres(400, { error: "room create requires a non-empty name" });
+        const id = `r_${crypto.randomBytes(4).toString("hex")}`;
+        const rec = {
+          id,
+          name: rp.name.trim(),
+          created_at: Date.now(),
+          expires_at: Number(rp.ttl_seconds) > 0 ? Date.now() + Number(rp.ttl_seconds) * 1000 : null,
+          owner: { node: FED.node, pubkey: (typeof rp.owner_pubkey === "string" && rp.owner_pubkey) || null },
+          host_participates: rp.host_only === true ? false : true,
+          open: rp.open === true,   // --open: credential-less join (no password)
+          password: null,
+          members: {
+            // The owner's entry is bookkeeping (role/roster) — the hub never
+            // authenticates to itself, so it carries no token.
+            [FED.node]: { token_hash: null, pubkey: (typeof rp.owner_pubkey === "string" && rp.owner_pubkey) || null, role: "owner", joined_at: Date.now(), invited_by: "creator" },
+          },
+          invites: {},
+        };
+        if (typeof rp.password === "string" && rp.password) {
+          const salt = crypto.randomBytes(16).toString("hex");
+          rec.password = { salt, hash: pwHash(rp.password, salt) };
+        }
+        let roomKeyHex = null;
+        if (rp.e2ee === true) {
+          // Random key (not password-derived — stronger, and rotatable later).
+          // The hub stores it raw in rooms.json: in 3b the owner IS a participant
+          // (0600 file on their own disk). Members receive it via the invite-link
+          // fragment, or password-wrapped (scrypt, separate salt) at /link/join.
+          roomKeyHex = crypto.randomBytes(32).toString("hex");
+          rec.e2ee = true;
+          rec.key = roomKeyHex;
+          if (typeof rp.password === "string" && rp.password) rec.wrapped_key = wrapRoomKey(roomKeyHex, rp.password);
+        }
+        ROOMS.rooms[id] = rec;
+        saveRooms();
+        console.log(`${ts()} 🚪 room "${rec.name}" created (${id}) — member-token auth now ACTIVE (legacy shared token retired)`);
+        return jres(200, { ok: true, room: { id, name: rec.name, owner: FED.node, expires_at: rec.expires_at, password_set: !!rec.password, open: !!rec.open, e2ee: !!rec.e2ee }, ...(roomKeyHex ? { room_key: roomKeyHex } : {}) });
+      }
+
+      // Everything below operates on the existing room.
+      if (!room) return jres(404, { error: "no room — create one: claude-bridge room create <name>" });
+
+      if (req.method === "POST" && url.pathname === "/room/invite") {
+        const code = crypto.randomBytes(16).toString("hex");
+        const iid = `i_${crypto.randomBytes(2).toString("hex")}`;
+        const ttl = rp.expires_in_seconds != null ? Number(rp.expires_in_seconds) : 7 * 24 * 3600;
+        room.invites[iid] = { code_hash: sha256hex(code), expires_at: Date.now() + ttl * 1000, max_uses: rp.one_time ? 1 : null, uses: 0, created_at: Date.now() };
+        saveRooms();
+        return jres(200, { ok: true, invite_code: code, invite_id: iid, expires_at: room.invites[iid].expires_at, max_uses: room.invites[iid].max_uses });
+      }
+
+      if (req.method === "GET" && url.pathname === "/room/info") {
+        const members = Object.entries(room.members).map(([node, m]) => ({
+          node,
+          role: m.role,
+          joined_at: m.joined_at,
+          online: node === FED.node || !!(spokes.get(node)?.res && !spokes.get(node).res.destroyed),
+          has_token: !!m.token_hash,
+        }));
+        const invites = Object.entries(room.invites || {}).map(([id, i]) => ({ id, expires_at: i.expires_at, max_uses: i.max_uses, uses: i.uses }));
+        return jres(200, { ok: true, room: { id: room.id, name: room.name, created_at: room.created_at, expires_at: room.expires_at, owner: room.owner.node, host_participates: room.host_participates !== false, password_set: !!room.password, open: !!room.open, e2ee: !!room.e2ee, members, invites } });
+      }
+
+      if (req.method === "POST" && url.pathname === "/room/kick") {
+        const node = sanitizeNode(rp.node || "");
+        if (!node || !room.members[node]) return jres(404, { error: `"${rp.node}" is not a member` });
+        if (node === room.owner.node) return jres(400, { error: "the owner is unkickable — use room delete to tear the room down" });
+        delete room.members[node];
+        saveRooms();
+        severSpoke(node, "kicked from room");
+        console.log(`${ts()} 🚪 "${node}" kicked from room "${room.name}"`);
+        return jres(200, { ok: true, kicked: node });
+      }
+
+      if (req.method === "POST" && url.pathname === "/room/rotate") {
+        const node = sanitizeNode(rp.node || "");
+        if (!node || !room.members[node]) return jres(404, { error: `"${rp.node}" is not a member` });
+        if (node === room.owner.node) return jres(400, { error: "the owner holds no token" });
+        const memberToken = crypto.randomBytes(32).toString("hex");
+        room.members[node].token_hash = sha256hex(memberToken);
+        saveRooms();
+        severSpoke(node, "token rotated — re-link with the new token");
+        return jres(200, { ok: true, node, member_token: memberToken });
+      }
+
+      if (req.method === "POST" && url.pathname === "/room/rotate-password") {
+        if (typeof rp.password !== "string" || !rp.password) return jres(400, { error: "requires a new password" });
+        const salt = crypto.randomBytes(16).toString("hex");
+        room.password = { salt, hash: pwHash(rp.password, salt) };
+        saveRooms();
+        return jres(200, { ok: true });
+      }
+
+      if (req.method === "POST" && url.pathname === "/room/delete") {
+        if (rp.confirm !== room.name) return jres(400, { error: `confirm by passing the room name: {"confirm":"${room.name}"}` });
+        for (const node of Object.keys(room.members)) {
+          if (node !== FED.node) severSpoke(node, "room deleted");
+        }
+        delete ROOMS.rooms[room.id];
+        saveRooms();
+        console.log(`${ts()} 🚪 room "${room.name}" deleted — every member token is dead; legacy shared-token mode resumes`);
+        return jres(200, { ok: true, deleted: room.name });
+      }
+
+      if (req.method === "POST" && url.pathname === "/room/owner-node") {
+        // Re-key the OWNER's membership when this machine's node id changed
+        // (the `node` command triggers this) so the owner stays the live, correct
+        // member instead of stranding the room under the old name.
+        const oldOwner = room.owner.node;
+        if (oldOwner === FED.node) return jres(200, { ok: true, unchanged: true });
+        const entry = room.members[oldOwner];
+        if (entry) { delete room.members[oldOwner]; room.members[FED.node] = entry; }
+        else room.members[FED.node] = { token_hash: null, pubkey: null, role: "owner", joined_at: Date.now(), invited_by: "creator" };
+        room.owner.node = FED.node;
+        saveRooms();
+        console.log(`${ts()} 🚪 room "${room.name}" owner re-keyed "${oldOwner}" → "${FED.node}"`);
+        return jres(200, { ok: true, owner: FED.node, was: oldOwner });
+      }
+
+      return jres(404, { error: "unknown room endpoint" });
+    } catch (e) {
+      console.error(`${ts()} ✗ /room handler threw: ${e.message}`);
+      return jres(500, { error: e.message });
+    }
   }
 
   // ── GET /health ───────────────────────────────────────────────────────
@@ -1673,9 +2232,9 @@ server.on("error", (err) => {
 server.listen(PORT, "127.0.0.1", () => {
   writePid();
   // Load federation config from disk and bring up the link if we're a hub/spoke.
-  try { loadFedConfig(); applyFedConfig(); } catch (e) { console.error(`${ts()} ✗ fed config load failed: ${e.message}`); }
+  try { loadFedConfig(); loadRooms(); reconcileOwner(); applyFedConfig(); } catch (e) { console.error(`${ts()} ✗ fed config load failed: ${e.message}`); }
   console.log(`\n${"═".repeat(42)}`);
-  console.log(`  claude-bridge v2.8.0`);
+  console.log(`  claude-bridge v2.10.0`);
   console.log(`  PID:     ${process.pid}`);
   console.log(`  SSE:     http://127.0.0.1:${PORT}/sse`);
   console.log(`  Health:  http://127.0.0.1:${PORT}/health`);

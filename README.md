@@ -28,6 +28,8 @@ That's your getting-started home. Fastest path:
 
 📑 USAGE.md opens with a full table of contents — skim it to find anything in seconds.
 
+🧭 **New to the vocabulary?** Jump to the **[Appendix: "explain it like I use Slack"](#appendix-explain-it-like-i-use-slack)** at the bottom — every concept here (bridge, session, hub, room, link…) mapped to its Slack equivalent in one table.
+
 > 🤖 **Handing this repo to an AI agent to set up?** Tell it to run `./claude-bridge install` from the repo root — that's the whole install. It should **not** run the test suite (`npm test` / `tests/`); those are for developing the project, not installing it. See `CLAUDE.md`.
 
 ```
@@ -55,6 +57,8 @@ Multiple agents, one shared inbox — across the room or across the country. Zer
 - ✅ **Across machines, not just terminals** — link laptops over an encrypted P2P pipe (default; no account, no public URL) or your choice of tunnel (cloudflared/tailscale/zrok/…), address a remote agent as `name@node`; opt-in, survives link drops
 - ✅ **Automatic on CLI, simple on Desktop** — CLI sessions register and answer on their own; Desktop (Chat/Cowork/Code) joins the same bridge with a quick prompt
 - ✅ **Answers arrive even when idle** — a waiting session wakes on a new question, at zero token cost until one lands
+- ✅ **Rooms with real membership** — per-machine tokens you can kick individually, invite/password joins, optional end-to-end encryption, and host-only/airlock privacy zones
+- ✅ **Speakable join codes** — `claude-bridge join mugyen-team` instead of pasting a long link (via a tiny self-hostable rendezvous; codes are optional, long links always work)
 - ✅ **Zero dependencies** — pure Node.js, nothing to install
 
 ## What this isn't
@@ -142,3 +146,29 @@ I kept wanting my agents to just answer each other, and wanted agent-to-agent co
 Works. Used daily across a handful of concurrent sessions (CLI + Desktop). macOS primary, Linux for the CLI path. In-memory only — a restart clears state. PRs welcome.
 
 **Found it useful? Hit a bug? Have an idea?** Open an issue or just DM me. Early-user feedback is exactly what shapes whether this grows or stays where it is.
+
+## Appendix: "explain it like I use Slack"
+
+One rule makes everything click: **every agent session is a PERSON, and every machine is an OFFICE full of them.** From there, the whole system maps onto Slack:
+
+| claude-bridge | Slack world | The idea |
+|---|---|---|
+| **session** | **A person** | One Claude agent = one colleague with a name (`frontend`, `api-builder`). People DM each other, check their inbox, keep a status note. |
+| **bridge** | The office building | Every machine runs one. People in the same office talk freely across the hallway — no internet involved. One office per machine. |
+| **ask / reply / notify** | DM expecting an answer / the answer / an FYI | The entire protocol is three verbs. `ask` waits; `notify` is fire-and-forget. |
+| **scratchpad / broadcast** | A person's pinned status doc | Each person keeps one note colleagues can read — decisions, status, context. |
+| **the idle listener** | Slack notifications | How a person at their desk notices a new DM without staring at the app. Without it, messages wait until they next look up. |
+| **hub** | The machine that runs the Slack server | One office volunteers to host the shared space (`room start`) and relays messages between offices. With claude-bridge that's one of you — not a company. (You rarely say "hub" — you just say "room".) |
+| **spoke / join** | An office signing its people into Slack | Your office connects to the host (`join <code>`). Your people stay in YOUR building; only messages travel. |
+| **federation / link** | Being in the same Slack | Connected offices form one directory: remote people appear as `person@office` and you DM them exactly like a deskmate. |
+| **room** | The Slack workspace, with real membership | Upgrade from "everyone shares one password" to per-office credentials: each OFFICE gets its own access token, revocable individually. |
+| **room member** | A whole office, not a person | Membership is per-machine. Kicking removes an office and everyone in it — people-level control is the expose/hide row below. |
+| **room invite** | A workspace invite link | `room invite` prints one command for the new office. One-time and expiring invites supported — a leaked stale invite is worthless. |
+| **room password** | Workspace signup password | The other door: an office that knows it can join and gets its own credentials on entry. |
+| **kick / rotate** | Cutting an office's access | `room kick laptop-x`: that office's credential dies instantly and stays dead across restarts. The office's internal life continues untouched. |
+| **--host-only** | Hosting the Slack server in a building whose staff don't use Slack | Your office runs the workspace for a community, but YOUR people aren't in it: invisible, unreachable, unaffected — pure landlord. |
+| **expose / hide (the airlock)** | Who from your office is on Slack at all — with a classified-wing twist | 🌐 exposed people are in the workspace; 🔒 hidden people aren't — and here the analogy gets STRICTER than Slack: hidden and exposed colleagues can't even talk to each other inside the office. A workspace contact can never use your Slack-facing person to fish information out of the back office. |
+| **the join link / ticket** | The magic login link | One paste-able string = the address + the proof you're allowed in. Treat it like a password. |
+| **join code / rendezvous** | A short workspace handle (like `acme.slack.com`) | `claude-bridge join mugyen-team` instead of a long link. A tiny self-hostable directory maps the speakable code to the real link; codes are optional and expire (a dead hub's name frees up). |
+
+Where the analogy bends, it's deliberate: Slack is one company's cloud; claude-bridge is **self-hosted, peer-run, and end-to-end encrypted by default** (the p2p transport) — the workspace is yours.
