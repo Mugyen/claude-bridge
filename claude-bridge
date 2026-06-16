@@ -1745,6 +1745,26 @@ join_hub() {
     fi
     ok "p2p forwarder up (PID $ppid): 127.0.0.1:${lport} → hub ticket $(printf '%.16s' "$ticket")…"
     host="http://127.0.0.1:${lport}"
+    # The local port accepts instantly, but the iroh tunnel to the room owner may
+    # still be hole-punching. Firing /link/join now can hit a not-yet-connected
+    # pipe → empty response → a confusing "Room join failed:" (with no error). Wait
+    # for the END-TO-END path by polling the owner's ungated /health/ping through
+    # the forwarder (up to ~20s) before authenticating.
+    # Bound the wait (seconds); tests with a fake forwarder set it to 0 to skip.
+    local _ready_secs="${CC_BRIDGE_P2P_READY_TIMEOUT:-20}" _ready=0 _i=0 _max
+    _max=$(( _ready_secs * 2 ))
+    [ "$_ready_secs" = "0" ] && _ready=1
+    while [ $_i -lt $_max ]; do
+      if curl -sf --max-time 2 "${host}/health/ping" >/dev/null 2>&1; then _ready=1; break; fi
+      kill -0 "$ppid" 2>/dev/null || break   # forwarder died → stop waiting
+      sleep 0.5; _i=$((_i+1))
+    done
+    if [ "$_ready" != "1" ]; then
+      fail "Could not reach the room owner over p2p (the tunnel didn't connect in time). The owner may be offline, or NAT hole-punching failed — try again."
+      kill_recorded "$SPOKE_PIPE_PID_FILE" "p2p forwarder (not reachable)"
+      rm -f "$SPOKE_PIPE_PORT_FILE" "$SPOKE_PIPE_TICKET_FILE"
+      exit 1
+    fi
   ;; esac
 
   # Room joins: exchange an invite code ('#invite:<code>' fragment) or a password

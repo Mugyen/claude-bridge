@@ -21,6 +21,7 @@ export CC_BRIDGE_SPOKE_PIPE_PID="$WORK/pipe.pid"
 export CC_BRIDGE_SPOKE_PIPE_PORT="$WORK/pipe.port"
 export CC_BRIDGE_SPOKE_PIPE_TICKET="$WORK/pipe.ticket"
 export CC_BRIDGE_NO_AUTOINSTALL=1
+export CC_BRIDGE_P2P_READY_TIMEOUT=0   # fake forwarder can't answer /health/ping — skip the readiness poll
 export CC_BRIDGE_FED_PORT=7498
 export CC_BRIDGE_ROOMS_FILE="$WORK/rooms.json"
 export CC_BRIDGE_ROOM_KEY_FILE="$WORK/room.key"
