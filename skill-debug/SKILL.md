@@ -69,7 +69,7 @@ ls -l "$(command -v claude-bridge)"      # resolve the symlink → real file
 # REPO_DIR = the dir of the resolved target. Read EVERY source file there:
 #   bridge-server.mjs, claude-bridge, hooks/*.sh, bridge-stdio.mjs
 ```
-Read them in full. Also read `DEVELOPER.md` in that repo — its **"Hard-learned lessons #1–#31"** is a catalog of every known pitfall; treat it as your suspect list. If the CLI isn't on PATH, fall back to the repo the user points you at, or `git clone https://github.com/vijay2411/claude-bridge` into `/tmp` for reference (read-only).
+Read them in full. Also read `DEVELOPER.md` in that repo — its **"Hard-learned lessons #1–#31"** is a catalog of every known pitfall; treat it as your suspect list. If the CLI isn't on PATH, fall back to the repo the user points you at, or `git clone https://github.com/Mugyen/claude-bridge` into `/tmp` for reference (read-only).
 
 ## Step 2 — Collect data points (READ-ONLY allow-list)
 
@@ -132,8 +132,8 @@ claude-bridge <version> · role=<role> · <macOS/Linux> · node <ver>
 
 ## Step 6 — Deliver (always confirm first)
 
-1. Check repo access: `gh auth status` and `gh repo view vijay2411/claude-bridge` (read-only).
-2. **If gh has access:** show the issue file, then ask *"Post this to vijay2411/claude-bridge?"* On yes: `gh issue create -R vijay2411/claude-bridge --title "<title>" -F /tmp/claude-bridge-issue-<ts>.md`.
+1. Check repo access: `gh auth status` and `gh repo view Mugyen/claude-bridge` (read-only).
+2. **If gh has access:** show the issue file, then ask *"Post this to Mugyen/claude-bridge?"* On yes: `gh issue create -R Mugyen/claude-bridge --title "<title>" -F /tmp/claude-bridge-issue-<ts>.md`.
 3. **If no gh access:** prepare an email to **vvijay1000@gmail.com** — print the full body and a prefilled link:
    `mailto:vvijay1000@gmail.com?subject=<url-encoded title>&body=<url-encoded report>` (note: long bodies may exceed mailto limits — also leave the saved `.md` so the user can attach/paste it). If a mail-capable tool is available, offer to send via it.
 4. **Never post or send without an explicit "yes."** Nothing leaves the machine silently.

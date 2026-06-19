@@ -45,7 +45,7 @@ export default {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, DELETE", "Access-Control-Allow-Headers": "Content-Type" } });
 
     if (url.pathname === "/" || url.pathname === "") {
-      return json(200, { service: "claude-bridge rendezvous", usage: "claude-bridge join <code>", docs: "https://github.com/vijay2411/claude-bridge" });
+      return json(200, { service: "claude-bridge rendezvous", usage: "claude-bridge join <code>", docs: "https://github.com/Mugyen/claude-bridge" });
     }
 
     const m = url.pathname.match(/^\/v1\/rooms(?:\/([a-z0-9-]+))?$/);

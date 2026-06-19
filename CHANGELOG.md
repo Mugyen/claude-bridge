@@ -328,7 +328,7 @@ heading when you tag the release and bump `package.json` + the banner in
 - Automated `claude-bridge` (CLI + Desktop), `--check`, `--uninstall`.
 - README, USAGE.md, BRIDGE.md.
 
-[Unreleased]: https://github.com/vijay2411/claude-bridge/compare/v2.2.0...HEAD
-[2.2.0]: https://github.com/vijay2411/claude-bridge/releases/tag/v2.2.0
-[2.1.0]: https://github.com/vijay2411/claude-bridge/releases/tag/v2.1.0
-[2.0.0]: https://github.com/vijay2411/claude-bridge/releases/tag/v2.0.0
+[Unreleased]: https://github.com/Mugyen/claude-bridge/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/Mugyen/claude-bridge/releases/tag/v2.2.0
+[2.1.0]: https://github.com/Mugyen/claude-bridge/releases/tag/v2.1.0
+[2.0.0]: https://github.com/Mugyen/claude-bridge/releases/tag/v2.0.0

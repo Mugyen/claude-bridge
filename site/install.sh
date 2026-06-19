@@ -2,14 +2,14 @@
 # claude-bridge bootstrap installer.
 #
 # One-line install:
-#   curl -fsSL https://vijay2411.github.io/claude-bridge/install.sh | bash
+#   curl -fsSL https://mugyen.github.io/claude-bridge/install.sh | bash
 #
 # Clones the repo to ~/.local/share/claude-bridge (override with
 # CLAUDE_BRIDGE_HOME), then runs the in-repo `claude-bridge install`.
 set -euo pipefail
 
 INSTALL_DIR="${CLAUDE_BRIDGE_HOME:-$HOME/.local/share/claude-bridge}"
-REPO_URL="https://github.com/vijay2411/claude-bridge.git"
+REPO_URL="https://github.com/Mugyen/claude-bridge.git"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 ok()   { echo -e "  ${GREEN}✓${NC} $1"; }

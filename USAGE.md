@@ -55,10 +55,10 @@ Pick one of these. They produce the same result — the bridge lands in `~/.loca
 
 ```bash
 # Option A — curl (no clone needed)
-curl -fsSL https://vijay2411.github.io/claude-bridge/claude-bridge | bash
+curl -fsSL https://raw.githubusercontent.com/Mugyen/claude-bridge/main/claude-bridge | bash
 
 # Option B — clone manually (preferred if you want to hack on it)
-git clone git@github.com:vijay2411/claude-bridge.git
+git clone git@github.com:Mugyen/claude-bridge.git
 cd claude-bridge
 ./claude-bridge
 ```
@@ -451,7 +451,7 @@ A NOTICE to a remote session that's offline queues on the room owner and deliver
 
 Tell your agent:
 
-> "Clone https://github.com/vijay2411/claude-bridge, make the hook scripts executable, add the 5 hooks (SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd) from the hooks/ directory to my ~/.claude/settings.json, run `claude mcp add --transport sse --scope user bridge http://localhost:7400/sse`, copy skill/SKILL.md to ~/.claude/skills/claude-bridge/SKILL.md, and start the server with `./claude-bridge --start`"
+> "Clone https://github.com/Mugyen/claude-bridge, make the hook scripts executable, add the 5 hooks (SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd) from the hooks/ directory to my ~/.claude/settings.json, run `claude mcp add --transport sse --scope user bridge http://localhost:7400/sse`, copy skill/SKILL.md to ~/.claude/skills/claude-bridge/SKILL.md, and start the server with `./claude-bridge --start`"
 
 Or do it yourself -- see the [hook configuration JSON](#hook-configuration-reference) below.
 

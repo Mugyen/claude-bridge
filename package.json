@@ -28,13 +28,13 @@
   ],
   "author": "Vedant Vijay <vedant@mugyen.com>",
   "license": "MIT",
-  "homepage": "https://vijay2411.github.io/claude-bridge/",
+  "homepage": "https://mugyen.github.io/claude-bridge/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vijay2411/claude-bridge.git"
+    "url": "git+https://github.com/Mugyen/claude-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/vijay2411/claude-bridge/issues"
+    "url": "https://github.com/Mugyen/claude-bridge/issues"
   },
   "engines": {
     "node": ">=18.0.0"
