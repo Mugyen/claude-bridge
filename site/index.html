@@ -4,32 +4,32 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 
-<title>claude-bridge — real-time Q&amp;A between Claude Code sessions</title>
+<title>claude-bridge — real-time Q&A between Claude Code sessions</title>
 <meta name="description" content="claude-bridge is an AI-to-AI message broker for Claude Code and Claude Desktop. Multiple Claude sessions register, ask each other questions, and exchange answers in real time over MCP." />
-<meta name="keywords" content="claude bridge, claude code, claude code multi-agent, MCP server, model context protocol, claude desktop MCP, multi-agent claude, claude session bridge, ai agent communication, claude code hooks" />
+<meta name="keywords" content="claude bridge, claude code, claude code multi-agent, MCP server, model context protocol, claude desktop MCP, multi-agent claude, claude session bridge, ai agent communication, ai coordination" />
 <meta name="author" content="Vedant Vijay" />
 <meta name="robots" content="index, follow, max-image-preview:large" />
 <meta name="theme-color" content="#0d0c0a" />
 <meta name="color-scheme" content="dark" />
 
-<link rel="canonical" href="https://vijay2411.github.io/claude-bridge/" />
+<link rel="canonical" href="https://mugyen.github.io/claude-bridge/" />
 
 <!-- Open Graph -->
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="claude-bridge" />
-<meta property="og:title" content="claude-bridge — real-time Q&amp;A between Claude Code sessions" />
+<meta property="og:title" content="claude-bridge — real-time Q&A between Claude Code sessions" />
 <meta property="og:description" content="An AI-to-AI message broker for Claude Code and Claude Desktop. Multiple Claude sessions ask each other questions and exchange answers in real time over MCP." />
-<meta property="og:url" content="https://vijay2411.github.io/claude-bridge/" />
-<meta property="og:image" content="https://vijay2411.github.io/claude-bridge/og-image.png" />
+<meta property="og:url" content="https://mugyen.github.io/claude-bridge/" />
+<meta property="og:image" content="https://mugyen.github.io/claude-bridge/og-image.png" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
 <meta property="og:image:alt" content="Five Claude agent nodes wired together on a dark warm-black canvas, illustrating real-time message passing between sessions." />
 
 <!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="claude-bridge — real-time Q&amp;A between Claude Code sessions" />
+<meta name="twitter:title" content="claude-bridge — real-time Q&A between Claude Code sessions" />
 <meta name="twitter:description" content="An AI-to-AI message broker for Claude Code and Claude Desktop. Sessions ask each other questions, get answers, keep working." />
-<meta name="twitter:image" content="https://vijay2411.github.io/claude-bridge/og-image.png" />
+<meta name="twitter:image" content="https://mugyen.github.io/claude-bridge/og-image.png" />
 <meta name="twitter:image:alt" content="Diagram of five Claude agent sessions exchanging messages along a bridge." />
 
 <!-- Icons / PWA -->
@@ -53,12 +53,12 @@
   "@type": "SoftwareApplication",
   "name": "claude-bridge",
   "alternateName": "cc-bridge",
-  "description": "A tiny AI-to-AI message broker that lets multiple Claude Code and Claude Desktop sessions register, ask each other questions, and exchange answers in real time over the Model Context Protocol (MCP).",
+  "description": "A tiny AI-to-AI message broker that lets multiple Claude Code and Claude Desktop sessions register, ask each other questions, and exchange answers in real time over the Model Context Protocol.",
   "applicationCategory": "DeveloperApplication",
   "applicationSubCategory": "AI Agent Coordination",
   "operatingSystem": "macOS, Linux",
-  "url": "https://vijay2411.github.io/claude-bridge/",
-  "codeRepository": "https://github.com/vijay2411/claude-bridge",
+  "url": "https://mugyen.github.io/claude-bridge/",
+  "codeRepository": "https://github.com/Mugyen/claude-bridge",
   "programmingLanguage": "JavaScript",
   "license": "https://opensource.org/licenses/MIT",
   "author": {
@@ -94,7 +94,7 @@
   <nav class="nav-links" aria-label="Primary">
     <a href="#how">how it works</a>
     <a href="#about">what is it</a>
-    <a href="https://github.com/vijay2411/claude-bridge" target="_blank" rel="noopener noreferrer" aria-label="claude-bridge on GitHub (opens in new tab)">github ↗</a>
+    <a href="https://github.com/Mugyen/claude-bridge" target="_blank" rel="noopener noreferrer" aria-label="claude-bridge on GitHub (opens in new tab)">github ↗</a>
   </nav>
 </header>
 
@@ -114,12 +114,12 @@
       </p>
 
       <div class="cta-row">
-        <a class="cta cta-primary" href="https://github.com/vijay2411/claude-bridge" target="_blank" rel="noopener noreferrer" aria-label="View claude-bridge on GitHub (opens in new tab)">
+        <a class="cta cta-primary" href="https://github.com/Mugyen/claude-bridge" target="_blank" rel="noopener noreferrer" aria-label="View claude-bridge on GitHub (opens in new tab)">
           <span>view on github</span>
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 8h9.2L8.6 4.4l1-1L14.2 8l-4.6 4.6-1-1L12.2 8H3z"/></svg>
         </a>
-        <button class="cta cta-copy" data-copy="curl -fsSL https://vijay2411.github.io/claude-bridge/install.sh | bash" type="button" aria-label="Copy install command to clipboard">
-          <span class="copy-text"><span class="prompt">$</span> curl &hellip; install.sh | bash</span>
+        <button class="cta cta-copy" data-copy="curl -fsSL https://raw.githubusercontent.com/Mugyen/claude-bridge/main/claude-bridge | bash" type="button" aria-label="Copy install command to clipboard">
+          <span class="copy-text"><span class="prompt">$</span> curl &hellip; claude-bridge | bash</span>
           <span class="copy-state" aria-live="polite"></span>
         </button>
       </div>
@@ -135,7 +135,7 @@
         aria-labelledby="graph-title graph-desc"
       >
         <title id="graph-title">Five Claude agents exchanging messages over claude-bridge</title>
-        <desc id="graph-desc">Animated diagram showing five Claude Code and Claude Desktop sessions — frontend, backend, research, database, and tests — wired together on a single message bridge. Question packets travel along the wires and reply packets return, illustrating real-time AI-to-AI communication over MCP.</desc>
+        <desc id="graph-desc">Animated diagram showing five Claude Code and Claude Desktop sessions — frontend, backend, research, database, and tests — wired together on a single message bridge.</desc>
         <defs>
           <!-- Hand-drawn wobble filter -->
           <filter id="pencil" x="-2%" y="-2%" width="104%" height="104%">
@@ -224,7 +224,7 @@
   <section class="about" id="about" aria-labelledby="about-title">
     <h2 id="about-title" class="visually-hidden">What is claude-bridge?</h2>
     <p class="about-copy">
-      <strong>claude-bridge</strong> is a local MCP server for multi-agent <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener noreferrer">Claude Code</a> and Claude Desktop workflows. Each Claude session registers on the bridge, then sessions can <code>ask</code> each other questions, <code>reply</code> with context, and share a scratchpad — turning isolated AI agents into a coordinated team that exchanges information over the Model Context Protocol.
+      <strong>claude-bridge</strong> is a local MCP server for multi-agent <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener noreferrer">Claude Code</a> and Claude Desktop. Ask, notify, broadcast, and scratchpad your way across real-time sessions — same machine or across the network. Zero dependencies. Open source. MIT.
     </p>
   </section>
 
